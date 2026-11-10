@@ -26,8 +26,9 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Rust Android targets
+      - name: Rust Android targets and host libraries
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-4-dev clang
           rustup toolchain install stable --profile minimal
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
@@ -52,7 +53,8 @@ jobs:
       - name: Package APK
         working-directory: spikes/m0-pos
         run: |
-          nsh --verbose package --target android 2>&1 | tail -80
+          set -o pipefail
+          nsh --verbose package --target android 2>&1 | tail -120
           find . -name '*.apk' -not -path './target/*' | head
 
       - name: Publish pre-release
