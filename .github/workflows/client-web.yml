@@ -42,7 +42,7 @@ jobs:
         working-directory: apps/client
         run: |
           set -o pipefail
-          nsh --verbose package --target web 2>&1 | tail -20
+          nsh --verbose package --target web 2>&1 | grep -vE '^\s+"' | tail -80
           ls -la .nsh/out
       - name: Screenshots in Chromium
         working-directory: apps/client
