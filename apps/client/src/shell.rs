@@ -11,6 +11,7 @@ use crate::screens::products::products;
 use crate::state::{AppState, toggle_appearance};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{icon_button, label, label_line, primary_button, size};
+use crate::ui::overlay::{modal, toast_layer};
 use crate::ui::palette::Tone;
 
 /// Width below which the phone layout is used.
@@ -92,6 +93,9 @@ pub fn shell(st: AppState) -> impl IntoElement {
             when(compact, move || phone(st, route).into_element())
                 .otherwise(move || desktop(st, route).into_element()),
         )
+        .child(dynamic(move || {
+            toast_layer(st, compact.get()).into_element()
+        }))
 }
 
 fn content(st: AppState, route: Signal<Route>, compact: bool) -> impl IntoElement {
@@ -457,7 +461,95 @@ fn phone(st: AppState, route: Signal<Route>) -> impl IntoElement {
         .child(bottom_nav(st, route))
 }
 
+/// Every section not in the bottom bar, as a sheet of large targets.
+fn more_sheet(st: AppState, route: Signal<Route>, open: Signal<bool>) -> impl IntoElement {
+    let mut grid = view().flex_row().flex_wrap().px_4().pb_4();
+    for r in [
+        Route::Products,
+        Route::Inventory,
+        Route::Purchases,
+        Route::Cash,
+        Route::Reports,
+        Route::Settings,
+    ] {
+        grid = grid.child(
+            view()
+                .w(relative(1.0 / 3.0))
+                .items_center()
+                .gap(px(8.0))
+                .py_4()
+                .rounded(px(12.0))
+                .active(|s| s.bg(Tone::Accent.color()))
+                .on_press(move || {
+                    route.set(r);
+                    open.set(false);
+                })
+                .child(
+                    view()
+                        .w(px(48.0))
+                        .h(px(48.0))
+                        .rounded(px(12.0))
+                        .items_center()
+                        .justify_center()
+                        .bg(Tone::Accent.color())
+                        .child(icon(r.icon(), 24.0, || Tone::Primary)),
+                )
+                .child(label(
+                    st.t(r.key()),
+                    size::BODY,
+                    FontWeight::MEDIUM,
+                    Tone::Ink,
+                )),
+        );
+    }
+    view()
+        .gap(px(8.0))
+        .child(view().px_6().pt_3().child(label(
+            st.t("nav.more"),
+            size::TITLE,
+            FontWeight::BOLD,
+            Tone::Ink,
+        )))
+        .child(grid)
+}
+
 fn bottom_nav(st: AppState, route: Signal<Route>) -> impl IntoElement {
+    let more_open = signal(false);
+    let in_more = computed(move || {
+        !matches!(
+            route.get(),
+            Route::Home | Route::Sell | Route::Sales | Route::Customers
+        )
+    });
+    let more = view()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .gap(px(4.0))
+        .h(px(60.0))
+        .on_press(move || more_open.set(true))
+        .child(dynamic(move || {
+            icon(Icon::More, 22.0, move || {
+                if in_more.get() {
+                    Tone::Primary
+                } else {
+                    Tone::Muted
+                }
+            })
+            .into_element()
+        }))
+        .child(
+            text(st.t("nav.more"))
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if in_more.get() {
+                        Tone::Primary.color()
+                    } else {
+                        Tone::Muted.color()
+                    }
+                }),
+        );
     let tab = move |r: Route| {
         let active = computed(move || route.get() == r);
         view()
@@ -525,6 +617,9 @@ fn bottom_nav(st: AppState, route: Signal<Route>) -> impl IntoElement {
                 .child(tab(Route::Sales))
                 .child(sell)
                 .child(tab(Route::Customers))
-                .child(tab(Route::Settings)),
+                .child(more),
         )
+        .child(modal(more_open, true, move || {
+            more_sheet(st, route, more_open).into_element()
+        }))
 }

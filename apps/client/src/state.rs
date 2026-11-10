@@ -7,6 +7,8 @@ use nsh_core::prelude::*;
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub lang: Signal<Lang>,
+    /// The confirmation shown at the bottom of the screen (`ui::overlay::show_toast`).
+    pub toast: Signal<Option<String>>,
 }
 
 impl AppState {
@@ -17,7 +19,10 @@ impl AppState {
             .next()
             .and_then(Lang::from_tag)
             .unwrap_or(Lang::Ar);
-        Self { lang: signal(lang) }
+        Self {
+            lang: signal(lang),
+            toast: signal(None),
+        }
     }
 
     pub fn lang(&self) -> Lang {

@@ -64,3 +64,16 @@ products.col.stock = Stock
 products.count = {count} produits
 products.add = Ajouter un produit
 products.search = Chercher par nom ou code
+
+form.required = Ce champ est obligatoire.
+form.cancel = Annuler
+form.save = Enregistrer
+products.form.name_hint = Exemple : Lait entier Soummam 1L
+products.form.price_hint = Exemple : 120,00 {currency}
+products.form.opening_stock = Stock initial
+products.form.price_negative = Le prix ne peut pas être négatif.
+products.form.price_zero = Saisissez un prix supérieur à zéro.
+products.form.price_decimals = Le prix accepte au plus deux décimales.
+products.form.price_invalid = Saisissez le prix en chiffres, par exemple 120 ou 120,50.
+products.form.stock_invalid = Saisissez un nombre entier positif, par exemple 0 ou 24.
+products.saved = « {name} » enregistré

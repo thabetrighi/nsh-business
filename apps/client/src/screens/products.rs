@@ -3,8 +3,6 @@
 //! SAMPLE DATA (2,000 generated products) until the catalog module (M5)
 //! serves real rows from SQLite. Prices are integer centimes.
 
-use std::rc::Rc;
-
 use nb_core::{Currency, Money, Quantity};
 use nb_i18n::Lang;
 use nsh_base::{
@@ -14,9 +12,11 @@ use nsh_base::{
 use nsh_core::element::input;
 use nsh_core::prelude::*;
 
+use super::product_form::product_form;
 use crate::state::AppState;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{label, primary_button, size};
+use crate::ui::overlay::{modal, show_toast};
 use crate::ui::palette::Tone;
 
 #[derive(Clone, PartialEq)]
@@ -31,7 +31,7 @@ pub struct SampleProduct {
     pub min_stock: i64,
 }
 
-const CATEGORIES: [(&str, &str); 6] = [
+pub const CATEGORIES: [(&str, &str); 6] = [
     ("ألبان", "Produits laitiers"),
     ("مخبوزات", "Boulangerie"),
     ("زيوت وسكر", "Huiles et sucre"),
@@ -39,7 +39,7 @@ const CATEGORIES: [(&str, &str); 6] = [
     ("منظفات", "Entretien"),
     ("خضر وفواكه", "Fruits et légumes"),
 ];
-const UNITS: [(&str, &str); 4] = [
+pub const UNITS: [(&str, &str); 4] = [
     ("قطعة", "pièce"),
     ("علبة", "boîte"),
     ("كغ", "kg"),
@@ -149,26 +149,28 @@ fn pick(lang: Lang, pair: (&'static str, &'static str)) -> &'static str {
 }
 
 pub fn products(st: AppState, compact: bool) -> impl IntoElement {
-    let all: Rc<Vec<SampleProduct>> = Rc::new(sample_catalog(2_000));
+    let all = signal(sample_catalog(2_000));
+    // NB_OPEN=add_product (development): open the form at start, for screenshots.
+    let adding = signal(std::env::var("NB_OPEN").as_deref() == Ok("add_product"));
     let query = signal(String::new());
     let sort = signal(None::<DataTableSort>);
 
     // Filter + sort the sample rows (the catalog module will do this in SQL).
     let rows = {
-        let all = all.clone();
         computed(move || {
             let lang = st.lang();
             let q = query.get().trim().to_lowercase();
-            let mut v: Vec<SampleProduct> = all
-                .iter()
-                .filter(|p| {
-                    q.is_empty()
-                        || p.sku.to_lowercase().contains(&q)
-                        || p.name_ar.contains(&q)
-                        || p.name_fr.to_lowercase().contains(&q)
-                })
-                .cloned()
-                .collect();
+            let mut v: Vec<SampleProduct> = all.with(|all| {
+                all.iter()
+                    .filter(|p| {
+                        q.is_empty()
+                            || p.sku.to_lowercase().contains(&q)
+                            || p.name_ar.contains(&q)
+                            || p.name_fr.to_lowercase().contains(&q)
+                    })
+                    .cloned()
+                    .collect()
+            });
             if let Some(s) = sort.get() {
                 let name = |p: &SampleProduct| {
                     if lang == Lang::Ar {
@@ -361,7 +363,7 @@ pub fn products(st: AppState, compact: bool) -> impl IntoElement {
                 .child(primary_button(
                     st.t("products.add"),
                     Some(Icon::Plus),
-                    || {},
+                    move || adding.set(true),
                 )),
         )
         // Search within the catalog.
@@ -402,4 +404,26 @@ pub fn products(st: AppState, compact: bool) -> impl IntoElement {
                 .flex_1()
                 .min_h(px(320.0)),
         )
+        .child(modal(adding, compact, move || {
+            let next_sku = format!("P-{:05}", 1000 + all.with(Vec::len));
+            product_form(
+                st,
+                next_sku,
+                move || adding.set(false),
+                move |p: SampleProduct| {
+                    let name = if st.lang() == Lang::Ar {
+                        p.name_ar.clone()
+                    } else {
+                        p.name_fr.clone()
+                    };
+                    all.update(|v| v.insert(0, p));
+                    adding.set(false);
+                    show_toast(
+                        st,
+                        nb_i18n::tr_args(st.lang(), "products.saved", &[("name", &name)]),
+                    );
+                },
+            )
+            .into_element()
+        }))
 }

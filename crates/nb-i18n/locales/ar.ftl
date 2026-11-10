@@ -64,3 +64,16 @@ products.col.stock = المخزون
 products.count = {count} منتج
 products.add = أضف منتجاً
 products.search = ابحث بالاسم أو الرمز
+
+form.required = هذا الحقل مطلوب.
+form.cancel = إلغاء
+form.save = احفظ
+products.form.name_hint = مثال: حليب كامل الدسم Soummam 1L
+products.form.price_hint = مثال: 120,00 {currency}
+products.form.opening_stock = المخزون الافتتاحي
+products.form.price_negative = السعر لا يكون سالباً.
+products.form.price_zero = أدخل سعراً أكبر من صفر.
+products.form.price_decimals = السعر يقبل رقمين بعد الفاصلة على الأكثر.
+products.form.price_invalid = اكتب السعر بالأرقام، مثل 120 أو 120,50.
+products.form.stock_invalid = اكتب عدداً صحيحاً موجباً، مثل 0 أو 24.
+products.saved = حُفظ «{name}»
