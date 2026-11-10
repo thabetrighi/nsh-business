@@ -5,15 +5,15 @@
 
 use nb_core::{CoreError, Currency, Money};
 use nb_i18n::{Lang, tr, tr_args};
-use nsh_core::element::KeyboardType;
+use nsh_core::element::{KeyboardType, View};
 use nsh_core::prelude::*;
 
 use super::products::{CATEGORIES, SampleProduct, UNITS};
 use crate::state::AppState;
 use crate::ui::form::{chips, field};
 use crate::ui::icon::Icon;
-use crate::ui::kit::{label, primary_button, quiet_button, rule, size};
-use crate::ui::palette::Tone;
+use crate::ui::kit::{Size, Variant, button};
+use crate::ui::overlay::dialog_frame;
 
 /// Form state; errors are message keys resolved in the current language.
 #[derive(Clone, Copy)]
@@ -123,9 +123,9 @@ fn validate(st: AppState, d: Draft) -> Option<SampleProduct> {
 pub fn product_form(
     st: AppState,
     next_sku: String,
-    on_cancel: impl Fn() + 'static,
+    on_cancel: impl Fn() + Clone + 'static,
     on_saved: impl Fn(SampleProduct) + 'static,
-) -> impl IntoElement {
+) -> View {
     let d = Draft::new(next_sku);
     let pick = move |pair: (&'static str, &'static str)| -> Box<dyn Fn() -> String> {
         Box::new(move || {
@@ -153,70 +153,76 @@ pub fn product_form(
     };
     let err = |s: Signal<String>| move || s.get();
 
-    scroll().max_h(px(720.0)).child(
-        view()
-            .p_6()
-            .gap(px(10.0))
-            .child(label(
-                st.t("products.add"),
-                size::TITLE,
-                FontWeight::BOLD,
-                Tone::Ink,
-            ))
-            .child(field(
-                st.t("products.col.name"),
-                d.name,
-                st.t("products.form.name_hint"),
-                err(d.name_err),
-                KeyboardType::Default,
-                "product-name",
-            ))
-            .child(
-                view()
-                    .flex_row()
-                    .gap(px(12.0))
-                    .child(view().flex_1().child(field(
-                        st.t("products.col.price"),
-                        d.price,
-                        move || {
-                            tr_args(
-                                st.lang(),
-                                "products.form.price_hint",
-                                &[("currency", &st.fmt().currency_symbol(Currency::DZD))],
-                            )
-                        },
-                        err(d.price_err),
-                        KeyboardType::Decimal,
-                        "product-price",
-                    )))
-                    .child(view().w(px(140.0)).child(field(
-                        st.t("products.form.opening_stock"),
-                        d.stock,
-                        || "0".to_owned(),
-                        err(d.stock_err),
-                        KeyboardType::Number,
-                        "product-stock",
-                    ))),
-            )
-            .child(field(
-                st.t("products.col.sku"),
-                d.sku,
-                String::new,
-                String::new,
-                KeyboardType::Default,
-                "product-sku",
-            ))
-            .child(chips(st.t("products.col.category"), categories, d.category))
-            .child(chips(st.t("products.col.unit"), units, d.unit))
-            .child(rule())
-            .child(
-                view()
-                    .flex_row()
-                    .gap(px(12.0))
-                    .justify_end()
-                    .child(quiet_button(st.t("form.cancel"), on_cancel))
-                    .child(primary_button(st.t("form.save"), Some(Icon::Synced), save)),
-            ),
+    let body = view()
+        .gap(px(16.0))
+        .child(field(
+            st.t("products.col.name"),
+            d.name,
+            st.t("products.form.name_hint"),
+            err(d.name_err),
+            KeyboardType::Default,
+            "product-name",
+        ))
+        .child(
+            view()
+                .flex_row()
+                .gap(px(12.0))
+                .child(view().flex_1().child(field(
+                    st.t("products.col.price"),
+                    d.price,
+                    move || {
+                        tr_args(
+                            st.lang(),
+                            "products.form.price_hint",
+                            &[("currency", &st.fmt().currency_symbol(Currency::DZD))],
+                        )
+                    },
+                    err(d.price_err),
+                    KeyboardType::Decimal,
+                    "product-price",
+                )))
+                .child(view().w(px(140.0)).child(field(
+                    st.t("products.form.opening_stock"),
+                    d.stock,
+                    || "0".to_owned(),
+                    err(d.stock_err),
+                    KeyboardType::Number,
+                    "product-stock",
+                ))),
+        )
+        .child(field(
+            st.t("products.col.sku"),
+            d.sku,
+            String::new,
+            String::new,
+            KeyboardType::Default,
+            "product-sku",
+        ))
+        .child(chips(st.t("products.col.category"), categories, d.category))
+        .child(chips(st.t("products.col.unit"), units, d.unit));
+    let cancel = on_cancel.clone();
+    let footer = view()
+        .child(button(
+            Variant::Secondary,
+            Size::Md,
+            None,
+            st.t("form.cancel"),
+            cancel,
+        ))
+        .child(button(
+            Variant::Primary,
+            Size::Md,
+            Some(Icon::Check),
+            st.t("form.save"),
+            save,
+        ));
+    dialog_frame(
+        st,
+        st.t("products.add"),
+        st.t("products.form.description"),
+        body,
+        footer,
+        on_cancel,
     )
 }
 

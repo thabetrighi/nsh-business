@@ -9,14 +9,14 @@ use nsh_core::element::SharedString;
 use nsh_core::prelude::*;
 
 use crate::shell::Route;
-use crate::state::{AppState, Intent, toggle_appearance};
+use crate::state::{AppState, Intent};
 use crate::ui::overlay::modal;
 
 fn all_langs(key: &str) -> Vec<String> {
     Lang::ALL.iter().map(|&l| tr(l, key).into_owned()).collect()
 }
 
-const SECTIONS: [(Route, &str, &[&str]); 9] = [
+const SECTIONS: [(Route, &str, &[&str]); 10] = [
     (Route::Home, "home", &["dashboard", "accueil", "لوحة"]),
     (Route::Sales, "sales", &["factures", "invoices", "فواتير"]),
     (
@@ -41,7 +41,16 @@ const SECTIONS: [(Route, &str, &[&str]); 9] = [
     ),
     (Route::Cash, "cash", &["caisse", "خزينة"]),
     (Route::Reports, "reports", &["statistiques", "إحصائيات"]),
-    (Route::Settings, "settings", &["préférences", "تفضيلات"]),
+    (
+        Route::Settings,
+        "settings",
+        &["préférences", "تفضيلات", "langue", "اللغة", "thème"],
+    ),
+    (
+        Route::Design,
+        "design",
+        &["composants", "components", "مكونات"],
+    ),
 ];
 
 fn items(lang: Lang) -> Vec<CommandItem> {
@@ -84,14 +93,15 @@ fn items(lang: Lang) -> Vec<CommandItem> {
     v
 }
 
-fn run(st: AppState, route: Signal<Route>, id: &str) {
+fn run(st: AppState, id: &str) {
+    let route = st.route;
     match id {
         "act:sell" => route.set(Route::Sell),
         "act:add_product" => {
             route.set(Route::Products);
             st.intent.set(Some(Intent::AddProduct));
         }
-        "act:theme" => toggle_appearance(),
+        "act:theme" => st.toggle_appearance(),
         _ => {
             if let Some(code) = id.strip_prefix("lang:") {
                 if let Some(l) = Lang::from_tag(code) {
@@ -107,7 +117,8 @@ fn run(st: AppState, route: Signal<Route>, id: &str) {
 }
 
 /// The palette and its shortcut. Placed once in the shell.
-pub fn command_palette(st: AppState, route: Signal<Route>, compact: bool) -> impl IntoElement {
+pub fn command_palette(st: AppState, compact: bool) -> impl IntoElement {
+    let route = st.route;
     // Ctrl+K (Cmd+K on Apple platforms) toggles it; desktop platforms only fire keys.
     on_key("mod+k", move |_| st.palette.update(|o| *o = !*o));
     on_key("mod+n", move |_| route.set(Route::Sell));
@@ -120,14 +131,14 @@ pub fn command_palette(st: AppState, route: Signal<Route>, compact: bool) -> imp
             .auto_focus(true)
             .on_select(move |id: &SharedString| {
                 open.set(false);
-                run(st, route, id);
+                run(st, id);
             })
             .on_cancel(move || open.set(false))
-            .search_bar_class("flex-row items-center h-14 px-4 border-b border-border")
-            .search_class("flex-1 text-base text-foreground")
-            .list_class("h-[380px] p-2")
-            .group_class("px-3 pt-3 pb-1 text-xs font-semibold text-muted-foreground")
-            .item_class("flex-row items-center h-11 px-3 rounded-lg text-sm text-foreground focus:bg-accent focus:text-accent-foreground")
+            .search_bar_class("flex-row items-center h-12 px-4 border-b border-border")
+            .search_class("flex-1 text-sm text-foreground")
+            .list_class("h-[360px] p-1.5")
+            .group_class("px-2.5 pt-3 pb-1 text-xs font-semibold text-muted-foreground")
+            .item_class("flex-row items-center h-9 px-2.5 rounded-md text-sm text-foreground focus:bg-accent focus:text-accent-foreground")
             .into_element()
     })
 }

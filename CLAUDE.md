@@ -31,13 +31,15 @@
 - **المهام والمؤقتات في NSH تنتهي مع مالكها:** مؤقت يُنشأ داخل شاشة أو نافذة يُلغى عند إزالتها. ما يجب أن يستمر يُنشأ من طبقة دائمة (الجذر).
 - **لا يُحكم على ترتيب نص ثنائي الاتجاه من لقطة بالعين:** يُقارن بسطر مرجعي يسار-يمين.
 - **جدول `nsh-base` يسار-يمين فقط:** في العربية تُعكس الأعمدة يدوياً ويُثبَّت الجدول LTR (انظر `screens/products.rs`).
+- **الخطوط على سطح المكتب:** `Root` الذي يُشغَّل مباشرة لا يسجّل خطوط `assets!()`؛ تُمرَّر بـ `Root::font` في `main.rs` (وإلا يُستعمل خط النظام بصمت). Cairo SemiBold مولّد عند wght 650 لأن 600 في Cairo يكاد لا يختلف عن العادي.
+- **إعدادات المظهر تعيد بناء الشجرة:** الحالة الدائمة (المسار، البيانات) تبقى في `AppState` خارج الجذر المعاد بناؤه.
 - **أرقام داخل نص عربي:** الإشارة داخل منطقة العزل مع الرقم (`Format::money_signed`)؛ فاصل الآلاف U+00A0 (الخط لا يحوي U+202F).
 
 ## الأدوات والأوامر
 - NSH: الإصدار المثبت `0.4.0` (لا ترقية دون ADR).
 - تثبيت NSH في بيئة Claude: nsh.dev محجوب من الشل؛ نزّل `https://github.com/longbridge/nsh/releases/download/v0.4.0/nsh-linux-x86_64.tar.gz` وفكّه في `~/.nsh` ثم اربط `~/.nsh/nsh/bin/nsh`.
 - متطلبات Linux: `apt-get install libgtk-4-dev clang xvfb imagemagick` (GTK ≥ 4.14).
-- متغيرات تطوير للتطبيق: `NB_LANG=ar|fr|en`، `NB_APPEARANCE=light|dark`، `NB_WINDOW=1360x860`، `NB_ROUTE=products`، `NB_OPEN=add_product|palette`.
+- متغيرات تطوير للتطبيق: `NB_LANG=ar|fr|en`، `NB_APPEARANCE=light|dark|system`، `NB_WINDOW=1360x860`، `NB_ROUTE=products|settings|design|customers`، `NB_OPEN=add_product|palette`، `NB_ACCENT=blurple|ocean|emerald|teal|amber|rose|slate`، `NB_FONT=cairo|tajawal|almarai|readex|plex`، `NB_TEXT=s|m|l|xl`، `NB_DENSITY=compact|comfortable|spacious`. الإعدادات تُحفظ في `~/.local/share/default/storage.json` (احذفه بين اللقطات).
 - تشغيل واجهة دون شاشة: `Xvfb :99 &` ثم `DISPLAY=:99 GDK_BACKEND=x11 <binary>` ولقطة بـ `import -window root`.
 - اختبارات الواجهة: `nsh test <app-dir>`.
 - الويب يحتاج `rustup target add wasm32-unknown-unknown` + `wasm-bindgen-cli`؛ غير متاح في بيئة Claude (انظر NEEDS_OWNER) — يُبنى عبر GitHub Actions.

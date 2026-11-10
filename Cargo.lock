@@ -1726,6 +1726,7 @@ name = "nb-client"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "log",
  "nb-core",
  "nb-i18n",
  "nsh-base",

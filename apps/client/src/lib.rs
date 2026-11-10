@@ -15,9 +15,6 @@ mod shell;
 mod state;
 mod ui;
 
-/// UI family bundled in `assets/fonts` (IBM Plex Sans Arabic, OFL).
-const FONT_FAMILY: &str = "IBM Plex Sans Arabic";
-
 #[native_module("nb-client/native")]
 fn native(registry: &mut Registry) {
     registry.assets(assets!());
@@ -28,24 +25,63 @@ fn native(registry: &mut Registry) {
 #[component]
 pub fn App() -> impl IntoElement {
     let st = state::AppState::new();
-    // Development overrides, used for screenshots: NB_LANG=ar|fr|en, NB_APPEARANCE=light|dark.
-    if let Some(lang) = std::env::var("NB_LANG")
-        .ok()
-        .as_deref()
-        .and_then(nb_i18n::Lang::from_tag)
-    {
+    // Development overrides, used for screenshots: NB_LANG=ar|fr|en,
+    // NB_APPEARANCE=light|dark, NB_ROUTE=…, NB_OPEN=palette|add_product,
+    // NB_ACCENT=…, NB_FONT=…, NB_TEXT=…, NB_DENSITY=….
+    let env = |k: &str| std::env::var(k).ok();
+    if let Some(lang) = env("NB_LANG").as_deref().and_then(nb_i18n::Lang::from_tag) {
         st.lang.set(lang);
     }
-    if std::env::var("NB_OPEN").as_deref() == Ok("palette") {
+    if let Some(mode) = env("NB_APPEARANCE")
+        .as_deref()
+        .and_then(state::ThemeMode::from_code)
+    {
+        st.prefs.theme.set(mode);
+    }
+    if let Some(a) = env("NB_ACCENT")
+        .as_deref()
+        .and_then(ui::tokens::Accent::from_code)
+    {
+        st.prefs.accent.set(a);
+    }
+    if let Some(f) = env("NB_FONT")
+        .as_deref()
+        .and_then(ui::tokens::UiFont::from_code)
+    {
+        st.prefs.font.set(f);
+    }
+    if let Some(t) = env("NB_TEXT")
+        .as_deref()
+        .and_then(ui::tokens::TextSize::from_code)
+    {
+        st.prefs.text.set(t);
+    }
+    if let Some(d) = env("NB_DENSITY")
+        .as_deref()
+        .and_then(ui::tokens::Density::from_code)
+    {
+        st.prefs.density.set(d);
+    }
+    if let Some(r) = shell::Route::from_env() {
+        st.route.set(r);
+    }
+    if env("NB_OPEN").as_deref() == Some("palette") {
         st.palette.set(true);
     }
-    match std::env::var("NB_APPEARANCE").as_deref() {
-        Ok("dark") => set_color_scheme(Appearance::Dark),
-        Ok("light") => set_color_scheme(Appearance::Light),
-        _ => {}
-    }
-    view()
-        .flex_1()
-        .font_family(FONT_FAMILY)
-        .child(shell::shell(st))
+    st.persist();
+
+    // The look (accent, font, sizes, density, corners) is read by every
+    // component as plain values: a change installs the new look and rebuilds
+    // the tree. Navigation and data live in `st`, outside, and stay.
+    let look = computed(move || st.prefs.look());
+    view().flex_1().child(dynamic(move || {
+        let l = look.get();
+        ui::tokens::install(l);
+        ui::theme::apply(l);
+        view()
+            .flex_1()
+            .font_family(l.font.family())
+            .child(shell::shell(st))
+            .into_element()
+    }))
 }

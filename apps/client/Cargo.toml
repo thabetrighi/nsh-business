@@ -13,6 +13,7 @@ nb-i18n.workspace = true
 nsh-core = "=0.4.0"
 nsh-base = "=0.4.0"
 env_logger = "0.11"
+log = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nsh-platform-linux = { version = "=0.4.0", default-features = false }
