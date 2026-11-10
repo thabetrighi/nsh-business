@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/nb-core", "crates/nb-i18n", "apps/client"]
+members = ["crates/nb-core", "crates/nb-i18n", "crates/nb-domain", "crates/nb-store", "apps/client"]
 exclude = ["spikes"]
 
 [workspace.package]
@@ -13,6 +13,12 @@ license = "LicenseRef-Proprietary"
 [workspace.dependencies]
 nb-core = { path = "crates/nb-core" }
 nb-i18n = { path = "crates/nb-i18n" }
+nb-domain = { path = "crates/nb-domain" }
+nb-store = { path = "crates/nb-store" }
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
 uuid = { version = "1", features = ["v7"] }
 thiserror = "2"

@@ -36,6 +36,19 @@ macro_rules! typed_id {
             }
         }
 
+        impl $crate::serde::Serialize for $name {
+            fn serialize<S: $crate::serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.collect_str(&self.0)
+            }
+        }
+
+        impl<'de> $crate::serde::Deserialize<'de> for $name {
+            fn deserialize<D: $crate::serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let s = <::std::string::String as $crate::serde::Deserialize>::deserialize(d)?;
+                s.parse().map_err(<D::Error as $crate::serde::de::Error>::custom)
+            }
+        }
+
         impl ::std::str::FromStr for $name {
             type Err = $crate::CoreError;
             fn from_str(s: &str) -> Result<Self, Self::Err> {

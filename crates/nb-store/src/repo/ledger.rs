@@ -1,0 +1,162 @@
+//! Chart of accounts and journal (append-only once posted).
+
+use nb_core::{Currency, Money, OrganizationId};
+use nb_domain::EntryId;
+use nb_domain::ledger::{Entry, Line};
+use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
+
+use crate::uow::Writer;
+use crate::{Error, Result};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Account {
+    pub code: String,
+    pub name: String,
+    pub parent_code: Option<String>,
+    pub kind: String,
+}
+
+pub fn insert_account(w: &Writer<'_>, org: OrganizationId, a: &Account) -> Result<()> {
+    w.tx().execute(
+        "INSERT INTO accounts (org_id, code, name, parent_code, kind) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![org.to_string(), a.code, a.name, a.parent_code, a.kind],
+    )?;
+    Ok(())
+}
+
+pub fn account_exists(conn: &Connection, org: OrganizationId, code: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM accounts WHERE org_id = ?1 AND code = ?2",
+        params![org.to_string(), code],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// What identifies an entry besides its lines.
+#[derive(Debug, Clone, Copy)]
+pub struct Header<'a> {
+    pub number: &'a str,
+    /// `YYYY-MM-DD`, the business date.
+    pub date: &'a str,
+    pub memo: &'a str,
+    /// What produced it (`manual`, `stock.adjust`, `sale`…).
+    pub source: &'a str,
+    pub reverses: Option<EntryId>,
+}
+
+/// Posts a balanced entry (its accounts must exist).
+pub fn post(w: &Writer<'_>, org: OrganizationId, h: Header<'_>, entry: &Entry) -> Result<EntryId> {
+    let Header {
+        number,
+        date,
+        memo,
+        source,
+        reverses,
+    } = h;
+    for l in entry.lines() {
+        if !account_exists(w.tx(), org, &l.account)? {
+            return Err(Error::Rules(vec![nb_domain::RuleError::on(
+                "account",
+                "ledger.unknown_account",
+            )]));
+        }
+    }
+    let id = EntryId::new();
+    w.tx().execute(
+        "INSERT INTO journal_entries (id, org_id, number, date, memo, source, reverses_id, total_minor, operation_id, created_at, created_by, device_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            id.to_string(),
+            org.to_string(),
+            number,
+            date,
+            memo,
+            source,
+            reverses.map(|r| r.to_string()),
+            entry.total().minor(),
+            w.meta().id.to_string(),
+            w.now(),
+            w.actor_text(),
+            w.device().id.to_string()
+        ],
+    )?;
+    for (i, l) in entry.lines().iter().enumerate() {
+        w.tx().execute(
+            "INSERT INTO journal_lines (entry_id, position, account_code, debit_minor, credit_minor, memo) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id.to_string(), i64::try_from(i).unwrap_or(i64::MAX), l.account, l.debit.minor(), l.credit.minor(), l.memo],
+        )?;
+    }
+    Ok(id)
+}
+
+/// The lines of an entry, as a domain entry (to reverse it).
+pub fn load(conn: &Connection, id: EntryId, currency: Currency) -> Result<Entry> {
+    let mut s = conn.prepare(
+        "SELECT account_code, debit_minor, credit_minor, memo FROM journal_lines WHERE entry_id = ?1 ORDER BY position",
+    )?;
+    let lines = s
+        .query_map([id.to_string()], |r| {
+            Ok(Line {
+                account: r.get(0)?,
+                debit: Money::from_minor(r.get(1)?, currency),
+                credit: Money::from_minor(r.get(2)?, currency),
+                memo: r.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if lines.is_empty() {
+        return Err(Error::NotFound("journal entry"));
+    }
+    Ok(Entry::new(lines)?)
+}
+
+pub fn is_reversed(conn: &Connection, id: EntryId) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM journal_entries WHERE reverses_id = ?1",
+        [id.to_string()],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// One row of the trial balance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrialRow {
+    pub code: String,
+    pub name: String,
+    pub debit_minor: i64,
+    pub credit_minor: i64,
+}
+
+/// Totals per account (M7.8); the sum of debits equals the sum of credits.
+pub fn trial_balance(conn: &Connection, org: OrganizationId) -> Result<Vec<TrialRow>> {
+    let mut s = conn.prepare(
+        "SELECT a.code, a.name, COALESCE(SUM(l.debit_minor), 0), COALESCE(SUM(l.credit_minor), 0)
+         FROM accounts a
+         JOIN journal_lines l ON l.account_code = a.code
+         JOIN journal_entries e ON e.id = l.entry_id AND e.org_id = a.org_id
+         WHERE a.org_id = ?1
+         GROUP BY a.code, a.name ORDER BY a.code",
+    )?;
+    let rows = s.query_map([org.to_string()], |r| {
+        Ok(TrialRow {
+            code: r.get(0)?,
+            name: r.get(1)?,
+            debit_minor: r.get(2)?,
+            credit_minor: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// The invariant checked in CI (M7.9): every posted entry balances.
+pub fn unbalanced_entries(conn: &Connection) -> Result<Vec<String>> {
+    let mut s = conn.prepare(
+        "SELECT e.number FROM journal_entries e JOIN journal_lines l ON l.entry_id = e.id
+         GROUP BY e.id HAVING SUM(l.debit_minor) != SUM(l.credit_minor) OR SUM(l.debit_minor) != e.total_minor",
+    )?;
+    let rows = s.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}

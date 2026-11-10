@@ -16,7 +16,9 @@ pub use error::CoreError;
 pub use id::{DeviceId, OperationId, OrganizationId};
 pub use money::{Currency, Money};
 pub use quantity::{Quantity, Rate};
-pub use rust_decimal::Decimal;
+pub use rust_decimal::{Decimal, RoundingStrategy};
 
+#[doc(hidden)]
+pub use serde;
 #[doc(hidden)]
 pub use uuid;
