@@ -7,6 +7,7 @@
 //! - [`repo`]: reading and writing rows; [`usecases`]: the operations the
 //!   app runs (they call the rules of `nb-domain`).
 
+pub mod demo;
 pub mod error;
 pub mod migrate;
 pub mod repo;

@@ -72,7 +72,7 @@ products.form.price_negative = The price cannot be negative.
 products.form.price_zero = Enter a price above zero.
 products.form.price_decimals = The price takes at most two decimals.
 products.form.price_invalid = Type the price in digits, for example 120 or 120.50.
-products.form.stock_invalid = Type a whole number, for example 0 or 24.
+products.form.stock_invalid = Type a quantity, for example 0, 24 or 1.5 for kilograms.
 products.saved = Saved “{name}”
 
 command.placeholder = Type a section or an action…
@@ -348,3 +348,27 @@ settings.card.layout = Layout
 settings.card.identity = Identity
 settings.card.team = Team
 nav.sec.system = System
+
+# Data layer
+unit.pc = Piece
+unit.box = Box
+unit.kg = Kilogram
+unit.l = Litre
+products.form.sku_auto = Automatic (P-…)
+common.loading = Loading…
+error.internal = Something went wrong. Try again; if it persists, contact support.
+error.required = This field is required.
+error.invalid_value = This value is not valid.
+error.invalid_quantity = Type a quantity in digits, for example 2 or 1,5.
+error.product.sku_taken = Another product already has this code.
+error.product.sku_chars = Use letters, digits, - _ . / only, up to 32 characters.
+error.product.name_long = The name is too long (200 characters at most).
+error.product.price_negative = The price cannot be negative.
+error.product.min_above_price = The minimum price is above the selling price.
+error.barcode.taken = This barcode belongs to another product.
+error.barcode.check_digit = This barcode is not valid (check digit). Scan it again.
+error.units.too_precise = This unit does not take so many decimals.
+error.stock.insufficient = Not enough stock. Adjust the quantity or allow negative stock.
+error.stale_version = Someone changed this meanwhile. Reload it and try again.
+error.not_found = Not found; it may have been deleted.
+table.result_one = {count} result

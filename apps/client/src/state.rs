@@ -216,6 +216,14 @@ pub struct AppState {
     pub palette: Signal<bool>,
     /// A pending request for the screen being opened.
     pub intent: Signal<Option<Intent>>,
+    /// The local database of this app instance (set by [`AppState::connect`]).
+    pub db: Stored<Option<crate::db::Db>>,
+    /// The organization the local database works for, once it is open.
+    pub session: Signal<Option<crate::db::Session>>,
+    /// Why the database could not open, if it could not.
+    pub db_error: Signal<Option<String>>,
+    /// Bumped after every write, so lists load again.
+    pub data_rev: Signal<u64>,
 }
 
 impl AppState {
@@ -238,6 +246,10 @@ impl AppState {
             toast: signal(None),
             palette: signal(false),
             intent: signal(None),
+            db: nsh_core::prelude::stored(None),
+            session: signal(None),
+            db_error: signal(None),
+            data_rev: signal(0),
         };
         if st.biz.start_page.get_untracked() == 1 {
             st.route.set(Route::Sell);
@@ -268,6 +280,39 @@ impl AppState {
                 },
             )
         });
+    }
+
+    /// The local database (started by [`AppState::connect`] if needed).
+    pub fn db(&self) -> crate::db::Db {
+        if let Some(db) = self.db.get() {
+            return db;
+        }
+        let db = crate::db::Db::start(match self.lang.get_untracked() {
+            Lang::Ar => nb_store::demo::DemoLang::Ar,
+            _ => nb_store::demo::DemoLang::Fr,
+        });
+        self.db.replace(Some(db.clone()));
+        db
+    }
+
+    /// Starts the database and records its session when ready.
+    pub fn connect(self) {
+        let db = self.db();
+        let task = spawn(async move {
+            match db.session().await {
+                Ok(s) => self.session.set(Some(s)),
+                Err(e) => {
+                    log::error!("database: {}", e.message);
+                    self.db_error.set(Some(e.message));
+                }
+            }
+        });
+        drop(task); // runs to completion: tasks end with their owner, not their handle
+    }
+
+    /// Lists depending on data load again.
+    pub fn changed(self) {
+        self.data_rev.update(|n| *n += 1);
     }
 
     pub fn lang(&self) -> Lang {

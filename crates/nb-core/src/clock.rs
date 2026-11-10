@@ -3,6 +3,7 @@
 
 use std::cmp::Ordering;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Milliseconds since the Unix epoch.
@@ -15,6 +16,22 @@ pub trait Clock: Send + Sync {
 pub struct SystemClock;
 
 impl Clock for SystemClock {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    fn now_ms(&self) -> i64 {
+        // The browser has no `SystemTime`; its clock is `Date.now()`.
+        let ms = js_sys::Date::now();
+        if ms.is_finite() && ms >= 0.0 {
+            // Whole milliseconds since the epoch fit an i64 exactly.
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                ms as i64
+            }
+        } else {
+            0
+        }
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     fn now_ms(&self) -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

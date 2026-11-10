@@ -1,10 +1,13 @@
-//! Products: searchable, sortable catalog table.
-//!
-//! SAMPLE DATA (2,000 generated products) until the catalog module (M5)
-//! serves real rows from SQLite. Prices are integer centimes.
+//! Products: the catalog from the local database (M5). Search, filters and
+//! sort run in SQL (`list_products`); adding and archiving go through their
+//! use cases, then the list loads again.
+
+use std::hash::{Hash, Hasher};
 
 use nb_core::{Currency, Money, Quantity};
-use nb_i18n::Lang;
+use nb_domain::ProductId;
+use nb_store::repo::catalog::{self, Category, ProductPage, ProductQuery, ProductRow, ProductSort};
+use nb_store::usecases::products::{archive_products, list_products};
 use nsh_core::element::View;
 use nsh_core::prelude::*;
 
@@ -25,88 +28,6 @@ use crate::ui::tokens::{Status, Tone, control, radius, sp, ty};
 use nsh_base::{menu, menu_item};
 use nsh_core::element::{Align, Placement};
 
-#[derive(Clone, PartialEq)]
-pub struct SampleProduct {
-    pub sku: String,
-    pub name_ar: String,
-    pub name_fr: String,
-    pub category: usize,
-    pub unit: usize,
-    pub price_minor: i64,
-    pub stock: i64,
-    pub min_stock: i64,
-}
-
-pub const CATEGORIES: [(&str, &str); 6] = [
-    ("ألبان", "Produits laitiers"),
-    ("مخبوزات", "Boulangerie"),
-    ("زيوت وسكر", "Huiles et sucre"),
-    ("مشروبات", "Boissons"),
-    ("منظفات", "Entretien"),
-    ("خضر وفواكه", "Fruits et légumes"),
-];
-pub const UNITS: [(&str, &str); 4] = [
-    ("قطعة", "pièce"),
-    ("علبة", "boîte"),
-    ("كغ", "kg"),
-    ("لتر", "litre"),
-];
-const NAMES: [(&str, &str, usize, usize); 12] = [
-    ("حليب كامل الدسم", "Lait entier", 0, 3),
-    ("ياغورت بالفراولة", "Yaourt fraise", 0, 1),
-    ("جبن مثلثات", "Fromage portions", 0, 1),
-    ("خبز تقليدي", "Pain traditionnel", 1, 0),
-    ("بسكويت بالشوكولاتة", "Biscuits chocolat", 1, 1),
-    ("زيت مائدة", "Huile de table", 2, 3),
-    ("سكر أبيض", "Sucre blanc", 2, 2),
-    ("ماء معدني", "Eau minérale", 3, 3),
-    ("مشروب غازي", "Boisson gazeuse", 3, 3),
-    ("مسحوق غسيل", "Lessive en poudre", 4, 2),
-    ("طماطم طازجة", "Tomates fraîches", 5, 2),
-    ("بطاطا", "Pommes de terre", 5, 2),
-];
-const BRANDS: [&str; 6] = ["Soummam", "Cevital", "Ifri", "Elio", "Hamoud", "Bimo"];
-
-/// Deterministic sample catalog.
-pub fn sample_catalog(n: usize) -> Vec<SampleProduct> {
-    (0..n)
-        .map(|i| {
-            let (ar, fr, cat, unit) = NAMES[i % NAMES.len()];
-            let brand = BRANDS[(i / NAMES.len()) % BRANDS.len()];
-            let variant = i / (NAMES.len() * BRANDS.len());
-            let stock = ((i * 37) % 140) as i64 - 4;
-            SampleProduct {
-                sku: format!("P-{:05}", 1000 + i),
-                name_ar: format!(
-                    "{ar} {brand}{}",
-                    if variant > 0 {
-                        format!(" #{variant}")
-                    } else {
-                        String::new()
-                    }
-                ),
-                name_fr: format!(
-                    "{fr} {brand}{}",
-                    if variant > 0 {
-                        format!(" #{variant}")
-                    } else {
-                        String::new()
-                    }
-                ),
-                category: cat,
-                unit,
-                price_minor: 2_500 + ((i * 7_919) % 180) as i64 * 250,
-                stock,
-                min_stock: 10,
-            }
-        })
-        .collect()
-}
-
-fn pick(lang: Lang, pair: (&'static str, &'static str)) -> &'static str {
-    if lang == Lang::Ar { pair.0 } else { pair.1 }
-}
-
 /// Stock state of a product, shown as a badge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StockState {
@@ -116,13 +37,18 @@ enum StockState {
 }
 
 impl StockState {
-    fn of(p: &SampleProduct) -> Self {
-        if p.stock <= 0 {
-            StockState::Out
-        } else if p.stock < p.min_stock {
-            StockState::Low
-        } else {
-            StockState::Ok
+    fn of(p: &ProductRow) -> Self {
+        match p.stock_state() {
+            catalog::StockState::Ok => StockState::Ok,
+            catalog::StockState::Low => StockState::Low,
+            catalog::StockState::Out => StockState::Out,
+        }
+    }
+    fn stored(self) -> catalog::StockState {
+        match self {
+            StockState::Ok => catalog::StockState::Ok,
+            StockState::Low => catalog::StockState::Low,
+            StockState::Out => catalog::StockState::Out,
         }
     }
     fn key(self) -> &'static str {
@@ -148,21 +74,61 @@ enum Filter {
     Only(StockState),
 }
 
-fn name_of(lang: Lang, p: &SampleProduct) -> String {
-    if lang == Lang::Ar {
-        p.name_ar.clone()
-    } else {
-        p.name_fr.clone()
+/// Identity of a row for the selection (stable across reloads).
+fn id_of(p: &ProductRow) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    p.id.hash(&mut h);
+    h.finish()
+}
+
+fn sort_of(s: Option<Sort>) -> (ProductSort, bool) {
+    match s {
+        Some(s) => (
+            match s.key {
+                "name" => ProductSort::Name,
+                "category" => ProductSort::Category,
+                "status" => ProductSort::Status,
+                "stock" => ProductSort::Stock,
+                "price" => ProductSort::Price,
+                _ => ProductSort::Recent,
+            },
+            s.desc,
+        ),
+        None => (ProductSort::Recent, false),
     }
 }
 
-/// Identity of a sample row (its code's number).
-fn id_of(p: &SampleProduct) -> u64 {
-    p.sku.trim_start_matches("P-").parse().unwrap_or(0)
+/// Archives `ids`, then reloads the lists and confirms.
+fn archive(st: AppState, ids: Vec<ProductId>) {
+    let Some(session) = st.session.get_untracked() else {
+        return;
+    };
+    let n = ids.len();
+    let db = st.db();
+    let meta = session.meta("product.archive");
+    let task = spawn(async move {
+        match db.call(move |s| archive_products(s, meta, &ids)).await {
+            Ok(_) => {
+                st.changed();
+                show_toast(
+                    st,
+                    nb_i18n::tr_args(
+                        st.lang(),
+                        "products.deleted",
+                        &[("count", &st.fmt().integer(n as i64))],
+                    ),
+                );
+            }
+            Err(e) => show_toast(
+                st,
+                super::product_form::error_text(st, e.codes.first().map_or("internal", |c| c.1)),
+            ),
+        }
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
 }
 
 pub fn products(st: AppState, compact: bool) -> View {
-    let all = signal(sample_catalog(2_000));
     // NB_OPEN=add_product (development): open the form at start, for screenshots.
     let adding = signal(std::env::var("NB_OPEN").as_deref() == Ok("add_product"));
     // Opened from the command palette's "Add a product".
@@ -179,57 +145,61 @@ pub fn products(st: AppState, compact: bool) -> View {
     let sort = signal(None::<Sort>);
     let selection = Selection::new();
 
-    // Filter + sort the sample rows (the catalog module will do this in SQL).
-    let rows = computed(move || {
-        let lang = st.lang();
-        let q = query.get().trim().to_lowercase();
-        let f = filter.get();
-        let cat = category.get();
-        let mut v: Vec<SampleProduct> = all.with(|all| {
-            all.iter()
-                .filter(|p| {
-                    (q.is_empty()
-                        || p.sku.to_lowercase().contains(&q)
-                        || p.name_ar.contains(&q)
-                        || p.name_fr.to_lowercase().contains(&q))
-                        && (cat == usize::MAX || p.category == cat)
-                        && match f {
-                            Filter::All => true,
-                            Filter::Only(s) => StockState::of(p) == s,
-                        }
+    // The categories, then the page of rows for the current filters (SQL).
+    let cats = resource(
+        move || st.session.get().map(|_| st.data_rev.get()),
+        move |_, _| {
+            let db = st.db();
+            async move {
+                db.call(|s| {
+                    s.read(|r| {
+                        let o = nb_store::repo::org::the_org(r.conn())?
+                            .ok_or(nb_store::Error::NotFound("organization"))?;
+                        catalog::categories(r.conn(), o.org_id()?)
+                    })
                 })
-                .cloned()
-                .collect()
-        });
-        if let Some(s) = sort.get() {
-            match s.key {
-                "name" => v.sort_by_key(|p| name_of(lang, p)),
-                "category" => v.sort_by_key(|p| pick(lang, CATEGORIES[p.category])),
-                "status" => v.sort_by_key(|p| p.stock.min(p.min_stock)),
-                "stock" => v.sort_by_key(|p| p.stock),
-                "price" => v.sort_by_key(|p| p.price_minor),
-                _ => {}
+                .await
             }
-            if s.desc {
-                v.reverse();
-            }
-        }
-        v
+        },
+    );
+    let cat_list = computed(move || cats.get().unwrap_or_default());
+    let page = resource(
+        move || {
+            st.session.get()?;
+            let (sort, desc) = sort_of(sort.get());
+            let category_id = match category.get() {
+                usize::MAX => None,
+                i => cat_list.with(|c: &Vec<Category>| c.get(i).map(|c| c.id.clone())),
+            };
+            Some((
+                ProductQuery {
+                    text: query.get(),
+                    category_id,
+                    state: match filter.get() {
+                        Filter::All => None,
+                        Filter::Only(s) => Some(s.stored()),
+                    },
+                    sort,
+                    desc,
+                    limit: 5_000,
+                    offset: 0,
+                },
+                st.data_rev.get(),
+            ))
+        },
+        move |(q, _), _| {
+            let db = st.db();
+            async move { db.call(move |s| list_products(s, &q)).await }
+        },
+    );
+    let rows = computed(move || {
+        page.with(|p: Option<&ProductPage>| p.map(|p| p.rows.clone()).unwrap_or_default())
     });
     let counts = computed(move || {
-        all.with(|v| {
-            let mut c = [0i64; 4];
-            for p in v {
-                c[0] += 1;
-                c[match StockState::of(p) {
-                    StockState::Ok => 1,
-                    StockState::Low => 2,
-                    StockState::Out => 3,
-                }] += 1;
-            }
-            c
-        })
+        page.with(|p: Option<&ProductPage>| p.map_or([0i64; 4], |p| p.counts.map(i64::from)))
     });
+    let total = computed(move || page.with(|p: Option<&ProductPage>| p.map_or(0, |p| p.total)));
+    let currency = move || st.session.get().map_or(Currency::DZD, |s| s.currency);
 
     // ---------------------------------------------------------- quick filters
     // Stock states as cards with their counts (phones: chips).
@@ -366,13 +336,13 @@ pub fn products(st: AppState, compact: bool) -> View {
 
     // ---------------------------------------------------------- toolbar
     let categories = move || {
-        let lang = st.lang();
         let mut v = vec![(usize::MAX, st.tn("products.category.all"))];
         v.extend(
-            CATEGORIES
-                .iter()
+            cat_list
+                .get()
+                .into_iter()
                 .enumerate()
-                .map(|(i, &c)| (i, pick(lang, c).to_owned())),
+                .map(|(i, c)| (i, c.name)),
         );
         v
     };
@@ -498,17 +468,14 @@ pub fn products(st: AppState, compact: bool) -> View {
                 st.t("action.delete"),
                 move || {
                     let gone = selection.ids.get_untracked();
-                    let n = gone.len();
-                    all.update(|v| v.retain(|p| !gone.contains(&id_of(p))));
+                    let ids: Vec<ProductId> = rows.with(|v| {
+                        v.iter()
+                            .filter(|p| gone.contains(&id_of(p)))
+                            .filter_map(|p| p.product_id().ok())
+                            .collect()
+                    });
                     selection.clear();
-                    show_toast(
-                        st,
-                        nb_i18n::tr_args(
-                            st.lang(),
-                            "products.deleted",
-                            &[("count", &st.fmt().integer(n as i64))],
-                        ),
-                    );
+                    archive(st, ids);
                 },
             ))
             .child(spacer())
@@ -591,7 +558,10 @@ pub fn products(st: AppState, compact: bool) -> View {
                     format!(
                         "{}: {}",
                         st.tn("products.col.category"),
-                        pick(st.lang(), CATEGORIES[cat])
+                        cat_list.with(|c: &Vec<Category>| c
+                            .get(cat)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_default())
                     )
                 }),
                 Box::new(move || category.set(usize::MAX)),
@@ -688,10 +658,7 @@ pub fn products(st: AppState, compact: bool) -> View {
                             move || {
                                 p.get()
                                     .map(|p| {
-                                        nb_i18n::bidi::isolate_runs(
-                                            &name_of(st.lang(), &p),
-                                            st.lang().direction(),
-                                        )
+                                        nb_i18n::bidi::isolate_runs(&p.name, st.lang().direction())
                                     })
                                     .unwrap_or_default()
                             },
@@ -704,7 +671,14 @@ pub fn products(st: AppState, compact: bool) -> View {
                                 p.get()
                                     .map(|p| {
                                         if compact {
-                                            format!("{} · {}", p.sku, st.fmt().integer(p.stock))
+                                            format!(
+                                                "{} · {}",
+                                                p.sku,
+                                                st.fmt().quantity(
+                                                    Quantity::from_milli(p.on_hand_milli),
+                                                    3
+                                                )
+                                            )
                                         } else {
                                             p.sku
                                         }
@@ -718,11 +692,7 @@ pub fn products(st: AppState, compact: bool) -> View {
                 )
                 .into_element(),
             "category" => label_line(
-                move || {
-                    p.get()
-                        .map(|p| pick(st.lang(), CATEGORIES[p.category]).to_owned())
-                        .unwrap_or_default()
-                },
+                move || p.get().and_then(|p| p.category).unwrap_or_default(),
                 ty::SM,
                 FontWeight::NORMAL,
                 Tone::Body,
@@ -741,7 +711,7 @@ pub fn products(st: AppState, compact: bool) -> View {
             "stock" => figure(
                 move || {
                     p.get()
-                        .map(|p| st.fmt().quantity(Quantity::whole(p.stock), 0))
+                        .map(|p| st.fmt().quantity(Quantity::from_milli(p.on_hand_milli), 3))
                         .unwrap_or_default()
                 },
                 ty::SM,
@@ -756,10 +726,7 @@ pub fn products(st: AppState, compact: bool) -> View {
             "price" => figure(
                 move || {
                     p.get()
-                        .map(|p| {
-                            st.fmt()
-                                .money(Money::from_minor(p.price_minor, Currency::DZD))
-                        })
+                        .map(|p| st.fmt().money(Money::from_minor(p.price_minor, currency())))
                         .unwrap_or_default()
                 },
                 ty::SM,
@@ -774,8 +741,8 @@ pub fn products(st: AppState, compact: bool) -> View {
                         Action::new(Icon::Copy, st.tn("action.duplicate"), || {}),
                         Action::new(Icon::Printer, st.tn("products.print_label"), || {}),
                         Action::new(Icon::Trash, st.tn("action.delete"), move || {
-                            if let Some(gone) = p.get_untracked() {
-                                all.update(|v| v.retain(|q| q.sku != gone.sku));
+                            if let Some(id) = p.get_untracked().and_then(|p| p.product_id().ok()) {
+                                archive(st, vec![id]);
                             }
                         })
                         .danger(),
@@ -859,9 +826,18 @@ pub fn products(st: AppState, compact: bool) -> View {
             ))
     };
 
-    let count = st.t_with("table.results", move |s| {
-        vec![("count", s.fmt().integer(rows.with(Vec::len) as i64))]
-    });
+    let count = move || {
+        let n = total.get();
+        nb_i18n::tr_args(
+            st.lang(),
+            if n == 1 {
+                "table.result_one"
+            } else {
+                "table.results"
+            },
+            &[("count", &st.fmt().integer(i64::from(n)))],
+        )
+    };
 
     view()
         .flex_1()
@@ -893,18 +869,21 @@ pub fn products(st: AppState, compact: bool) -> View {
                 .child(table_footer(count, view())),
         )
         .child(modal(adding, compact, move || {
-            let next_sku = format!("P-{:05}", 1000 + all.with(Vec::len));
+            let Some(session) = st.session.get_untracked() else {
+                return view().into_element();
+            };
             product_form(
                 st,
-                next_sku,
+                session,
+                cat_list.get_untracked(),
+                st.tn("products.form.sku_auto"),
                 move || adding.set(false),
-                move |p: SampleProduct| {
-                    let name = name_of(st.lang(), &p);
-                    all.update(|v| v.insert(0, p));
+                move |p: ProductRow| {
+                    st.changed();
                     adding.set(false);
                     show_toast(
                         st,
-                        nb_i18n::tr_args(st.lang(), "products.saved", &[("name", &name)]),
+                        nb_i18n::tr_args(st.lang(), "products.saved", &[("name", &p.name)]),
                     );
                 },
             )

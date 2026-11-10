@@ -1763,18 +1763,22 @@ dependencies = [
  "env_logger",
  "log",
  "nb-core",
+ "nb-domain",
  "nb-i18n",
+ "nb-store",
  "nsh-base",
  "nsh-core",
  "nsh-platform-linux",
  "nsh-platform-macos",
  "nsh-platform-windows",
+ "tokio",
 ]
 
 [[package]]
 name = "nb-core"
 version = "0.1.0"
 dependencies = [
+ "js-sys",
  "proptest",
  "rust_decimal",
  "serde",

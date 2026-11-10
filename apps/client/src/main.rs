@@ -19,6 +19,10 @@ fn main() -> impl std::process::Termination {
                 .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
         })
         .unwrap_or((1360, 860));
+    // The organization's database: NB_DATA_DIR, else the platform's data folder.
+    if let Some(dir) = data_dir() {
+        nb_client::db::configure(dir.join("store.db"));
+    }
     // The bundled fonts (OFL), registered before the first frame: a Rust root
     // run directly carries its own fonts (packaged apps get them from assets).
     let root = platform::Root::of::<nb_client::App>()
@@ -50,6 +54,26 @@ fn main() -> impl std::process::Termination {
             ..Default::default()
         },
     )
+}
+
+/// Where the app keeps its data on this desktop.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn data_dir() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Some(d) = std::env::var_os("NB_DATA_DIR") {
+        return Some(PathBuf::from(d));
+    }
+    let app = "dz.nshbusiness.app";
+    #[cfg(target_os = "linux")]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    #[cfg(target_os = "macos")]
+    let base =
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"));
+    #[cfg(target_os = "windows")]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    base.map(|b| b.join(app))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]

@@ -121,3 +121,31 @@ test("sidebar sections expand to their pages, and settings tabs switch panels", 
   await app.press("id:settings-store");
   await app.waitFor("text:Identifiants légaux");
 });
+
+test("the database's rules come back under their fields", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Catalogue");
+  await app.press("id:nav-products");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 000 résultats"));
+  await app.press("text:Ajouter un produit");
+  await app.waitFor("text:Stock initial");
+  await app.type("id:product-name", "Doublon");
+  await app.type("id:product-price", "10");
+  // P-01000 is the first demo product's code.
+  await app.type("id:product-sku", "p-01000");
+  await app.press("text:Enregistrer");
+  await app.waitFor("text:Un autre produit a déjà ce code.");
+  await app.clear("id:product-sku");
+  await app.type("id:product-sku", "DBL-1");
+  await app.type("id:product-stock", "1,5");
+  await app.press("text:Enregistrer");
+  // A piece is counted in whole units.
+  await app.waitFor("text:Saisissez une quantité, par exemple 0, 24 ou 1,5 pour les kilos.");
+  await app.clear("id:product-stock");
+  await app.type("id:product-stock", "3");
+  await app.press("text:Enregistrer");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 001 résultats"));
+  await app.type("id:product-search", "doublon");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1 résultat"));
+});

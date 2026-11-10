@@ -72,7 +72,7 @@ products.form.price_negative = Le prix ne peut pas être négatif.
 products.form.price_zero = Saisissez un prix supérieur à zéro.
 products.form.price_decimals = Le prix accepte au plus deux décimales.
 products.form.price_invalid = Saisissez le prix en chiffres, par exemple 120 ou 120,50.
-products.form.stock_invalid = Saisissez un nombre entier positif, par exemple 0 ou 24.
+products.form.stock_invalid = Saisissez une quantité, par exemple 0, 24 ou 1,5 pour les kilos.
 products.saved = « {name} » enregistré
 
 command.placeholder = Tapez une section ou une action…
@@ -348,3 +348,27 @@ settings.card.layout = Mise en page
 settings.card.identity = Identité
 settings.card.team = Équipe
 nav.sec.system = Système
+
+# Data layer
+unit.pc = Pièce
+unit.box = Boîte
+unit.kg = Kilogramme
+unit.l = Litre
+products.form.sku_auto = Automatique (P-…)
+common.loading = Chargement…
+error.internal = Une erreur est survenue. Réessayez ; si elle persiste, contactez le support.
+error.required = Ce champ est obligatoire.
+error.invalid_value = Cette valeur n'est pas valide.
+error.invalid_quantity = Saisissez une quantité en chiffres, par exemple 2 ou 1,5.
+error.product.sku_taken = Un autre produit a déjà ce code.
+error.product.sku_chars = Lettres, chiffres et - _ . / uniquement, 32 caractères au plus.
+error.product.name_long = Le nom est trop long (200 caractères au plus).
+error.product.price_negative = Le prix ne peut pas être négatif.
+error.product.min_above_price = Le prix minimum dépasse le prix de vente.
+error.barcode.taken = Ce code-barres appartient à un autre produit.
+error.barcode.check_digit = Ce code-barres n'est pas valide (clé de contrôle). Scannez-le à nouveau.
+error.units.too_precise = Cette unité n'accepte pas autant de décimales.
+error.stock.insufficient = Stock insuffisant. Modifiez la quantité ou autorisez le stock négatif.
+error.stale_version = Quelqu'un l'a modifié entre-temps. Rechargez puis réessayez.
+error.not_found = Introuvable ; il a peut-être été supprimé.
+table.result_one = {count} résultat

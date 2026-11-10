@@ -72,7 +72,7 @@ products.form.price_negative = السعر لا يكون سالباً.
 products.form.price_zero = أدخل سعراً أكبر من صفر.
 products.form.price_decimals = السعر يقبل رقمين بعد الفاصلة على الأكثر.
 products.form.price_invalid = اكتب السعر بالأرقام، مثل 120 أو 120,50.
-products.form.stock_invalid = اكتب عدداً صحيحاً موجباً، مثل 0 أو 24.
+products.form.stock_invalid = أدخل كمية، مثلاً 0 أو 24 أو 1,5 للكيلوغرام.
 products.saved = حُفظ «{name}»
 
 command.placeholder = اكتب اسم قسم أو إجراء…
@@ -348,3 +348,27 @@ settings.card.layout = التخطيط
 settings.card.identity = الهوية
 settings.card.team = الفريق
 nav.sec.system = النظام
+
+# Data layer
+unit.pc = قطعة
+unit.box = علبة
+unit.kg = كيلوغرام
+unit.l = لتر
+products.form.sku_auto = تلقائي (P-…)
+common.loading = جارٍ التحميل…
+error.internal = حدث خطأ. أعد المحاولة، وإن تكرر فاتصل بالدعم.
+error.required = هذا الحقل مطلوب.
+error.invalid_value = هذه القيمة غير صالحة.
+error.invalid_quantity = أدخل الكمية بالأرقام، مثلاً 2 أو 1,5.
+error.product.sku_taken = هذا الرمز مستعمل لمنتج آخر.
+error.product.sku_chars = استعمل الحروف والأرقام و- _ . / فقط، حتى 32 حرفاً.
+error.product.name_long = الاسم طويل جداً (200 حرف كحد أقصى).
+error.product.price_negative = لا يمكن أن يكون السعر سالباً.
+error.product.min_above_price = الحد الأدنى للسعر أعلى من سعر البيع.
+error.barcode.taken = هذا الباركود لمنتج آخر.
+error.barcode.check_digit = هذا الباركود غير صالح (رقم التحقق). امسحه مرة أخرى.
+error.units.too_precise = هذه الوحدة لا تقبل هذا العدد من الأرقام العشرية.
+error.stock.insufficient = المخزون غير كافٍ. عدّل الكمية أو اسمح بالمخزون السالب.
+error.stale_version = عدّله شخص آخر في الأثناء. أعد التحميل ثم حاول.
+error.not_found = غير موجود؛ ربما حُذف.
+table.result_one = {count} نتيجة

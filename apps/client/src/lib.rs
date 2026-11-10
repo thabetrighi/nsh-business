@@ -10,6 +10,7 @@
 use nsh_core::prelude::*;
 
 mod command_palette;
+pub mod db;
 mod nav;
 mod screens;
 mod shell;
@@ -70,6 +71,7 @@ pub fn App() -> impl IntoElement {
         st.palette.set(true);
     }
     st.persist();
+    st.connect();
 
     // The look (accent, font, sizes, density, corners) is read by every
     // component as plain values: a change installs the new look and rebuilds
