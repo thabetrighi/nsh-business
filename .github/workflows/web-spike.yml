@@ -12,6 +12,9 @@ on:
 env:
   NSH_VERSION: v0.4.0
 
+permissions:
+  contents: write
+
 jobs:
   web:
     runs-on: ubuntu-24.04
@@ -63,3 +66,12 @@ jobs:
             .nsh/out/hello/
             web-rtl.png
           if-no-files-found: error
+
+      - name: Publish screenshot to ci/screenshots branch
+        run: |
+          mkdir -p /tmp/shots && cp web-rtl.png /tmp/shots/m0-5-rtl-web.png
+          cd /tmp/shots
+          git init -q -b ci/screenshots
+          git -c user.name=ci -c user.email=ci@localhost add -A
+          git -c user.name=ci -c user.email=ci@localhost commit -q -m "web screenshot ${GITHUB_SHA::7}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" ci/screenshots
