@@ -77,3 +77,9 @@ products.form.price_decimals = The price takes at most two decimals.
 products.form.price_invalid = Type the price in digits, for example 120 or 120.50.
 products.form.stock_invalid = Type a whole number, for example 0 or 24.
 products.saved = Saved “{name}”
+
+command.placeholder = Type a section or an action…
+command.group.go = Go to
+command.group.actions = Actions
+command.toggle_theme = Switch appearance (light/dark)
+command.search_label = Search sections and actions

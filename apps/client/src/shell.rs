@@ -6,6 +6,7 @@ use nb_i18n::Lang;
 use nsh_core::element::SharedString;
 use nsh_core::prelude::*;
 
+use crate::command_palette::command_palette;
 use crate::screens::home::home;
 use crate::screens::products::products;
 use crate::state::{AppState, toggle_appearance};
@@ -95,6 +96,9 @@ pub fn shell(st: AppState) -> impl IntoElement {
         )
         .child(dynamic(move || {
             toast_layer(st, compact.get()).into_element()
+        }))
+        .child(dynamic(move || {
+            command_palette(st, route, compact.get()).into_element()
         }))
 }
 
@@ -269,6 +273,8 @@ fn top_bar(st: AppState) -> impl IntoElement {
 
 fn search_box(st: AppState) -> impl IntoElement {
     view()
+        .test_id("open-palette")
+        .on_press(move || st.palette.set(true))
         .flex_row()
         .items_center()
         .gap(px(10.0))
@@ -438,6 +444,11 @@ fn phone(st: AppState, route: Signal<Route>) -> impl IntoElement {
                             Tone::Ink,
                         )))
                         .child(icon(Icon::Offline, 20.0, || Tone::Warn))
+                        .child(icon_button(
+                            || Icon::Search,
+                            st.t("search.placeholder"),
+                            move || st.palette.set(true),
+                        ))
                         .child(icon_button(
                             || Icon::Languages,
                             st.t("settings.language"),

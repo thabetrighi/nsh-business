@@ -9,6 +9,7 @@
 
 use nsh_core::prelude::*;
 
+mod command_palette;
 mod screens;
 mod shell;
 mod state;
@@ -34,6 +35,9 @@ pub fn App() -> impl IntoElement {
         .and_then(nb_i18n::Lang::from_tag)
     {
         st.lang.set(lang);
+    }
+    if std::env::var("NB_OPEN").as_deref() == Ok("palette") {
+        st.palette.set(true);
     }
     match std::env::var("NB_APPEARANCE").as_deref() {
         Ok("dark") => set_color_scheme(Appearance::Dark),

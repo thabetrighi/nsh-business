@@ -47,3 +47,17 @@ test("adds a product from the phone, with validation", async () => {
   // The new product is first in the table.
   expect(app.texts().some((t) => t.includes("Lait test"))).toBe(true);
 });
+
+test("command palette: search across languages and run an action", async () => {
+  const app = await open(".", { locale: "ar-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:مبيعات اليوم");
+  await app.press("id:open-palette");
+  await app.waitFor("text:انتقل إلى");
+  // Typing French in the Arabic interface still finds the section.
+  await app.type("label:ابحث في الأقسام والإجراءات", "stock");
+  await app.waitFor("text:المخزون");
+  await app.clear("label:ابحث في الأقسام والإجراءات");
+  await app.press("text:أضف منتجاً");
+  // The action goes to Products and opens the form straight away.
+  await app.waitFor("text:المخزون الافتتاحي");
+});

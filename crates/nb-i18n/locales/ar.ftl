@@ -77,3 +77,9 @@ products.form.price_decimals = السعر يقبل رقمين بعد الفاص�
 products.form.price_invalid = اكتب السعر بالأرقام، مثل 120 أو 120,50.
 products.form.stock_invalid = اكتب عدداً صحيحاً موجباً، مثل 0 أو 24.
 products.saved = حُفظ «{name}»
+
+command.placeholder = اكتب اسم قسم أو إجراء…
+command.group.go = انتقل إلى
+command.group.actions = إجراءات
+command.toggle_theme = بدّل المظهر (فاتح/داكن)
+command.search_label = ابحث في الأقسام والإجراءات

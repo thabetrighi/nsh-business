@@ -77,3 +77,9 @@ products.form.price_decimals = Le prix accepte au plus deux décimales.
 products.form.price_invalid = Saisissez le prix en chiffres, par exemple 120 ou 120,50.
 products.form.stock_invalid = Saisissez un nombre entier positif, par exemple 0 ou 24.
 products.saved = « {name} » enregistré
+
+command.placeholder = Tapez une section ou une action…
+command.group.go = Aller à
+command.group.actions = Actions
+command.toggle_theme = Changer l'apparence (clair/sombre)
+command.search_label = Chercher dans les sections et actions

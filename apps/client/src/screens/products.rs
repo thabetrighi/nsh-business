@@ -13,7 +13,7 @@ use nsh_core::element::input;
 use nsh_core::prelude::*;
 
 use super::product_form::product_form;
-use crate::state::AppState;
+use crate::state::{AppState, Intent};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{label, primary_button, size};
 use crate::ui::overlay::{modal, show_toast};
@@ -152,6 +152,13 @@ pub fn products(st: AppState, compact: bool) -> impl IntoElement {
     let all = signal(sample_catalog(2_000));
     // NB_OPEN=add_product (development): open the form at start, for screenshots.
     let adding = signal(std::env::var("NB_OPEN").as_deref() == Ok("add_product"));
+    // Opened from the command palette's "Add a product".
+    effect(move || {
+        if st.intent.get() == Some(Intent::AddProduct) {
+            st.intent.set(None);
+            adding.set(true);
+        }
+    });
     let query = signal(String::new());
     let sort = signal(None::<DataTableSort>);
 

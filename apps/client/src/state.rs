@@ -4,11 +4,21 @@
 use nb_i18n::{Direction, Format, Lang, tr, tr_args};
 use nsh_core::prelude::*;
 
+/// Something a screen should do when it opens (e.g. from the command palette).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Intent {
+    AddProduct,
+}
+
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub lang: Signal<Lang>,
     /// The confirmation shown at the bottom of the screen (`ui::overlay::show_toast`).
     pub toast: Signal<Option<String>>,
+    /// The command palette is open.
+    pub palette: Signal<bool>,
+    /// A pending request for the screen being opened.
+    pub intent: Signal<Option<Intent>>,
 }
 
 impl AppState {
@@ -22,6 +32,8 @@ impl AppState {
         Self {
             lang: signal(lang),
             toast: signal(None),
+            palette: signal(false),
+            intent: signal(None),
         }
     }
 
