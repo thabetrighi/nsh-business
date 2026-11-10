@@ -25,10 +25,19 @@
 - **الأخطاء:** لا `unwrap()`/`expect()` في شيفرة الإنتاج إلا مع تعليق يبرر الاستحالة.
 - **الترحيلات:** أي تغيير مخطط = ملف ترحيل جديد + اختبار. لا تعديل لترحيل منشور.
 
+## دروس مستفادة (إلزامية)
+- **الدفع مشروط بالفحوص:** `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && git commit … && git push` — بـ `&&` لا بـ `;`.
+- **كل تعديل نصي آلي على الشيفرة يتحقق من التطابق** (`assert old in s`)؛ `cargo fmt` يعيد التنسيق فيفشل الاستبدال بصمت.
+- **المهام والمؤقتات في NSH تنتهي مع مالكها:** مؤقت يُنشأ داخل شاشة أو نافذة يُلغى عند إزالتها. ما يجب أن يستمر يُنشأ من طبقة دائمة (الجذر).
+- **لا يُحكم على ترتيب نص ثنائي الاتجاه من لقطة بالعين:** يُقارن بسطر مرجعي يسار-يمين.
+- **جدول `nsh-base` يسار-يمين فقط:** في العربية تُعكس الأعمدة يدوياً ويُثبَّت الجدول LTR (انظر `screens/products.rs`).
+- **أرقام داخل نص عربي:** الإشارة داخل منطقة العزل مع الرقم (`Format::money_signed`)؛ فاصل الآلاف U+00A0 (الخط لا يحوي U+202F).
+
 ## الأدوات والأوامر
 - NSH: الإصدار المثبت `0.4.0` (لا ترقية دون ADR).
 - تثبيت NSH في بيئة Claude: nsh.dev محجوب من الشل؛ نزّل `https://github.com/longbridge/nsh/releases/download/v0.4.0/nsh-linux-x86_64.tar.gz` وفكّه في `~/.nsh` ثم اربط `~/.nsh/nsh/bin/nsh`.
 - متطلبات Linux: `apt-get install libgtk-4-dev clang xvfb imagemagick` (GTK ≥ 4.14).
+- متغيرات تطوير للتطبيق: `NB_LANG=ar|fr|en`، `NB_APPEARANCE=light|dark`، `NB_WINDOW=1360x860`، `NB_ROUTE=products`، `NB_OPEN=add_product`.
 - تشغيل واجهة دون شاشة: `Xvfb :99 &` ثم `DISPLAY=:99 GDK_BACKEND=x11 <binary>` ولقطة بـ `import -window root`.
 - اختبارات الواجهة: `nsh test <app-dir>`.
 - الويب يحتاج `rustup target add wasm32-unknown-unknown` + `wasm-bindgen-cli`؛ غير متاح في بيئة Claude (انظر NEEDS_OWNER) — يُبنى عبر GitHub Actions.
