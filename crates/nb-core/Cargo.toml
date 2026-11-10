@@ -17,3 +17,7 @@ proptest.workspace = true
 
 [lints]
 workspace = true
+
+# In the browser, UUIDv7 randomness comes from the Web Crypto API.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+uuid = { workspace = true, features = ["js"] }
