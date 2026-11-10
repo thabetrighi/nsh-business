@@ -1,0 +1,53 @@
+name: web-spike
+
+# M0.1 / M0.4 / M0.5: build the NSH Rust spike for the web target.
+# Claude's workspace cannot install the wasm32 target, so the web build runs here.
+
+on:
+  push:
+    branches: [main]
+    paths: ["spikes/**", ".github/workflows/web-spike.yml"]
+  workflow_dispatch:
+
+env:
+  NSH_VERSION: v0.4.0
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust + wasm target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm libgtk-4-dev
+
+      - name: Install NSH CLI
+        run: |
+          curl -fsSL -o nsh.tar.gz "https://github.com/longbridge/nsh/releases/download/${NSH_VERSION}/nsh-linux-x86_64.tar.gz"
+          mkdir -p ~/.nsh && tar -xzf nsh.tar.gz -C ~/.nsh
+          echo "$HOME/.nsh/nsh/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spikes/m0-hello
+
+      - name: Install wasm-bindgen-cli matching the lockfile
+        working-directory: spikes/m0-hello
+        run: |
+          cargo generate-lockfile
+          V=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/version = |"/,""); print; exit}' Cargo.lock || true)
+          echo "wasm-bindgen in lockfile: ${V:-none}"
+          if [ -n "$V" ]; then cargo install wasm-bindgen-cli --version "$V" --locked; fi
+
+      - name: Package for web
+        run: nsh --verbose package spikes/m0-hello --target web
+
+      - name: Upload web build
+        uses: actions/upload-artifact@v4
+        with:
+          name: m0-hello-web
+          path: spikes/m0-hello/.nsh/out/
+          if-no-files-found: error
