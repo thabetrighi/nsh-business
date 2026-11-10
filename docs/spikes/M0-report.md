@@ -1,0 +1,62 @@
+# تقرير Spikes المرحلة M0 — NSH v0.4.0
+
+> يُحدَّث مع كل مهمة من M0. الحالة الآن: M0.1 وM0.2 منجزتان، M0.5 منجزة على Linux.
+
+## بيئة الاختبار
+- Ubuntu 24.04.5، glibc 2.39، GTK 4.14.5، Rust 1.97.0، x86_64، معالجان، 7GB ذاكرة.
+- NSH CLI `0.4.0 (e626a8d)` من إصدار GitHub (`nsh-linux-x86_64.tar.gz`، ‏434MB).
+
+## M0.1 — تطبيق Rust أولي
+
+| البند | النتيجة |
+|---|---|
+| `nsh init hello --template rust` | ✅ ينشئ crate بـ `nsh-core`/`nsh-base`/`nsh-platform-linux` 0.4.0 |
+| `cargo build` (Linux) | ✅ أول بناء 3m49s (≈60 crate) |
+| `nsh test .` (headless) | ✅ اختبار TSX يضغط زراً في تطبيق Rust ويتحقق من النص (311ms) |
+| تشغيل نافذة GTK حقيقية | ✅ تحت Xvfb، لقطة: `img/m0-1-hello-linux.png` |
+| هدف الويب | ⛔ `static.rust-lang.org` محجوب في بيئتي، فلا يمكن تثبيت `wasm32-unknown-unknown`. البديل: البناء في GitHub Actions |
+
+ملاحظة: اختبارات الواجهة تُكتب بـ TSX (`nsh/test`) حتى لتطبيق Rust خالص؛ هذا مقبول لأنها اختبارات فقط ولا تُشحن.
+
+## M0.2 — جرد القدرات
+
+### ما يناسب المشروع
+- **Rust تطبيق كامل على كل المنصات** بما فيها iOS وAndroid والويب (`libnsh.so` على Android، `nsh.wasm` على الويب). لا حاجة لـ TSX في المنتج.
+- **مكونات `nsh-base` غير مصمّمة (unstyled)** تملك الحالة والتركيز ولوحة المفاتيح والإتاحة: Button, Input, NumberInput, Select, Combobox, Checkbox, Radio, Switch, Toggle, Dialog, AlertDialog, Sheet, Popover, Menu, Tooltip, Toast, Tabs, NavStack, Accordion, Command (لوحة الأوامر), **DataTable**, Table, Tree, Pagination, DatePicker, Calendar, TimeField, OtpInput, Resizable, Toolbar, Dock, Plot (رسوم بيانية), Progress, Slider, Avatar, Carousel, Editor, RichEditor.
+  - هذا يغطي معظم M3 (Design System): نبني طبقة التنسيق فقط.
+- **قوائم افتراضية** (`List`) ورسم `Canvas` وعرض ويب `WebView`.
+- **السمات (Theme)** بنمط shadcn/ui (`cssVars`)، مع فاتح/داكن.
+- **المهام الخلفية:** `spawn` للمهام غير المتزامنة، و`background`/`blocking` تعمل على خيوط في المنصات الأصلية → مناسب لتشغيل SQLite خارج الخيط الرئيسي.
+- **ملفات سطح المكتب:** `pick_paths`, `pick_save_path` (للتصدير والاستيراد والنسخ الاحتياطي).
+- **الشبكة:** `fetch` ومؤقتات على كل المنصات.
+
+### الحدود والمخاطر المكتشفة
+| الحد | الأثر على المشروع | المعالجة |
+|---|---|---|
+| لا واجهة تخزين/قاعدة بيانات في NSH | متوقع | SQLite عبر crate مستقل (M0.3) |
+| الويب **خيط واحد**، ولا ذكر لـ Web Workers | SQLite-WASM ثقيل قد يجمّد الواجهة | قياس في M0.4؛ عمليات قصيرة أو تقسيم العمل |
+| الويب: OPFS غير موثّق، IndexedDB عبر `web-sys` فقط | يحدد خيار تخزين الويب | M0.4 |
+| الويب: إعادة ترتيب النص ثنائي الاتجاه محدودة باتجاه الفقرة | النص المختلط على الويب قد يختلف عن Linux | اختبار في M0.5 على الويب |
+| الويب: المكونات الأصلية تبقى فارغة | لا كاميرا/أجهزة أصلية على الويب | متوقع في PRD (وسيط محلي) |
+| `open_path`/`move_to_trash` لسطح المكتب فقط | — | لا يؤثر |
+| تحديثات Rust تعيد البناء وإعادة التشغيل (لا hot reload) | بطء التطوير نسبياً | مقبول |
+| الإطار إصدار 0.x | واجهات قد تتغير | تثبيت 0.4.0 + طبقة `nb-ui` عازلة |
+| لا ذكر صريح لوصول USB/Serial/Bluetooth | M12 (الأجهزة) | crates Rust أصلية (`serialport`) على سطح المكتب؛ Android/iOS تحتاج "Native Components" — يُدرس في M12 |
+
+## M0.5 — العربية وRTL (Linux)
+
+لقطة: `img/m0-5-rtl-linux.png` (لوحة RTL يساراً، LTR يميناً).
+
+| البند | النتيجة |
+|---|---|
+| تشكيل الحروف العربية (Pango) | ✅ سليم |
+| `LayoutDirection::Rtl` على view | ✅ الصفوف تنعكس كاملة (العنوان والقيمة والأزرار) |
+| نص مختلط (عربي + SKU + أرقام + رمز العملة) | ✅ ترتيب صحيح |
+| الاتجاه الافتراضي للجذر | يتبع لغة المستخدم (من المصدر: `LayoutDirection::Inherit`) |
+| مكونات `nsh-base` | تعكس الأسهم يسار/يمين في RTL (من المصدر) |
+| الويب | ⬜ لم يُختبر بعد (يحتاج هدف wasm) |
+
+**الخلاصة المرحلية:** دعم RTL على Linux ممتاز ويحقق متطلبات PRD §13.7.
+
+## المهام المتبقية في M0
+M0.3 (SQLite + أداء 100k)، M0.4 (تخزين الويب — يحتاج CI)، M0.6 (قائمة 10k)، M0.7 (Android/Windows)، M0.8 (ESC/POS + PDF عربي)، M0.9 (قرار G0).
