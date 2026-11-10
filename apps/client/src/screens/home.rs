@@ -137,7 +137,8 @@ fn today(st: AppState, compact: bool) -> impl IntoElement {
         vec![("count", s.fmt().integer(37))]
     });
     let delta = st.t_with("dashboard.vs_yesterday", |_| vec![("delta", "+12%".into())]);
-    let line = move |key: &'static str, ico: Icon, minor: i64, tone: Tone, sign: &'static str| {
+    // `signed`: cash movements show + / −; credit sales are not cash, so no sign.
+    let line = move |key: &'static str, ico: Icon, minor: i64, tone: Tone, signed: bool| {
         view()
             .flex_row()
             .items_center()
@@ -160,7 +161,14 @@ fn today(st: AppState, compact: bool) -> impl IntoElement {
                 Tone::Ink,
             )))
             .child(figure(
-                move || format!("{sign}{}", st.fmt().money(Money::from_minor(minor, DZD))),
+                move || {
+                    let m = Money::from_minor(minor, DZD);
+                    if signed {
+                        st.fmt().money_signed(m)
+                    } else {
+                        st.fmt().money(m)
+                    }
+                },
                 size::LEAD,
                 FontWeight::SEMIBOLD,
                 move || tone,
@@ -199,7 +207,7 @@ fn today(st: AppState, compact: bool) -> impl IntoElement {
             Icon::Banknote,
             3_915_000,
             Tone::Paid,
-            "+",
+            true,
         ))
         .child(rule())
         .child(line(
@@ -207,7 +215,7 @@ fn today(st: AppState, compact: bool) -> impl IntoElement {
             Icon::Out,
             960_000,
             Tone::Owed,
-            "",
+            false,
         ))
         .child(rule())
         .child(line(
@@ -215,15 +223,15 @@ fn today(st: AppState, compact: bool) -> impl IntoElement {
             Icon::Coins,
             420_000,
             Tone::Paid,
-            "+",
+            true,
         ))
         .child(rule())
         .child(line(
             "dashboard.expenses",
             Icon::Wallet,
-            185_000,
+            -185_000,
             Tone::Owed,
-            "−",
+            true,
         ))
 }
 

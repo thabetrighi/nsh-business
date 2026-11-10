@@ -25,7 +25,9 @@ pub struct Format {
     pub digits: Digits,
 }
 
-const NNBSP: char = '\u{202F}';
+/// Thousands separator for ar/fr. U+00A0 (not U+202F): the bundled UI font has
+/// no U+202F glyph, and the web would fall back to a near-zero width.
+const GROUP_SPACE: char = '\u{00A0}';
 
 impl Format {
     pub fn new(lang: Lang) -> Self {
@@ -37,7 +39,7 @@ impl Format {
 
     fn group_sep(&self) -> char {
         match self.lang {
-            Lang::Ar | Lang::Fr => NNBSP,
+            Lang::Ar | Lang::Fr => GROUP_SPACE,
             Lang::En => ',',
         }
     }
@@ -78,6 +80,17 @@ impl Format {
 
     /// The bare number of an amount, grouped and with the currency's decimals: `1 234.50`.
     pub fn amount(&self, m: Money) -> String {
+        self.amount_with(m, false)
+    }
+
+    /// Like [`Self::money`] but with an explicit `+` for positive amounts, for
+    /// ledger lines. The sign sits inside the number's isolate, so it stays on
+    /// the number's left in Arabic too.
+    pub fn money_signed(&self, m: Money) -> String {
+        self.with_symbol(self.amount_with(m, true), m)
+    }
+
+    fn amount_with(&self, m: Money, plus: bool) -> String {
         let plain = m.to_plain_string();
         let (neg, plain) = match plain.strip_prefix('-') {
             Some(rest) => (true, rest.to_owned()),
@@ -86,7 +99,9 @@ impl Format {
         let (int, frac) = plain.split_once('.').unwrap_or((&plain, ""));
         let mut s = String::new();
         if neg {
-            s.push('-');
+            s.push('\u{2212}');
+        } else if plus && !m.is_zero() {
+            s.push('+');
         }
         s.push_str(&self.group(int));
         if !frac.is_empty() {
@@ -109,7 +124,10 @@ impl Format {
 
     /// An amount with its currency: `1 234.50 دج`, `1 234,50 DA`, `DA 1,234.50`.
     pub fn money(&self, m: Money) -> String {
-        let amount = self.amount(m);
+        self.with_symbol(self.amount(m), m)
+    }
+
+    fn with_symbol(&self, amount: String, m: Money) -> String {
         let symbol = self.currency_symbol(m.currency());
         match self.lang {
             Lang::Ar | Lang::Fr => format!("{amount}\u{00A0}{symbol}"),
@@ -165,7 +183,9 @@ mod tests {
     use crate::bidi::strip_controls;
 
     fn plain(s: String) -> String {
-        strip_controls(&s).replace([NNBSP, '\u{00A0}'], " ")
+        strip_controls(&s)
+            .replace(GROUP_SPACE, " ")
+            .replace('\u{2212}', "-")
     }
 
     #[test]
@@ -200,6 +220,15 @@ mod tests {
         assert_eq!(plain(fr.integer(-1234)), "-1 234");
         assert_eq!(plain(fr.date(2026, 11, 10)), "10/11/2026");
         assert_eq!(plain(fr.time(9, 5)), "09:05");
+    }
+
+    #[test]
+    fn signed_ledger_amounts() {
+        let ar = Format::new(Lang::Ar);
+        let m = |x| Money::from_minor(x, Currency::DZD);
+        assert_eq!(plain(ar.money_signed(m(3_915_000))), "+39 150.00 دج");
+        assert_eq!(plain(ar.money_signed(m(-185_000))), "-1 850.00 دج");
+        assert_eq!(plain(ar.money_signed(m(0))), "0.00 دج");
     }
 
     #[test]
