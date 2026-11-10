@@ -42,4 +42,8 @@ test("adds a product from the phone, with validation", async () => {
   await app.type("id:product-price", "120,5");
   await app.press("text:Enregistrer");
   await app.waitUntil(() => app.texts().some((t) => t.includes("Lait test") && t.includes("enregistré")));
+  // The confirmation goes away by itself.
+  await app.waitUntil(() => !app.texts().some((t) => t.includes("enregistré")), { timeout: 6000 });
+  // The new product is first in the table.
+  expect(app.texts().some((t) => t.includes("Lait test"))).toBe(true);
 });

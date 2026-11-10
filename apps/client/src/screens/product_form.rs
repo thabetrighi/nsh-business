@@ -201,8 +201,8 @@ pub fn product_form(
             .child(field(
                 st.t("products.col.sku"),
                 d.sku,
-                || String::new(),
-                || String::new(),
+                String::new,
+                String::new,
                 KeyboardType::Default,
                 "product-sku",
             ))

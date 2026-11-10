@@ -70,18 +70,27 @@ pub fn modal(
     })
 }
 
-/// Shows `message` as a toast for a few seconds (replaces a visible one).
+/// Shows `message` as a toast (replaces a visible one). The toast layer at
+/// the root hides it after a few seconds.
 pub fn show_toast(st: AppState, message: String) {
-    st.toast.set(Some(message.clone()));
-    let _ = set_timeout(Duration::from_millis(2600), move || {
-        if st.toast.get_untracked().as_deref() == Some(message.as_str()) {
-            st.toast.set(None);
-        }
-    });
+    st.toast.set(Some(message));
 }
 
 /// The toast layer, placed once at the root, above the bottom navigation.
 pub fn toast_layer(st: AppState, compact: bool) -> impl IntoElement {
+    // The hide timer belongs to this root-level layer, not to the screen that
+    // raised the toast (a closing form would cancel a timer it owned). Each
+    // new message re-runs the effect, which replaces the previous timer.
+    effect(move || {
+        if let Some(message) = st.toast.get() {
+            let timer = set_timeout(Duration::from_millis(2600), move || {
+                if st.toast.get_untracked().as_deref() == Some(message.as_str()) {
+                    st.toast.set(None);
+                }
+            });
+            drop(timer); // runs to completion: tasks end with their owner, not their handle
+        }
+    });
     when(
         move || st.toast.with(Option::is_some),
         move || {

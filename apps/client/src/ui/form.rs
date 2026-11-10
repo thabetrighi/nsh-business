@@ -44,7 +44,7 @@ pub fn field(
                 .text_color(Tone::Ink.color()),
         )
         .child(label(
-            move || err_for_text(),
+            err_for_text,
             size::CAPTION,
             FontWeight::NORMAL,
             Tone::Owed,
