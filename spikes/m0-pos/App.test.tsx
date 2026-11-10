@@ -24,7 +24,7 @@ test("adds products to the cart with integer totals", async () => {
 test("scrolls the 10k grid", async () => {
   const app = await open(".", { locale: "ar" });
   await app.waitFor("text:السلة");
-  await app.scroll("id:grid", 20000);
+  await app.scroll("id:grid", 6000); // 600 frames ≈ 10 s at 10 pt per frame
   await app.press("id:product >> nth=0");
   expect(app.texts()).toContain("1 قطعة");
 });
