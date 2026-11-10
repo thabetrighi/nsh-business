@@ -8,7 +8,55 @@ fn native(registry: &mut Registry) {
     registry.register::<App>();
 }
 
-fn row_item(label: &'static str, value: &'static str) -> impl IntoElement {
+/// How the panel prepares mixed-direction text (web bidi spike).
+#[derive(Clone, Copy)]
+enum Fix {
+    None,
+    /// Explicit paragraph direction on each text.
+    WritingRtl,
+    /// Wrap Latin/number runs in Unicode isolates (FSI ... PDI).
+    Isolates,
+}
+
+fn label(s: &'static str, fix: Fix) -> impl IntoElement {
+    let content = match fix {
+        Fix::Isolates => isolate_ltr_runs(s),
+        _ => s.to_owned(),
+    };
+    let t = text(content).text_size(px(17.0));
+    match fix {
+        Fix::WritingRtl => t.writing_direction(WritingDirection::Rtl),
+        _ => t,
+    }
+}
+
+/// Wraps every run of non-Arabic, non-space characters in FSI/PDI.
+fn isolate_ltr_runs(s: &str) -> String {
+    let is_ar = |c: char| ('\u{0600}'..='\u{06FF}').contains(&c);
+    let mut out = String::new();
+    let mut run = String::new();
+    for c in s.chars() {
+        if is_ar(c) || c == ' ' || c == ':' {
+            if !run.is_empty() {
+                out.push('\u{2068}');
+                out.push_str(&run);
+                out.push('\u{2069}');
+                run.clear();
+            }
+            out.push(c);
+        } else {
+            run.push(c);
+        }
+    }
+    if !run.is_empty() {
+        out.push('\u{2068}');
+        out.push_str(&run);
+        out.push('\u{2069}');
+    }
+    out
+}
+
+fn row_item(label_s: &'static str, value: &'static str, fix: Fix) -> impl IntoElement {
     view()
         .flex_row()
         .justify_between()
@@ -17,20 +65,20 @@ fn row_item(label: &'static str, value: &'static str) -> impl IntoElement {
         .gap_2()
         .bg(move || theme().muted)
         .rounded(px(8.0))
-        .child(text(label).text_size(px(17.0)))
-        .child(text(value).text_size(px(17.0)))
+        .child(label(label_s, fix))
+        .child(label(value, fix))
 }
 
-fn panel(title: &'static str, dir: LayoutDirection) -> impl IntoElement {
+fn panel(title: &'static str, dir: LayoutDirection, fix: Fix) -> impl IntoElement {
     view()
         .direction(dir)
         .flex_1()
         .p_4()
         .gap_2()
-        .child(text(title).text_size(px(20.0)))
-        .child(row_item("المنتج: حليب كامل الدسم 1L", "120.00 دج"))
-        .child(row_item("الكمية", "3 × كرتون (12 علبة)"))
-        .child(row_item("SKU: MLK-001 / باركود 6130000000001", "✓"))
+        .child(label(title, fix))
+        .child(row_item("المنتج: حليب كامل الدسم 1L", "120.00 دج", fix))
+        .child(row_item("الكمية", "3 × كرتون (12 علبة)", fix))
+        .child(row_item("SKU: MLK-001 / باركود 6130000000001", "✓", fix))
         .child(
             view()
                 .flex_row()
@@ -61,6 +109,8 @@ pub fn App() -> impl IntoElement {
         .flex_row()
         .bg(move || theme().background)
         .text_color(move || theme().foreground)
-        .child(panel("اتجاه RTL", LayoutDirection::Rtl))
-        .child(panel("LTR direction", LayoutDirection::Ltr))
+        .child(panel("اتجاه RTL", LayoutDirection::Rtl, Fix::None))
+        .child(panel("RTL + writing_direction", LayoutDirection::Rtl, Fix::WritingRtl))
+        .child(panel("RTL + عزل FSI/PDI", LayoutDirection::Rtl, Fix::Isolates))
+        .child(panel("LTR direction", LayoutDirection::Ltr, Fix::None))
 }

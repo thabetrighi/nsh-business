@@ -54,7 +54,7 @@ jobs:
           (cd .nsh/out/hello && python3 -m http.server 8000 >/dev/null 2>&1 &)
           sleep 2
           google-chrome --headless=new --no-sandbox --disable-gpu --hide-scrollbars \
-            --window-size=1000,420 --virtual-time-budget=15000 \
+            --window-size=1800,420 --virtual-time-budget=15000 \
             --screenshot=web-rtl.png http://localhost:8000/ || true
           ls -la web-rtl.png
 

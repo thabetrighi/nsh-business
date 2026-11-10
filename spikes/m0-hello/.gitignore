@@ -1,2 +1,4 @@
 .nsh/
 target/
+target
+.nsh/
