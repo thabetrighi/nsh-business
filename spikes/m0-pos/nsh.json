@@ -1,0 +1,8 @@
+{
+  "name": "m0-pos",
+  "id": "com.nshbusiness.spike.pos",
+  "version": "0.1.0",
+  "build": 1,
+  "rust": ".",
+  "root": "App"
+}
