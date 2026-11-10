@@ -1,0 +1,12 @@
+[package]
+name = "m0-print"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+cosmic-text = "0.19"
+krilla = "0.8"
+png = "0.18"
