@@ -54,3 +54,13 @@ settings.theme.dark = Dark
 settings.theme.system = System
 
 placeholder.coming = This screen is being built and arrives in the next stages.
+
+products.col.sku = Code
+products.col.name = Product
+products.col.category = Category
+products.col.unit = Unit
+products.col.price = Selling price
+products.col.stock = Stock
+products.count = {count} products
+products.add = Add a product
+products.search = Search by name or code

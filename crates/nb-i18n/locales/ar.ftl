@@ -54,3 +54,13 @@ settings.theme.dark = داكن
 settings.theme.system = حسب النظام
 
 placeholder.coming = هذه الشاشة قيد البناء وستتوفر في المراحل القادمة.
+
+products.col.sku = الرمز
+products.col.name = المنتج
+products.col.category = التصنيف
+products.col.unit = الوحدة
+products.col.price = سعر البيع
+products.col.stock = المخزون
+products.count = {count} منتج
+products.add = أضف منتجاً
+products.search = ابحث بالاسم أو الرمز

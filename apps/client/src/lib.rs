@@ -3,6 +3,10 @@
 //! The UI only composes and displays; business rules live in the `nb-*`
 //! crates. Design rules: `docs/design/DESIGN.md`.
 
+// UI geometry is in f32 points by nature. Money and quantities never use floats:
+// they go through nb-core (Money, Quantity), where float arithmetic stays denied.
+#![allow(clippy::float_arithmetic)]
+
 use nsh_core::prelude::*;
 
 mod screens;

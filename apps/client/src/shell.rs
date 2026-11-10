@@ -7,6 +7,7 @@ use nsh_core::element::SharedString;
 use nsh_core::prelude::*;
 
 use crate::screens::home::home;
+use crate::screens::products::products;
 use crate::state::{AppState, toggle_appearance};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{icon_button, label, label_line, primary_button, size};
@@ -74,7 +75,13 @@ const NAV_GROUPS: [(&str, &[Route]); 3] = [
 ];
 
 pub fn shell(st: AppState) -> impl IntoElement {
-    let route = signal(Route::Home);
+    // NB_ROUTE (development): start on a given screen, e.g. for screenshots.
+    let start = match std::env::var("NB_ROUTE").as_deref() {
+        Ok("products") => Route::Products,
+        Ok("customers") => Route::Customers,
+        _ => Route::Home,
+    };
+    let route = signal(start);
     let compact = computed(|| window().width.0 < COMPACT_MAX);
     view()
         .flex_1()
@@ -88,9 +95,14 @@ pub fn shell(st: AppState) -> impl IntoElement {
 }
 
 fn content(st: AppState, route: Signal<Route>, compact: bool) -> impl IntoElement {
+    // Screens with their own scrolling (tables) fill the area; the rest scroll as a page.
     dynamic(move || match route.get() {
-        Route::Home | Route::Sell => home(st, compact).into_element(),
-        other => coming_soon(st, other).into_element(),
+        Route::Home | Route::Sell => scroll().flex_1().child(home(st, compact)).into_element(),
+        Route::Products => products(st, compact).into_element(),
+        other => scroll()
+            .flex_1()
+            .child(coming_soon(st, other))
+            .into_element(),
     })
 }
 
@@ -123,7 +135,7 @@ fn desktop(st: AppState, route: Signal<Route>) -> impl IntoElement {
         view()
             .flex_1()
             .child(top_bar(st))
-            .child(scroll().flex_1().child(content(st, route, false))),
+            .child(content(st, route, false)),
     )
 }
 
@@ -441,7 +453,7 @@ fn phone(st: AppState, route: Signal<Route>) -> impl IntoElement {
                         )),
                 ),
         )
-        .child(scroll().flex_1().child(content(st, route, true)))
+        .child(content(st, route, true))
         .child(bottom_nav(st, route))
 }
 
