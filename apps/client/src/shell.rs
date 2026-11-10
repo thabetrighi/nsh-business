@@ -8,91 +8,21 @@ use nsh_core::element::{SharedString, View};
 use nsh_core::prelude::*;
 
 use crate::command_palette::command_palette;
+use crate::nav::{BOTTOM, Route, SECTIONS, Section, TOP};
+use crate::screens::common::coming_soon;
 use crate::screens::{design::design, home::home, products::products, settings::settings};
 use crate::state::AppState;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{
-    Size, Variant, avatar, badge, button, icon_button, kbd, label, label_line, spacer,
+    Size, Variant, avatar, badge, button, figure, icon_button, kbd, label, label_line, spacer,
 };
 use crate::ui::overlay::{modal, toast_layer};
-use crate::ui::surface::{empty_state, page_pad};
+use crate::ui::surface::page_pad;
 use crate::ui::tokens::{Status, Tone, radius, sp, ty};
 
 /// Width below which the phone layout is used.
 const COMPACT_MAX: f32 = 760.0;
-const SIDEBAR_W: f32 = 232.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Route {
-    Home,
-    Sell,
-    Sales,
-    Products,
-    Inventory,
-    Customers,
-    Purchases,
-    Cash,
-    Reports,
-    Settings,
-    Design,
-}
-
-impl Route {
-    pub fn key(self) -> &'static str {
-        match self {
-            Route::Home => "nav.home",
-            Route::Sell => "nav.sell",
-            Route::Sales => "nav.sales",
-            Route::Products => "nav.products",
-            Route::Inventory => "nav.inventory",
-            Route::Customers => "nav.customers",
-            Route::Purchases => "nav.purchases",
-            Route::Cash => "nav.cash",
-            Route::Reports => "nav.reports",
-            Route::Settings => "nav.settings",
-            Route::Design => "nav.design",
-        }
-    }
-
-    pub fn icon(self) -> Icon {
-        match self {
-            Route::Home => Icon::Home,
-            Route::Sell => Icon::Cart,
-            Route::Sales => Icon::Receipt,
-            Route::Products => Icon::Package,
-            Route::Inventory => Icon::Boxes,
-            Route::Customers => Icon::Users,
-            Route::Purchases => Icon::Truck,
-            Route::Cash => Icon::Wallet,
-            Route::Reports => Icon::Chart,
-            Route::Settings => Icon::Settings,
-            Route::Design => Icon::Palette,
-        }
-    }
-
-    /// NB_ROUTE (development): start on a given screen, e.g. for screenshots.
-    pub fn from_env() -> Option<Self> {
-        Some(match std::env::var("NB_ROUTE").ok()?.as_str() {
-            "products" => Route::Products,
-            "customers" => Route::Customers,
-            "settings" => Route::Settings,
-            "design" => Route::Design,
-            _ => return None,
-        })
-    }
-}
-
-const NAV_GROUPS: [(&str, &[Route]); 3] = [
-    (
-        "nav.group.daily",
-        &[Route::Home, Route::Sell, Route::Sales, Route::Customers],
-    ),
-    (
-        "nav.group.stock",
-        &[Route::Products, Route::Inventory, Route::Purchases],
-    ),
-    ("nav.group.money", &[Route::Cash, Route::Reports]),
-];
+const SIDEBAR_W: f32 = 248.0;
 
 pub fn shell(st: AppState) -> impl IntoElement {
     let compact = computed(|| window().width.0 < COMPACT_MAX);
@@ -116,31 +46,15 @@ pub fn shell(st: AppState) -> impl IntoElement {
 fn content(st: AppState, compact: bool) -> impl IntoElement {
     // Screens with their own scrolling (tables) fill the area; the rest scroll as a page.
     dynamic(move || match st.route.get() {
-        Route::Home | Route::Sell => scroll().flex_1().child(home(st, compact)).into_element(),
+        Route::Home => scroll().flex_1().child(home(st, compact)).into_element(),
         Route::Products => products(st, compact).into_element(),
-        Route::Settings => scroll()
-            .flex_1()
-            .child(settings(st, compact))
-            .into_element(),
+        Route::Settings => settings(st, compact).into_element(),
         Route::Design => scroll().flex_1().child(design(st, compact)).into_element(),
         other => scroll()
             .flex_1()
             .child(coming_soon(st, other, compact))
             .into_element(),
     })
-}
-
-fn coming_soon(st: AppState, r: Route, compact: bool) -> View {
-    view()
-        .flex_1()
-        .p(px(page_pad(compact)))
-        .pt(px(80.0))
-        .child(empty_state(
-            r.icon(),
-            st.t(r.key()),
-            st.t("placeholder.coming"),
-            None,
-        ))
 }
 
 fn store_name(st: AppState) -> impl Fn() -> String + 'static {
@@ -227,20 +141,27 @@ fn store_switcher(st: AppState) -> View {
 }
 
 fn sidebar(st: AppState) -> View {
-    let mut nav = view().gap(px(18.0)).px(px(10.0));
-    for (group, routes) in NAV_GROUPS {
-        let mut g = view()
-            .gap(px(1.0))
-            .child(view().px(px(10.0)).pb(px(4.0)).child(label(
-                st.t(group),
-                ty::XS,
-                FontWeight::SEMIBOLD,
-                Tone::Faint,
-            )));
-        for &r in routes {
-            g = g.child(nav_item(st, r));
+    // The section of the open page is expanded when the page changes.
+    effect(move || {
+        if let Some((i, _)) = st.route.get().section() {
+            let bit = 1u32 << i;
+            if st.open_sections.get_untracked() & bit == 0 {
+                st.open_sections.update(|m| *m |= bit);
+            }
         }
-        nav = nav.child(g);
+    });
+    let mut nav = view().gap(px(1.0)).px(px(10.0));
+    for &r in TOP {
+        nav = nav.child(nav_item(st, r, false));
+    }
+    nav = nav.child(view().px(px(10.0)).pt(px(16.0)).pb(px(6.0)).child(label(
+        st.t("nav.workspace"),
+        ty::XS,
+        FontWeight::SEMIBOLD,
+        Tone::Faint,
+    )));
+    for (i, section) in SECTIONS.iter().enumerate() {
+        nav = nav.child(section_group(st, i, section));
     }
     view()
         .w(px(SIDEBAR_W))
@@ -248,27 +169,38 @@ fn sidebar(st: AppState) -> View {
         .border_e(px(1.0))
         .border_e_color(Tone::Border.color())
         .pt(px(10.0))
-        .pb(px(12.0))
-        .gap(px(14.0))
+        .pb(px(10.0))
+        .gap(px(10.0))
         .child(store_switcher(st))
-        .child(scroll().flex_1().child(nav))
+        .child(scroll().flex_1().child(nav.pb(px(12.0))))
         .child(
             view()
                 .px(px(10.0))
+                .pt(px(8.0))
                 .gap(px(1.0))
-                .child(nav_item(st, Route::Design))
-                .child(nav_item(st, Route::Settings)),
+                .border_t_1()
+                .border_color(Tone::Border.color())
+                .child(nav_item(st, Route::Design, false))
+                .child(nav_item(st, Route::Settings, false)),
         )
 }
 
-fn nav_item(st: AppState, r: Route) -> View {
-    let active = computed(move || st.route.get() == r);
-    view()
-        .test_id(match r {
-            Route::Settings => "nav-settings",
-            Route::Products => "nav-products",
-            _ => "nav-item",
-        })
+/// Pages with something waiting, shown as a count beside their name.
+fn nav_count(r: Route) -> Option<(i64, Status)> {
+    match r {
+        Route::Debts => Some((14, Status::Warning)),
+        Route::Inventory => Some((72, Status::Danger)),
+        _ => None,
+    }
+}
+
+/// A sidebar section: a header that expands to its pages.
+fn section_group(st: AppState, i: usize, section: &'static Section) -> View {
+    let bit = 1u32 << i;
+    let open = computed(move || st.open_sections.get() & bit != 0);
+    let holds = computed(move || section.routes.contains(&st.route.get()));
+    let header = view()
+        .test_id(&format!("section-{i}"))
         .flex_row()
         .items_center()
         .gap(px(10.0))
@@ -276,12 +208,11 @@ fn nav_item(st: AppState, r: Route) -> View {
         .px(px(10.0))
         .rounded(px(radius::md()))
         .cursor_pointer()
-        .style_when(active, |s| s.bg(Tone::Hover.color()))
         .hover(|s| s.bg(Tone::Hover.color()))
-        .on_press(move || st.route.set(r))
+        .on_press(move || st.open_sections.update(|m| *m ^= bit))
         .child(dynamic(move || {
-            icon(r.icon(), 16.0, move || {
-                if active.get() {
+            icon(section.icon, 16.0, move || {
+                if holds.get() {
                     Tone::Primary
                 } else {
                     Tone::Muted
@@ -290,16 +221,102 @@ fn nav_item(st: AppState, r: Route) -> View {
             .into_element()
         }))
         .child(
+            view().flex_1().min_w(px(0.0)).child(
+                label_line(st.t(section.key), ty::SM, FontWeight::MEDIUM, Tone::Body)
+                    .style_when(holds, |s| s.font_weight(FontWeight::SEMIBOLD))
+                    .text_color(move || {
+                        if holds.get() {
+                            Tone::Ink.color()
+                        } else {
+                            Tone::Body.color()
+                        }
+                    }),
+            ),
+        )
+        .child(dynamic(move || {
+            let which = if open.get() {
+                Icon::ChevronDown
+            } else if st.rtl() {
+                Icon::ChevronLeft
+            } else {
+                Icon::ChevronRight
+            };
+            icon(which, 14.0, || Tone::Faint).into_element()
+        }));
+    let children = when(open, move || {
+        let mut list = view()
+            .ms(px(18.0))
+            .ps(px(10.0))
+            .border_s(px(1.0))
+            .border_s_color(Tone::Border.color())
+            .gap(px(1.0))
+            .py(px(2.0));
+        for &r in section.routes {
+            list = list.child(nav_item(st, r, true));
+        }
+        list.into_element()
+    });
+    view().gap(px(1.0)).child(header).child(children)
+}
+
+fn nav_item(st: AppState, r: Route, nested: bool) -> View {
+    let active = computed(move || st.route.get() == r);
+    let mut item = view()
+        .test_id(&format!("nav-{}", r.code()))
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .h(px(sp(if nested { 30.0 } else { 32.0 })))
+        .px(px(10.0))
+        .rounded(px(radius::md()))
+        .cursor_pointer()
+        .style_when(active, |s| s.bg(Tone::Hover.color()))
+        .hover(|s| s.bg(Tone::Hover.color()))
+        .on_press(move || st.route.set(r));
+    if !nested {
+        item = item.child(dynamic(move || {
+            icon(r.icon(), 16.0, move || {
+                if active.get() {
+                    Tone::Primary
+                } else {
+                    Tone::Muted
+                }
+            })
+            .into_element()
+        }));
+    }
+    item = item.child(
+        view().flex_1().min_w(px(0.0)).child(
             label_line(st.t(r.key()), ty::SM, FontWeight::MEDIUM, Tone::Body)
                 .style_when(active, |s| s.font_weight(FontWeight::SEMIBOLD))
                 .text_color(move || {
                     if active.get() {
                         Tone::Primary.color()
+                    } else if nested {
+                        Tone::Muted.color()
                     } else {
                         Tone::Body.color()
                     }
                 }),
-        )
+        ),
+    );
+    if let Some((n, status)) = nav_count(r) {
+        item = item.child(
+            view()
+                .px(px(6.0))
+                .h(px(18.0))
+                .justify_center()
+                .rounded_full()
+                .bg(status.bg().color())
+                .child(figure(
+                    move || st.fmt().integer(n),
+                    11.0,
+                    FontWeight::SEMIBOLD,
+                    move || status.fg(),
+                )),
+        );
+    }
+    item
 }
 
 fn top_bar(st: AppState) -> View {
@@ -443,52 +460,64 @@ fn phone(st: AppState) -> View {
         .child(bottom_nav(st))
 }
 
-/// Every section not in the bottom bar, as a sheet of large targets.
+/// Every page, by section, as a scrolling sheet of large targets.
 fn more_sheet(st: AppState, open: Signal<bool>) -> View {
-    let mut grid = view().flex_row().flex_wrap().px(px(12.0)).pb(px(12.0));
-    for r in [
-        Route::Products,
-        Route::Inventory,
-        Route::Purchases,
-        Route::Cash,
-        Route::Reports,
-        Route::Settings,
-        Route::Design,
-    ] {
-        grid = grid.child(
+    let go = move |r: Route| {
+        st.route.set(r);
+        open.set(false);
+    };
+    let tile = move |r: Route| {
+        view().w(relative(0.5)).p(px(4.0)).child(
             view()
-                .w(relative(1.0 / 3.0))
+                .flex_row()
                 .items_center()
-                .gap(px(8.0))
-                .py(px(14.0))
-                .rounded(px(radius::lg()))
+                .gap(px(10.0))
+                .h(px(48.0))
+                .px(px(10.0))
+                .rounded(px(radius::md()))
+                .bg(Tone::Subtle.color())
                 .active(|s| s.bg(Tone::Hover.color()))
-                .on_press(move || {
-                    st.route.set(r);
-                    open.set(false);
-                })
-                .child(
-                    view()
-                        .w(px(48.0))
-                        .h(px(48.0))
-                        .rounded(px(radius::lg()))
-                        .items_center()
-                        .justify_center()
-                        .bg(Tone::PrimarySoft.color())
-                        .child(icon(r.icon(), 22.0, || Tone::Primary)),
-                )
-                .child(label(st.t(r.key()), ty::SM, FontWeight::MEDIUM, Tone::Ink)),
+                .on_press(move || go(r))
+                .child(icon(r.icon(), 18.0, || Tone::Primary))
+                .child(view().flex_1().min_w(px(0.0)).child(label_line(
+                    st.t(r.key()),
+                    ty::SM,
+                    FontWeight::MEDIUM,
+                    Tone::Ink,
+                ))),
+        )
+    };
+    let mut body = view().px(px(12.0)).pb(px(16.0)).gap(px(12.0));
+    for section in SECTIONS.iter().chain(std::iter::once(&Section {
+        key: "nav.sec.system",
+        icon: Icon::Settings,
+        routes: BOTTOM,
+    })) {
+        let mut grid = view().flex_row().flex_wrap();
+        for &r in section.routes {
+            grid = grid.child(tile(r));
+        }
+        body = body.child(
+            view()
+                .gap(px(4.0))
+                .child(view().px(px(6.0)).child(label(
+                    st.t(section.key),
+                    ty::XS,
+                    FontWeight::SEMIBOLD,
+                    Tone::Muted,
+                )))
+                .child(grid),
         );
     }
     view()
         .gap(px(4.0))
-        .child(view().px(px(24.0)).pt(px(12.0)).pb(px(4.0)).child(label(
+        .child(view().px(px(18.0)).pt(px(10.0)).pb(px(6.0)).child(label(
             st.t("nav.more"),
             ty::XL,
             FontWeight::BOLD,
             Tone::Ink,
         )))
-        .child(grid)
+        .child(scroll().max_h(px(560.0)).child(body))
 }
 
 fn bottom_nav(st: AppState) -> View {
@@ -505,6 +534,7 @@ fn bottom_nav(st: AppState) -> View {
             None => in_more.get(),
         });
         view()
+            .test_id(&format!("bottom-{}", r.map_or("more", Route::code)))
             .flex_1()
             .items_center()
             .justify_center()

@@ -14,9 +14,10 @@ pub fn page_pad(compact: bool) -> f32 {
     if compact { 16.0 } else { 32.0 }
 }
 
-/// A page: title, optional subtitle, actions at the reading end. On phones
-/// the app bar already names the page: only the subtitle and actions show.
-pub fn page_header(
+/// A page header with its icon and the section it is in (a breadcrumb).
+pub fn page_header_full(
+    which: Option<Icon>,
+    eyebrow: Option<Box<dyn Fn() -> String>>,
     title: impl Fn() -> String + 'static,
     subtitle: Option<Box<dyn Fn() -> String>>,
     actions: View,
@@ -35,24 +36,30 @@ pub fn page_header(
         });
         return row.child(actions.flex_row().items_center().gap(px(8.0)));
     }
-    let mut heading = view()
-        .flex_1()
-        .min_w(px(0.0))
-        .gap(px(2.0))
-        .child(label_line(
-            title,
-            if compact { ty::XL } else { ty::H2 },
-            FontWeight::BOLD,
-            Tone::Ink,
-        ));
+    let mut heading = view().flex_1().min_w(px(0.0)).gap(px(2.0));
+    if let Some(e) = eyebrow {
+        heading = heading.child(label_line(e, ty::XS, FontWeight::SEMIBOLD, Tone::Primary));
+    }
+    heading = heading.child(label_line(title, ty::H2, FontWeight::BOLD, Tone::Ink));
     if let Some(s) = subtitle {
         heading = heading.child(label(s, ty::SM, FontWeight::NORMAL, Tone::Muted));
     }
-    view()
-        .flex_row()
-        .items_center()
-        .gap(px(12.0))
-        .child(heading)
+    let mut row = view().flex_row().items_center().gap(px(14.0));
+    if let Some(i) = which {
+        row = row.child(
+            view()
+                .w(px(44.0))
+                .h(px(44.0))
+                .rounded(px(radius::lg()))
+                .items_center()
+                .justify_center()
+                .bg(Tone::PrimarySoft.color())
+                .border_1()
+                .border_color(Tone::Border.color())
+                .child(icon(i, 22.0, || Tone::Primary)),
+        );
+    }
+    row.child(heading)
         .child(actions.flex_row().items_center().gap(px(8.0)))
 }
 
@@ -73,6 +80,16 @@ pub fn card_header(
     hint: Option<Box<dyn Fn() -> String>>,
     actions: View,
 ) -> View {
+    card_header_icon(None, title, hint, actions)
+}
+
+/// A card header led by an icon in a soft tile.
+pub fn card_header_icon(
+    which: Option<Icon>,
+    title: impl Fn() -> String + 'static,
+    hint: Option<Box<dyn Fn() -> String>>,
+    actions: View,
+) -> View {
     let mut t = view()
         .flex_1()
         .min_w(px(0.0))
@@ -81,14 +98,28 @@ pub fn card_header(
     if let Some(h) = hint {
         t = t.child(label(h, ty::SM, FontWeight::NORMAL, Tone::Muted));
     }
-    view()
+    let mut row = view()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(10.0))
         .px(px(20.0))
         .pt(px(sp(18.0)))
-        .pb(px(sp(14.0)))
-        .child(t)
+        .pb(px(sp(14.0)));
+    if let Some(i) = which {
+        row = row.child(
+            view()
+                .w(px(32.0))
+                .h(px(32.0))
+                .rounded(px(radius::md()))
+                .items_center()
+                .justify_center()
+                .bg(Tone::Subtle.color())
+                .border_1()
+                .border_color(Tone::Border.color())
+                .child(icon(i, 16.0, || Tone::Body)),
+        );
+    }
+    row.child(t)
         .child(actions.flex_row().items_center().gap(px(6.0)))
 }
 

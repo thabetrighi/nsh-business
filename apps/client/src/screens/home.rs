@@ -11,13 +11,15 @@ use nsh_core::prelude::*;
 use super::sample::{
     self, CATEGORY_SALES, INVOICES, InvoiceStatus, LOW_STOCK, PAYMENTS, Period, pick,
 };
-use crate::shell::Route;
+use crate::nav::Route;
 use crate::state::AppState;
 use crate::ui::chart::{Series, area_chart, bar_list, donut, legend, legend_row, sparkline};
 use crate::ui::icon::Icon;
 use crate::ui::kit::{Size, Variant, avatar, badge, button, figure, label, label_line, segmented};
 use crate::ui::popup::{Action, row_menu};
-use crate::ui::surface::{card, card_body, card_header, delta, kpi, page_header, page_pad};
+use crate::ui::surface::{
+    card, card_body, card_header_icon, delta, kpi, page_header_full, page_pad,
+};
 use crate::ui::tokens::{Status, Tone, sp, ty};
 
 const DZD: Currency = Currency::DZD;
@@ -62,7 +64,9 @@ pub fn home(st: AppState, compact: bool) -> View {
         .w_full()
         .p(px(page_pad(compact)))
         .gap(px(gap))
-        .child(page_header(
+        .child(page_header_full(
+            Some(Icon::Dashboard),
+            None,
             st.t("dashboard.title"),
             Some(Box::new(st.t("dashboard.subtitle"))),
             actions,
@@ -216,18 +220,29 @@ fn sales_card(st: AppState, period: Period, compact: bool) -> View {
             filled: false,
         },
     ];
-    let names = series.iter().map(|s| s.name.clone()).collect();
+    let names: Vec<String> = series.iter().map(|s| s.name.clone()).collect();
+    let names2 = names.clone();
     let y = Rc::new(move |v: i64| st.fmt().compact(v / 100));
     card()
         .min_w(px(0.0))
-        .child(card_header(
+        .child(card_header_icon(
+            Some(Icon::ChartLine),
             st.t("chart.sales"),
             Some(Box::new(st.t("chart.sales_hint"))),
-            view().child(legend(names)),
+            if compact {
+                view()
+            } else {
+                view().child(legend(names))
+            },
         ))
         .child(
             card_body()
                 .gap(px(8.0))
+                .child(if compact {
+                    view().child(legend(names2))
+                } else {
+                    view()
+                })
                 .child(figure(
                     move || st.fmt().money_whole(dzd(total)),
                     ty::H2,
@@ -257,7 +272,12 @@ fn payments_card(st: AppState) -> View {
         }));
     }
     card()
-        .child(card_header(st.t("chart.payments"), None, view()))
+        .child(card_header_icon(
+            Some(Icon::Wallet),
+            st.t("chart.payments"),
+            None,
+            view(),
+        ))
         .child(
             card_body()
                 .items_center()
@@ -411,7 +431,8 @@ fn invoices_card(st: AppState, compact: bool) -> View {
     }
     card()
         .min_w(px(0.0))
-        .child(card_header(
+        .child(card_header_icon(
+            Some(Icon::Receipt),
             st.t("recent.title"),
             None,
             view().child(button(
@@ -434,7 +455,12 @@ fn categories_card(st: AppState) -> View {
             .collect::<Vec<_>>()
     };
     card()
-        .child(card_header(st.t("chart.by_category"), None, view()))
+        .child(card_header_icon(
+            Some(Icon::Layers),
+            st.t("chart.by_category"),
+            None,
+            view(),
+        ))
         .child(card_body().child(dynamic(move || {
             bar_list(rows(), Tone::Primary).into_element()
         })))
@@ -485,7 +511,8 @@ fn low_stock_card(st: AppState) -> View {
         );
     }
     card()
-        .child(card_header(
+        .child(card_header_icon(
+            Some(Icon::Alert),
             st.t("dashboard.low_stock_title"),
             None,
             view().child(button(

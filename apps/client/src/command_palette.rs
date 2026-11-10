@@ -8,7 +8,7 @@ use nsh_base::{CommandItem, command};
 use nsh_core::element::SharedString;
 use nsh_core::prelude::*;
 
-use crate::shell::Route;
+use crate::nav::Route;
 use crate::state::{AppState, Intent};
 use crate::ui::overlay::modal;
 
@@ -16,42 +16,24 @@ fn all_langs(key: &str) -> Vec<String> {
     Lang::ALL.iter().map(|&l| tr(l, key).into_owned()).collect()
 }
 
-const SECTIONS: [(Route, &str, &[&str]); 10] = [
-    (Route::Home, "home", &["dashboard", "accueil", "لوحة"]),
-    (Route::Sales, "sales", &["factures", "invoices", "فواتير"]),
-    (
-        Route::Customers,
-        "customers",
-        &["كريدي", "ديون", "crédit", "dettes", "debts"],
-    ),
-    (
-        Route::Products,
-        "products",
-        &["articles", "catalogue", "سلع"],
-    ),
-    (
-        Route::Inventory,
-        "inventory",
-        &["stock", "مستودع", "entrepôt"],
-    ),
-    (
-        Route::Purchases,
-        "purchases",
-        &["fournisseurs", "suppliers", "موردين"],
-    ),
-    (Route::Cash, "cash", &["caisse", "خزينة"]),
-    (Route::Reports, "reports", &["statistiques", "إحصائيات"]),
-    (
-        Route::Settings,
-        "settings",
-        &["préférences", "تفضيلات", "langue", "اللغة", "thème"],
-    ),
-    (
-        Route::Design,
-        "design",
-        &["composants", "components", "مكونات"],
-    ),
-];
+/// Local words people type for some pages, beyond their names.
+fn synonyms(r: Route) -> &'static [&'static str] {
+    match r {
+        Route::Home => &["dashboard", "accueil", "لوحة"],
+        Route::Sell => &["pos", "caisse", "بيع", "vendre"],
+        Route::Sales => &["factures", "invoices", "فواتير", "ventes"],
+        Route::Customers => &["clients", "زبائن"],
+        Route::Debts => &["كريدي", "ديون", "crédit", "dettes", "debts"],
+        Route::Products => &["articles", "catalogue", "سلع"],
+        Route::Inventory => &["stock", "مستودع", "entrepôt"],
+        Route::Purchases => &["fournisseurs", "suppliers", "موردين"],
+        Route::Cash => &["caisse", "خزينة"],
+        Route::Reports => &["statistiques", "إحصائيات"],
+        Route::Settings => &["préférences", "تفضيلات", "langue", "اللغة", "thème"],
+        Route::Design => &["composants", "components", "مكونات"],
+        _ => &[],
+    }
+}
 
 fn items(lang: Lang) -> Vec<CommandItem> {
     let t = |k: &str| tr(lang, k).into_owned();
@@ -79,16 +61,17 @@ fn items(lang: Lang) -> Vec<CommandItem> {
             .keywords([l.code().to_owned(), l.native_name().to_owned()]),
         );
     }
-    for (route, id, synonyms) in SECTIONS {
-        let key = format!("nav.{id}");
-        let mut keywords = all_langs(&key);
-        keywords.extend(synonyms.iter().map(|s| (*s).to_owned()));
+    for &route in Route::ALL {
+        let mut keywords = all_langs(route.key());
+        if let Some((_, s)) = route.section() {
+            keywords.extend(all_langs(s.key));
+        }
+        keywords.extend(synonyms(route).iter().map(|s| (*s).to_owned()));
         v.push(
-            CommandItem::new(format!("go:{id}"), t(&key))
+            CommandItem::new(format!("go:{}", route.code()), t(route.key()))
                 .group(go.clone())
                 .keywords(keywords),
         );
-        let _ = route;
     }
     v
 }
@@ -107,10 +90,8 @@ fn run(st: AppState, id: &str) {
                 if let Some(l) = Lang::from_tag(code) {
                     st.lang.set(l);
                 }
-            } else if let Some(section) = id.strip_prefix("go:")
-                && let Some((r, _, _)) = SECTIONS.iter().find(|(_, s, _)| *s == section)
-            {
-                route.set(*r);
+            } else if let Some(r) = id.strip_prefix("go:").and_then(Route::from_code) {
+                route.set(r);
             }
         }
     }

@@ -9,15 +9,21 @@ use nsh_core::element::View;
 use nsh_core::prelude::*;
 
 use super::product_form::product_form;
+use crate::nav::Route;
+use crate::screens::common::{page_head, section_tabs};
 use crate::state::{AppState, Intent};
 use crate::ui::form::search_field;
 use crate::ui::icon::{Icon, icon};
-use crate::ui::kit::{Size, Variant, badge, button, figure, label_line, spacer};
+use crate::ui::kit::{
+    Size, Variant, badge, button, figure, icon_button, label, label_line, menu_button, spacer,
+};
 use crate::ui::overlay::{modal, show_toast};
 use crate::ui::popup::{Action, dropdown, row_menu};
-use crate::ui::surface::{card, empty_state, page_header, page_pad};
+use crate::ui::surface::{card, empty_state, page_pad};
 use crate::ui::table::{Column, Selection, Sort, Width, table, table_footer};
-use crate::ui::tokens::{Status, Tone, radius, sp, ty};
+use crate::ui::tokens::{Status, Tone, control, radius, sp, ty};
+use nsh_base::{menu, menu_item};
+use nsh_core::element::{Align, Placement};
 
 #[derive(Clone, PartialEq)]
 pub struct SampleProduct {
@@ -225,79 +231,140 @@ pub fn products(st: AppState, compact: bool) -> View {
         })
     });
 
-    // ---------------------------------------------------------- toolbar
-    let tab = move |f: Filter, key: &'static str, idx: usize| {
+    // ---------------------------------------------------------- quick filters
+    // Stock states as cards with their counts (phones: chips).
+    let quick = move |f: Filter, key: &'static str, idx: usize, which: Icon, status: Status| {
         let active = computed(move || filter.get() == f);
-        view()
+        let base = view()
             .test_id(&format!("tab-{idx}"))
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .h(px(sp(40.0)))
-            .px(px(4.0))
-            .border_b(px(2.0))
             .cursor_pointer()
-            .border_color(move || {
-                if active.get() {
-                    Tone::Primary.color()
-                } else {
-                    rgb(0x000000).opacity(0.0).into()
-                }
-            })
             .on_press(move || {
                 filter.set(f);
                 selection.clear();
-            })
-            .child(
-                label_line(st.t(key), ty::SM, FontWeight::SEMIBOLD, Tone::Muted).text_color(
-                    move || {
-                        if active.get() {
-                            Tone::Primary.color()
-                        } else {
-                            Tone::Muted.color()
-                        }
-                    },
-                ),
-            )
-            .child(
-                view()
-                    .px(px(6.0))
-                    .h(px(18.0))
-                    .justify_center()
-                    .rounded_full()
-                    .bg(move || {
-                        if active.get() {
-                            Tone::PrimarySoft.color()
-                        } else {
-                            Tone::Subtle.color()
-                        }
-                    })
-                    .child(figure(
-                        move || st.fmt().integer(counts.get()[idx]),
-                        11.0,
-                        FontWeight::SEMIBOLD,
-                        move || {
-                            if active.get() {
-                                Tone::Primary
-                            } else {
-                                Tone::Muted
-                            }
-                        },
-                    )),
-            )
+            });
+        if compact {
+            base.flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(34.0))
+                .px(px(12.0))
+                .rounded_full()
+                .border_1()
+                .border_color(move || {
+                    if active.get() {
+                        Tone::Primary.color()
+                    } else {
+                        Tone::Border.color()
+                    }
+                })
+                .bg(move || {
+                    if active.get() {
+                        Tone::PrimarySoft.color()
+                    } else {
+                        Tone::Surface.color()
+                    }
+                })
+                .child(label_line(
+                    st.t(key),
+                    ty::SM,
+                    FontWeight::MEDIUM,
+                    Tone::Body,
+                ))
+                .child(figure(
+                    move || st.fmt().integer(counts.get()[idx]),
+                    ty::XS,
+                    FontWeight::SEMIBOLD,
+                    || Tone::Muted,
+                ))
+        } else {
+            base.flex_1()
+                .min_w(px(160.0))
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .p(px(sp(14.0)))
+                .rounded(px(radius::lg()))
+                .bg(Tone::Surface.color())
+                .border_1()
+                .border_color(move || {
+                    if active.get() {
+                        Tone::Primary.color()
+                    } else {
+                        Tone::Border.color()
+                    }
+                })
+                .shadow_xs()
+                .hover(|s| s.border_color(Tone::BorderStrong.color()))
+                .child(
+                    view()
+                        .w(px(36.0))
+                        .h(px(36.0))
+                        .rounded(px(radius::md()))
+                        .items_center()
+                        .justify_center()
+                        .bg(status.bg().color())
+                        .child(icon(which, 18.0, move || status.fg())),
+                )
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(label_line(
+                            st.t(key),
+                            ty::SM,
+                            FontWeight::MEDIUM,
+                            Tone::Muted,
+                        ))
+                        .child(figure(
+                            move || st.fmt().integer(counts.get()[idx]),
+                            ty::XL,
+                            FontWeight::BOLD,
+                            || Tone::Ink,
+                        )),
+                )
+                .child(when(active, || {
+                    icon(Icon::CheckCircle, 18.0, || Tone::Primary).into_element()
+                }))
+        }
     };
-    let tabs = view()
+    let quick_row = view()
         .flex_row()
-        .items_end()
-        .gap(px(18.0))
-        .px(px(16.0))
-        .border_b_1()
-        .border_color(Tone::Border.color())
-        .child(tab(Filter::All, "products.filter.all", 0))
-        .child(tab(Filter::Only(StockState::Ok), "stock.ok", 1))
-        .child(tab(Filter::Only(StockState::Low), "stock.low", 2))
-        .child(tab(Filter::Only(StockState::Out), "stock.out", 3));
+        .gap(px(if compact { 6.0 } else { 16.0 }))
+        .child(quick(
+            Filter::All,
+            "products.filter.all",
+            0,
+            Icon::Package,
+            Status::Accent,
+        ))
+        .child(quick(
+            Filter::Only(StockState::Ok),
+            "stock.ok",
+            1,
+            Icon::CheckCircle,
+            Status::Success,
+        ))
+        .child(quick(
+            Filter::Only(StockState::Low),
+            "stock.low",
+            2,
+            Icon::Alert,
+            Status::Warning,
+        ))
+        .child(quick(
+            Filter::Only(StockState::Out),
+            "stock.out",
+            3,
+            Icon::XCircle,
+            Status::Danger,
+        ));
+    let quick_row = if compact {
+        view().child(scroll().horizontal().child(quick_row))
+    } else {
+        quick_row
+    };
 
+    // ---------------------------------------------------------- toolbar
     let categories = move || {
         let lang = st.lang();
         let mut v = vec![(usize::MAX, st.tn("products.category.all"))];
@@ -309,86 +376,255 @@ pub fn products(st: AppState, compact: bool) -> View {
         );
         v
     };
-    let tools = view()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .px(px(16.0))
-        .py(px(12.0))
-        .child(
-            view()
-                .w(px(if compact { 180.0 } else { 320.0 }))
-                .flex_shrink(1.0)
-                .child(search_field(
-                    query,
-                    st.t("products.search"),
-                    "product-search",
-                )),
-        )
-        .child(
-            view()
-                .w(px(if compact { 150.0 } else { 200.0 }))
-                .child(dropdown(
-                    categories,
-                    category,
-                    Some(Icon::Tag),
-                    st.t("products.col.category"),
-                    "category-filter",
-                )),
-        )
-        .child(spacer())
-        .child(when(
-            move || selection.count() > 0,
-            move || {
+    // Optional columns, hidden by bit: category, status, stock.
+    let hidden = signal(0u8);
+    let columns_menu = move || {
+        let item = move |bit: u8, key: &'static str| {
+            menu_item()
+                .checked(move || Some(hidden.get() & bit == 0))
+                .close_on_select(false)
+                .on_select(move || hidden.update(|h| *h ^= bit))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(10.0))
+                        .h(px(control::md()))
+                        .px(px(10.0))
+                        .rounded(px(radius::md()))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(Tone::Hover.color()))
+                        .child(dynamic(move || {
+                            if hidden.get() & bit == 0 {
+                                icon(Icon::Check, 14.0, || Tone::Primary).into_element()
+                            } else {
+                                view().w(px(14.0)).into_element()
+                            }
+                        }))
+                        .child(label_line(st.t(key), ty::SM, FontWeight::MEDIUM, Tone::Ink)),
+                )
+        };
+        menu()
+            .trigger(menu_button(Some(Icon::Columns), st.t("table.columns")))
+            .popup_class("bg-popover border border-border rounded-lg shadow-lg p-1 min-w-[200px]")
+            .placement(Placement::Bottom)
+            .align(Align::End)
+            .child(item(1, "products.col.category"))
+            .child(item(2, "col.status"))
+            .child(item(4, "products.col.stock"))
+    };
+    let tools = move || {
+        view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(16.0))
+            .py(px(12.0))
+            .child(
                 view()
-                    .flex_row()
+                    .w(if compact {
+                        relative(1.0)
+                    } else {
+                        px(300.0).into()
+                    })
+                    .flex_shrink(1.0)
+                    .child(search_field(
+                        query,
+                        st.t("products.search"),
+                        "product-search",
+                    )),
+            )
+            .child(view().w(px(210.0)).child(dropdown(
+                categories,
+                category,
+                Some(Icon::Tag),
+                st.t("products.col.category"),
+                "category-filter",
+            )))
+            .child(spacer())
+            .child(if compact {
+                view()
+            } else {
+                view().child(columns_menu())
+            })
+            .into_element()
+    };
+
+    // Shown instead of the toolbar while rows are selected.
+    let bulk = move || {
+        view()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(16.0))
+            .h(px(control::md() + 24.0))
+            .bg(Tone::PrimarySoft.color())
+            .child(icon(Icon::CheckCircle, 18.0, || Tone::Primary))
+            .child(label_line(
+                st.t_with("table.selected", move |s| {
+                    vec![("count", s.fmt().integer(selection.count() as i64))]
+                }),
+                ty::SM,
+                FontWeight::BOLD,
+                Tone::Primary,
+            ))
+            .child(view().w(px(8.0)))
+            .child(button(
+                Variant::Secondary,
+                Size::Sm,
+                Some(Icon::Printer),
+                st.t("action.print_labels"),
+                || {},
+            ))
+            .child(button(
+                Variant::Secondary,
+                Size::Sm,
+                Some(Icon::Tag),
+                st.t("action.change_category"),
+                || {},
+            ))
+            .child(button(
+                Variant::Secondary,
+                Size::Sm,
+                Some(Icon::Download),
+                st.t("action.export"),
+                || {},
+            ))
+            .child(button(
+                Variant::Danger,
+                Size::Sm,
+                Some(Icon::Trash),
+                st.t("action.delete"),
+                move || {
+                    let gone = selection.ids.get_untracked();
+                    let n = gone.len();
+                    all.update(|v| v.retain(|p| !gone.contains(&id_of(p))));
+                    selection.clear();
+                    show_toast(
+                        st,
+                        nb_i18n::tr_args(
+                            st.lang(),
+                            "products.deleted",
+                            &[("count", &st.fmt().integer(n as i64))],
+                        ),
+                    );
+                },
+            ))
+            .child(spacer())
+            .child(icon_button(
+                || Icon::Close,
+                st.t("action.clear"),
+                Variant::Ghost,
+                move || selection.clear(),
+            ))
+            .into_element()
+    };
+    let toolbar = when(move || selection.count() > 0, bulk).otherwise(tools);
+
+    // Active filters as removable chips.
+    let chip = move |text_of: Box<dyn Fn() -> String>, clear: Box<dyn Fn()>| {
+        view()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .h(px(26.0))
+            .ps(px(10.0))
+            .pe(px(4.0))
+            .rounded_full()
+            .bg(Tone::Subtle.color())
+            .border_1()
+            .border_color(Tone::Border.color())
+            .child(label_line(
+                text_of,
+                ty::XS,
+                FontWeight::SEMIBOLD,
+                Tone::Body,
+            ))
+            .child(
+                view()
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .rounded_full()
                     .items_center()
-                    .gap(px(6.0))
-                    .child(label_line(
-                        st.t_with("table.selected", move |s| {
-                            vec![("count", s.fmt().integer(selection.count() as i64))]
-                        }),
-                        ty::SM,
-                        FontWeight::SEMIBOLD,
-                        Tone::Ink,
-                    ))
-                    .child(button(
-                        Variant::Ghost,
-                        Size::Sm,
-                        None,
-                        st.t("action.clear"),
-                        move || selection.clear(),
-                    ))
-                    .child(button(
-                        Variant::Danger,
-                        Size::Sm,
-                        Some(Icon::Trash),
-                        st.t("action.delete"),
-                        move || {
-                            let gone = selection.ids.get_untracked();
-                            let n = gone.len();
-                            all.update(|v| v.retain(|p| !gone.contains(&id_of(p))));
-                            selection.clear();
-                            show_toast(
-                                st,
-                                nb_i18n::tr_args(
-                                    st.lang(),
-                                    "products.deleted",
-                                    &[("count", &st.fmt().integer(n as i64))],
-                                ),
-                            );
-                        },
-                    ))
-                    .into_element()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(Tone::Hover.color()))
+                    .on_press(clear)
+                    .child(icon(Icon::Close, 12.0, || Tone::Muted)),
+            )
+    };
+    let filtered = computed(move || {
+        filter.get() != Filter::All
+            || category.get() != usize::MAX
+            || !query.get().trim().is_empty()
+    });
+    let chips_row = dynamic(move || {
+        if !filtered.get() {
+            return view().into_element();
+        }
+        let mut row = view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(16.0))
+            .pb(px(12.0))
+            .child(label(
+                st.t("table.filtered_by"),
+                ty::XS,
+                FontWeight::MEDIUM,
+                Tone::Muted,
+            ));
+        if let Filter::Only(s) = filter.get() {
+            row = row.child(chip(
+                Box::new(move || {
+                    format!("{}: {}", st.tn("products.filter.status"), st.tn(s.key()))
+                }),
+                Box::new(move || filter.set(Filter::All)),
+            ));
+        }
+        let cat = category.get();
+        if cat != usize::MAX {
+            row = row.child(chip(
+                Box::new(move || {
+                    format!(
+                        "{}: {}",
+                        st.tn("products.col.category"),
+                        pick(st.lang(), CATEGORIES[cat])
+                    )
+                }),
+                Box::new(move || category.set(usize::MAX)),
+            ));
+        }
+        let q = query.get();
+        if !q.trim().is_empty() {
+            row = row.child(chip(
+                Box::new(move || format!("“{}”", q.trim())),
+                Box::new(move || query.set(String::new())),
+            ));
+        }
+        row.child(button(
+            Variant::Ghost,
+            Size::Sm,
+            None,
+            st.t("table.clear_filters"),
+            move || {
+                query.set(String::new());
+                filter.set(Filter::All);
+                category.set(usize::MAX);
             },
-        ));
+        ))
+        .into_element()
+    });
 
     // ---------------------------------------------------------- table
     let build_columns = move || {
         let mut columns = vec![
             Column::new("name", st.t("products.col.name"), Width::Flex(3.0, 220.0)).sortable(),
         ];
-        if !compact {
+        let h = hidden.get();
+        if !compact && h & 1 == 0 {
             columns.push(
                 Column::new(
                     "category",
@@ -397,7 +633,11 @@ pub fn products(st: AppState, compact: bool) -> View {
                 )
                 .sortable(),
             );
+        }
+        if !compact && h & 2 == 0 {
             columns.push(Column::new("status", st.t("col.status"), Width::Fixed(140.0)).sortable());
+        }
+        if !compact && h & 4 == 0 {
             columns.push(
                 Column::new("stock", st.t("products.col.stock"), Width::Fixed(110.0))
                     .end()
@@ -584,7 +824,7 @@ pub fn products(st: AppState, compact: bool) -> View {
                 .into_element()
         },
     )
-    .otherwise(grid);
+    .otherwise(move || dynamic(grid).into_element());
 
     let actions = if compact {
         view().child(button(
@@ -627,23 +867,22 @@ pub fn products(st: AppState, compact: bool) -> View {
         .flex_1()
         .w_full()
         .p(px(page_pad(compact)))
-        .gap(px(if compact { 16.0 } else { 24.0 }))
-        .child(page_header(
-            st.t("nav.products"),
-            if compact {
-                None
-            } else {
-                Some(Box::new(st.t("products.subtitle")))
-            },
+        .gap(px(if compact { 14.0 } else { 20.0 }))
+        .child(page_head(
+            st,
+            Route::Products,
+            (!compact).then_some("products.subtitle"),
             actions,
             compact,
         ))
+        .child(section_tabs(st, Route::Products))
+        .child(quick_row)
         .child(
             card()
                 .flex_1()
                 .min_h(px(360.0))
-                .child(scroll().horizontal().flex_shrink_0().child(tabs))
-                .child(tools)
+                .child(toolbar)
+                .child(chips_row)
                 .child(
                     view()
                         .flex_1()

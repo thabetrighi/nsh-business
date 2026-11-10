@@ -6,7 +6,7 @@ use nb_i18n::{Digits, Direction, Format, Lang, tr, tr_args};
 use nsh_core::prelude::*;
 use nsh_core::storage::Storage;
 
-use crate::shell::Route;
+use crate::nav::Route;
 use crate::ui::tokens::{Accent, Corners, Density, Look, TextSize, UiFont};
 
 /// Something a screen should do when it opens (e.g. from the command palette).
@@ -120,11 +120,96 @@ impl Prefs {
     }
 }
 
+/// A text setting saved on the device whenever it changes.
+pub fn persisted_text(key: &'static str, default: &str) -> Signal<String> {
+    let s = signal(Storage::get_item(key).unwrap_or_else(|| default.to_owned()));
+    effect(move || save(key, &s.get()));
+    s
+}
+
+/// A choice (by index) saved on the device.
+pub fn persisted_index(key: &'static str, default: usize) -> Signal<usize> {
+    let s = signal(stored(key, |v| v.parse().ok()).unwrap_or(default));
+    effect(move || save(key, &s.get().to_string()));
+    s
+}
+
+/// An on/off setting saved on the device.
+pub fn persisted_flag(key: &'static str, default: bool) -> Signal<bool> {
+    let s = signal(stored(key, |v| v.parse().ok()).unwrap_or(default));
+    effect(move || save(key, if s.get() { "true" } else { "false" }));
+    s
+}
+
+/// Store and device settings. Kept on the device for now; they move to the
+/// organization's database with M2 (and sync from there).
+#[derive(Clone, Copy)]
+pub struct BizPrefs {
+    pub start_page: Signal<usize>,
+    pub confirm_delete: Signal<bool>,
+    pub show_cents: Signal<bool>,
+    pub store_name: Signal<String>,
+    pub activity: Signal<usize>,
+    pub phone: Signal<String>,
+    pub address: Signal<String>,
+    pub nif: Signal<String>,
+    pub nis: Signal<String>,
+    pub rc: Signal<String>,
+    pub ai: Signal<String>,
+    pub prices_incl_tax: Signal<bool>,
+    pub tva_rate: Signal<usize>,
+    pub stamp_duty: Signal<bool>,
+    pub tax_on_receipt: Signal<bool>,
+    pub receipt_width: Signal<usize>,
+    pub printer: Signal<usize>,
+    pub print_logo: Signal<bool>,
+    pub auto_print: Signal<bool>,
+    pub copies: Signal<usize>,
+    pub scale: Signal<usize>,
+    pub scanner: Signal<bool>,
+    pub drawer: Signal<bool>,
+}
+
+impl BizPrefs {
+    fn load() -> Self {
+        Self {
+            start_page: persisted_index("nb.app.start", 0),
+            confirm_delete: persisted_flag("nb.app.confirm_delete", true),
+            show_cents: persisted_flag("nb.fmt.cents", true),
+            store_name: persisted_text("nb.store.name", ""),
+            activity: persisted_index("nb.store.activity", 0),
+            phone: persisted_text("nb.store.phone", ""),
+            address: persisted_text("nb.store.address", ""),
+            nif: persisted_text("nb.store.nif", ""),
+            nis: persisted_text("nb.store.nis", ""),
+            rc: persisted_text("nb.store.rc", ""),
+            ai: persisted_text("nb.store.ai", ""),
+            prices_incl_tax: persisted_flag("nb.tax.included", true),
+            tva_rate: persisted_index("nb.tax.rate", 0),
+            stamp_duty: persisted_flag("nb.tax.stamp", true),
+            tax_on_receipt: persisted_flag("nb.tax.on_receipt", true),
+            receipt_width: persisted_index("nb.print.width", 1),
+            printer: persisted_index("nb.print.printer", 0),
+            print_logo: persisted_flag("nb.print.logo", true),
+            auto_print: persisted_flag("nb.print.auto", false),
+            copies: persisted_index("nb.print.copies", 0),
+            scale: persisted_index("nb.device.scale", 0),
+            scanner: persisted_flag("nb.device.scanner", true),
+            drawer: persisted_flag("nb.device.drawer", false),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub lang: Signal<Lang>,
     pub prefs: Prefs,
+    pub biz: BizPrefs,
     pub route: Signal<Route>,
+    /// Sidebar sections that are expanded (bit per section).
+    pub open_sections: Signal<u32>,
+    /// The settings page's open tab.
+    pub settings_tab: Signal<usize>,
     /// The confirmation shown at the bottom of the screen (`ui::overlay::show_toast`).
     pub toast: Signal<Option<String>>,
     /// The command palette is open.
@@ -143,14 +228,21 @@ impl AppState {
                 .and_then(Lang::from_tag)
                 .unwrap_or(Lang::Ar)
         });
-        Self {
+        let st = Self {
             lang: signal(lang),
             prefs: Prefs::load(),
+            biz: BizPrefs::load(),
             route: signal(Route::Home),
+            open_sections: signal(0),
+            settings_tab: signal(0),
             toast: signal(None),
             palette: signal(false),
             intent: signal(None),
+        };
+        if st.biz.start_page.get_untracked() == 1 {
+            st.route.set(Route::Sell);
         }
+        st
     }
 
     /// Saves every setting when it changes, and applies the appearance.

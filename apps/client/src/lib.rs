@@ -10,6 +10,7 @@
 use nsh_core::prelude::*;
 
 mod command_palette;
+mod nav;
 mod screens;
 mod shell;
 mod state;
@@ -62,7 +63,7 @@ pub fn App() -> impl IntoElement {
     {
         st.prefs.density.set(d);
     }
-    if let Some(r) = shell::Route::from_env() {
+    if let Some(r) = nav::Route::from_env() {
         st.route.set(r);
     }
     if env("NB_OPEN").as_deref() == Some("palette") {

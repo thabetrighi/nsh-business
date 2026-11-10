@@ -16,7 +16,7 @@ use crate::ui::kit::{
 };
 use crate::ui::popup::{Action, dropdown, row_menu};
 use crate::ui::surface::{
-    card, card_body, card_header, delta, empty_state, kpi, page_header, page_pad,
+    card, card_body, card_header, delta, empty_state, kpi, page_header_full, page_pad,
 };
 use crate::ui::tokens::{Status, Tone, radius, ty};
 
@@ -325,7 +325,9 @@ pub fn design(st: AppState, compact: bool) -> View {
         .w_full()
         .p(px(page_pad(compact)))
         .gap(px(gap))
-        .child(page_header(
+        .child(page_header_full(
+            Some(Icon::Palette),
+            None,
             st.t("nav.design"),
             Some(Box::new(st.t("design.subtitle"))),
             view(),
