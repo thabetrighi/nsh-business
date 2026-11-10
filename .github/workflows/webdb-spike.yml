@@ -1,0 +1,58 @@
+name: webdb-spike
+
+# M0.4: durable SQLite in the browser (rusqlite + OPFS sahpool in a Web Worker),
+# measured from the main thread and checked for persistence across a browser restart.
+
+on:
+  push:
+    branches: [main]
+    paths: ["spikes/m0-webdb/**", ".github/workflows/webdb-spike.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  webdb:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: spikes/m0-webdb
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm
+          cargo install wasm-bindgen-cli --version 0.2.130 --locked
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spikes/m0-webdb
+
+      - name: Build wasm
+        run: |
+          cargo build --release --target wasm32-unknown-unknown
+          wasm-bindgen --target web --out-dir www/pkg target/wasm32-unknown-unknown/release/m0_webdb.wasm
+          ls -la www/pkg
+
+      - name: Run in Chromium twice (persistence)
+        run: |
+          pip install -q playwright && python -m playwright install --with-deps chromium >/dev/null
+          (cd www && python3 -m http.server 8000 >/dev/null 2>&1 &)
+          sleep 2
+          python3 www/run.py http://localhost:8000/ /tmp/profile ../../m0-4-webdb.json
+
+      - name: Publish results to ci/screenshots branch
+        if: always()
+        working-directory: .
+        run: |
+          git fetch -q origin ci/screenshots && git worktree add -q /tmp/shots origin/ci/screenshots || { mkdir -p /tmp/shots; git -C /tmp/shots init -q; }
+          cp m0-4-webdb.json /tmp/shots/ 2>/dev/null || echo '{"status":"build or run failed"}' > /tmp/shots/m0-4-webdb.json
+          cd /tmp/shots
+          git checkout -q -B ci/screenshots
+          git -c user.name=ci -c user.email=ci@localhost add -A
+          git -c user.name=ci -c user.email=ci@localhost commit -q -m "webdb results ${GITHUB_SHA::7}" || true
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" ci/screenshots
