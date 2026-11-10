@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/nb-core", "crates/nb-i18n"]
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+license = "LicenseRef-Proprietary"
+
+[workspace.dependencies]
+nb-core = { path = "crates/nb-core" }
+nb-i18n = { path = "crates/nb-i18n" }
+rust_decimal = { version = "1", default-features = false, features = ["std"] }
+uuid = { version = "1", features = ["v7"] }
+thiserror = "2"
+unicode-bidi = "0.3"
+proptest = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
+float_arithmetic = "warn"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,15 @@
+[package]
+name = "nb-i18n"
+description = "Translations (ar/fr/en), locale-aware formatting and bidi-safe text."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+nb-core.workspace = true
+unicode-bidi.workspace = true
+
+[lints]
+workspace = true
