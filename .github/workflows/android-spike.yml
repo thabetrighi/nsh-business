@@ -1,0 +1,68 @@
+name: android-spike
+
+# M0.7: package the POS spike (NSH + SQLite, 100k products) as an Android APK
+# and publish it as a pre-release so the owner can install it on a phone.
+
+on:
+  push:
+    branches: [main]
+    paths: ["spikes/m0-pos/**", ".github/workflows/android-spike.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NSH_VERSION: v0.4.0
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Rust Android targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+      - name: Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "platform-tools" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "NDK: $ANDROID_NDK_LATEST_HOME"
+
+      - name: Install NSH CLI
+        run: |
+          curl -fsSL -o nsh.tar.gz "https://github.com/longbridge/nsh/releases/download/${NSH_VERSION}/nsh-linux-x86_64.tar.gz"
+          mkdir -p ~/.nsh && tar -xzf nsh.tar.gz -C ~/.nsh
+          echo "$HOME/.nsh/nsh/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spikes/m0-pos
+
+      - name: Package APK
+        working-directory: spikes/m0-pos
+        run: |
+          nsh --verbose package --target android 2>&1 | tail -80
+          find . -name '*.apk' -not -path './target/*' | head
+
+      - name: Publish pre-release
+        working-directory: spikes/m0-pos
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=$(find . -name '*.apk' -not -path './target/*' | head -1)
+          cp "$APK" nsh-business-pos-spike.apk
+          gh release delete android-spike -y --cleanup-tag 2>/dev/null || true
+          gh release create android-spike nsh-business-pos-spike.apk --prerelease \
+            --title "Android spike (M0.7)" \
+            --notes "نموذج تجريبي لشاشة نقطة البيع على Android: 100 ألف منتج في SQLite، بحث بالعربية، سلة. للاختبار فقط. Commit ${GITHUB_SHA::7}."
