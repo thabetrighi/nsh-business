@@ -45,9 +45,21 @@ jobs:
       - name: Package for web
         run: nsh --verbose package spikes/m0-hello --target web
 
-      - name: Upload web build
+      - name: Screenshot in headless Chrome (Arabic / RTL on web)
+        run: |
+          ls -la .nsh/out/hello
+          (cd .nsh/out/hello && python3 -m http.server 8000 >/dev/null 2>&1 &)
+          sleep 2
+          google-chrome --headless=new --no-sandbox --disable-gpu --hide-scrollbars \
+            --window-size=1000,420 --virtual-time-budget=15000 \
+            --screenshot=web-rtl.png http://localhost:8000/ || true
+          ls -la web-rtl.png
+
+      - name: Upload web build and screenshot
         uses: actions/upload-artifact@v4
         with:
           name: m0-hello-web
-          path: spikes/m0-hello/.nsh/out/
+          path: |
+            .nsh/out/hello/
+            web-rtl.png
           if-no-files-found: error
