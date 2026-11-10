@@ -48,9 +48,19 @@ enum Place {
 
 enum Block {
     /// A paragraph that wraps across the full width.
-    Text { text: String, size: f32, bold: bool, place: Place },
+    Text {
+        text: String,
+        size: f32,
+        bold: bool,
+        place: Place,
+    },
     /// Two cells on one line: `start` at the reading start, `end` at the reading end.
-    Pair { start: String, end: String, size: f32, bold: bool },
+    Pair {
+        start: String,
+        end: String,
+        size: f32,
+        bold: bool,
+    },
     Rule,
     Gap(f32),
 }
@@ -86,34 +96,90 @@ fn qty(milli: i64) -> String {
     if milli % 1000 == 0 {
         format!("{}", milli / 1000)
     } else {
-        format!("{}.{:03}", milli / 1000, milli % 1000).trim_end_matches('0').to_owned()
+        format!("{}.{:03}", milli / 1000, milli % 1000)
+            .trim_end_matches('0')
+            .to_owned()
     }
 }
 
 fn receipt() -> Vec<Block> {
     let lines = [
-        Line { name: "حليب كامل الدسم Soummam 1L", qty_milli: 3000, unit_minor: 12_000 },
-        Line { name: "خبز تقليدي", qty_milli: 5000, unit_minor: 1_500 },
-        Line { name: "طماطم طازجة (موزونة)", qty_milli: 1_250, unit_minor: 18_000 },
-        Line { name: "زيت مائدة Elio 5L", qty_milli: 1000, unit_minor: 95_000 },
-        Line { name: "قهوة مطحونة 250g", qty_milli: 2000, unit_minor: 32_050 },
+        Line {
+            name: "حليب كامل الدسم Soummam 1L",
+            qty_milli: 3000,
+            unit_minor: 12_000,
+        },
+        Line {
+            name: "خبز تقليدي",
+            qty_milli: 5000,
+            unit_minor: 1_500,
+        },
+        Line {
+            name: "طماطم طازجة (موزونة)",
+            qty_milli: 1_250,
+            unit_minor: 18_000,
+        },
+        Line {
+            name: "زيت مائدة Elio 5L",
+            qty_milli: 1000,
+            unit_minor: 95_000,
+        },
+        Line {
+            name: "قهوة مطحونة 250g",
+            qty_milli: 2000,
+            unit_minor: 32_050,
+        },
     ];
     let mut b = vec![
-        Block::Text { text: "متجر النور للمواد الغذائية".into(), size: 15.0, bold: true, place: Place::Center },
-        Block::Text { text: "الوادي — حي 400 مسكن · الهاتف \u{2068}0550 00 00 00\u{2069}".into(), size: 9.0, bold: false, place: Place::Center },
-        Block::Text { text: "NIF: 000000000000000 · RC: 00/00-0000000".into(), size: 8.0, bold: false, place: Place::Center },
+        Block::Text {
+            text: "متجر النور للمواد الغذائية".into(),
+            size: 15.0,
+            bold: true,
+            place: Place::Center,
+        },
+        Block::Text {
+            text: "الوادي — حي 400 مسكن · الهاتف \u{2068}0550 00 00 00\u{2069}".into(),
+            size: 9.0,
+            bold: false,
+            place: Place::Center,
+        },
+        Block::Text {
+            text: "NIF: 000000000000000 · RC: 00/00-0000000".into(),
+            size: 8.0,
+            bold: false,
+            place: Place::Center,
+        },
         Block::Rule,
-        Block::Pair { start: "فاتورة رقم D1-2026-0001234".into(), end: "2026-11-10 18:45".into(), size: 9.0, bold: false },
-        Block::Pair { start: "الكاشير: أحمد".into(), end: "الصندوق 1".into(), size: 9.0, bold: false },
+        Block::Pair {
+            start: "فاتورة رقم D1-2026-0001234".into(),
+            end: "2026-11-10 18:45".into(),
+            size: 9.0,
+            bold: false,
+        },
+        Block::Pair {
+            start: "الكاشير: أحمد".into(),
+            end: "الصندوق 1".into(),
+            size: 9.0,
+            bold: false,
+        },
         Block::Rule,
     ];
     let mut subtotal = 0;
     for l in &lines {
         let amount = line_amount(l);
         subtotal += amount;
-        b.push(Block::Text { text: l.name.into(), size: 10.0, bold: false, place: Place::Start });
+        b.push(Block::Text {
+            text: l.name.into(),
+            size: 10.0,
+            bold: false,
+            place: Place::Start,
+        });
         b.push(Block::Pair {
-            start: format!("\u{2068}{}\u{2069} × {}", qty(l.qty_milli), dzd(l.unit_minor)),
+            start: format!(
+                "\u{2068}{}\u{2069} × {}",
+                qty(l.qty_milli),
+                dzd(l.unit_minor)
+            ),
             end: dzd(amount),
             size: 10.0,
             bold: false,
@@ -124,13 +190,43 @@ fn receipt() -> Vec<Block> {
     let paid = 300_000;
     b.extend([
         Block::Rule,
-        Block::Pair { start: "المبلغ دون رسم".into(), end: dzd(subtotal - tva), size: 10.0, bold: false },
-        Block::Pair { start: "الرسم على القيمة المضافة 19%".into(), end: dzd(tva), size: 10.0, bold: false },
-        Block::Pair { start: "الإجمالي".into(), end: dzd(subtotal), size: 14.0, bold: true },
-        Block::Pair { start: "نقداً".into(), end: dzd(paid), size: 10.0, bold: false },
-        Block::Pair { start: "الباقي".into(), end: dzd(paid - subtotal), size: 10.0, bold: false },
+        Block::Pair {
+            start: "المبلغ دون رسم".into(),
+            end: dzd(subtotal - tva),
+            size: 10.0,
+            bold: false,
+        },
+        Block::Pair {
+            start: "الرسم على القيمة المضافة 19%".into(),
+            end: dzd(tva),
+            size: 10.0,
+            bold: false,
+        },
+        Block::Pair {
+            start: "الإجمالي".into(),
+            end: dzd(subtotal),
+            size: 14.0,
+            bold: true,
+        },
+        Block::Pair {
+            start: "نقداً".into(),
+            end: dzd(paid),
+            size: 10.0,
+            bold: false,
+        },
+        Block::Pair {
+            start: "الباقي".into(),
+            end: dzd(paid - subtotal),
+            size: 10.0,
+            bold: false,
+        },
         Block::Rule,
-        Block::Text { text: "شكراً لزيارتكم — Merci de votre visite".into(), size: 9.0, bold: false, place: Place::Center },
+        Block::Text {
+            text: "شكراً لزيارتكم — Merci de votre visite".into(),
+            size: 9.0,
+            bold: false,
+            place: Place::Center,
+        },
         Block::Gap(6.0),
     ]);
     b
@@ -166,7 +262,14 @@ fn align_for(place: Place) -> Align {
     }
 }
 
-fn shape(fs: &mut FontSystem, text: &str, size: f32, bold: bool, width: f32, place: Place) -> Buffer {
+fn shape(
+    fs: &mut FontSystem,
+    text: &str,
+    size: f32,
+    bold: bool,
+    width: f32,
+    place: Place,
+) -> Buffer {
     let mut buf = Buffer::new(fs, Metrics::new(size, size * 1.45));
     buf.set_size(Some(width), None);
     let weight = if bold { Weight::BOLD } else { Weight::NORMAL };
@@ -180,7 +283,12 @@ fn shape(fs: &mut FontSystem, text: &str, size: f32, bold: bool, width: f32, pla
 fn layout(fs: &mut FontSystem, blocks: &[Block], width: f32, margin: f32, scale: f32) -> Layout {
     let inner = width - 2.0 * margin;
     let mut y = margin;
-    let mut out = Layout { height: 0.0, buffers: Vec::new(), glyphs: Vec::new(), rules: Vec::new() };
+    let mut out = Layout {
+        height: 0.0,
+        buffers: Vec::new(),
+        glyphs: Vec::new(),
+        rules: Vec::new(),
+    };
     let place_buf = |out: &mut Layout, buf: Buffer, x: f32, y: f32, text: &str| -> f32 {
         let mut h: f32 = 0.0;
         for run in buf.layout_runs() {
@@ -202,17 +310,28 @@ fn layout(fs: &mut FontSystem, blocks: &[Block], width: f32, margin: f32, scale:
     };
     for b in blocks {
         match b {
-            Block::Text { text, size, bold, place } => {
+            Block::Text {
+                text,
+                size,
+                bold,
+                place,
+            } => {
                 let buf = shape(fs, text, size * scale, *bold, inner, *place);
                 y += place_buf(&mut out, buf, margin, y, text);
             }
-            Block::Pair { start, end, size, bold } => {
+            Block::Pair {
+                start,
+                end,
+                size,
+                bold,
+            } => {
                 // Two full-width cells aligned to opposite edges. When their
                 // measured widths do not fit side by side (narrow paper), the
                 // end cell moves to its own line instead of overlapping.
                 let a = shape(fs, start, size * scale, *bold, inner, Place::Start);
                 let b2 = shape(fs, end, size * scale, *bold, inner, Place::End);
-                let width_of = |b: &Buffer| b.layout_runs().map(|r| r.line_w).fold(0.0_f32, f32::max);
+                let width_of =
+                    |b: &Buffer| b.layout_runs().map(|r| r.line_w).fold(0.0_f32, f32::max);
                 let lines_of = |b: &Buffer| b.layout_runs().count();
                 let fits = lines_of(&a) == 1
                     && lines_of(&b2) == 1
@@ -252,17 +371,22 @@ fn escpos(fs: &mut FontSystem, blocks: &[Block], dots: u32) -> (Vec<u8>, Vec<Vec
     let mut cache = SwashCache::new();
     for (buf, ox, oy) in &mut l.buffers {
         let (ox, oy) = (*ox as i32, *oy as i32);
-        buf.draw(fs, &mut cache, Color::rgb(0, 0, 0), |x, y, cw, ch, color| {
-            for dy in 0..ch as i32 {
-                for dx in 0..cw as i32 {
-                    let (px, py) = (ox + x + dx, oy + y + dy);
-                    if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
-                        let i = py as usize * w + px as usize;
-                        gray[i] = gray[i].max(color.a());
+        buf.draw(
+            fs,
+            &mut cache,
+            Color::rgb(0, 0, 0),
+            |x, y, cw, ch, color| {
+                for dy in 0..ch as i32 {
+                    for dx in 0..cw as i32 {
+                        let (px, py) = (ox + x + dx, oy + y + dy);
+                        if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
+                            let i = py as usize * w + px as usize;
+                            gray[i] = gray[i].max(color.a());
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
     }
     for &ry in &l.rules {
         let ry = ry as usize;
@@ -272,7 +396,9 @@ fn escpos(fs: &mut FontSystem, blocks: &[Block], dots: u32) -> (Vec<u8>, Vec<Vec
             }
         }
     }
-    let bits: Vec<Vec<bool>> = (0..h).map(|y| (0..w).map(|x| gray[y * w + x] >= 110).collect()).collect();
+    let bits: Vec<Vec<bool>> = (0..h)
+        .map(|y| (0..w).map(|x| gray[y * w + x] >= 110).collect())
+        .collect();
 
     let mut out = vec![0x1B, 0x40]; // ESC @ : initialize
     let bytes_per_row = w.div_ceil(8);
@@ -315,14 +441,23 @@ fn decode_escpos(data: &[u8]) -> Result<(usize, Vec<Vec<bool>>), String> {
                 width = bpr * 8;
                 let body = data.get(i + 8..i + 8 + bpr * n).ok_or("truncated raster")?;
                 for r in body.chunks(bpr) {
-                    rows.push((0..width).map(|x| r[x / 8] & (0x80 >> (x % 8)) != 0).collect());
+                    rows.push(
+                        (0..width)
+                            .map(|x| r[x / 8] & (0x80 >> (x % 8)) != 0)
+                            .collect(),
+                    );
                 }
                 i += 8 + bpr * n;
             }
             [0x1B, 0x64, _, ..] => i += 3,
             [0x1D, 0x56, 0x42, _, ..] => i += 4,
             [0x1B, 0x70, _, _, _, ..] => i += 5,
-            _ => return Err(format!("unknown command at byte {i}: {:02X?}", &data[i..(i + 4).min(data.len())])),
+            _ => {
+                return Err(format!(
+                    "unknown command at byte {i}: {:02X?}",
+                    &data[i..(i + 4).min(data.len())]
+                ));
+            }
         }
     }
     Ok((width, rows))
@@ -333,7 +468,10 @@ fn write_png(path: &Path, w: usize, rows: &[Vec<bool>]) -> Result<(), Box<dyn st
     enc.set_color(png::ColorType::Grayscale);
     enc.set_depth(png::BitDepth::Eight);
     let mut wr = enc.write_header()?;
-    let px: Vec<u8> = rows.iter().flat_map(|r| r.iter().map(|&b| if b { 0 } else { 255 })).collect();
+    let px: Vec<u8> = rows
+        .iter()
+        .flat_map(|r| r.iter().map(|&b| if b { 0 } else { 255 }))
+        .collect();
     wr.write_image_data(&px)?;
     Ok(())
 }
@@ -347,13 +485,15 @@ fn pdf(fs: &mut FontSystem, blocks: &[Block]) -> Result<Vec<u8>, String> {
     // Each glyph is drawn with the exact face the shaper chose (Arabic or Latin).
     let mut fonts: std::collections::HashMap<cosmic_text::fontdb::ID, Font> = Default::default();
     for g in &l.glyphs {
-        if !fonts.contains_key(&g.font_id) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = fonts.entry(g.font_id) {
             let font = fs
                 .db()
-                .with_face_data(g.font_id, |data, index| Font::new(Data::from(data.to_vec()), index))
+                .with_face_data(g.font_id, |data, index| {
+                    Font::new(Data::from(data.to_vec()), index)
+                })
                 .flatten()
                 .ok_or("font face")?;
-            fonts.insert(g.font_id, font);
+            slot.insert(font);
         }
     }
     let mut doc = Document::new();
@@ -373,10 +513,20 @@ fn pdf(fs: &mut FontSystem, blocks: &[Block]) -> Result<Vec<u8>, String> {
                 0..g.cluster.len(),
                 None,
             );
-            s.draw_glyphs(Point::from_xy(g.x, g.baseline), &[glyph], font, &g.cluster, g.size, false);
+            s.draw_glyphs(
+                Point::from_xy(g.x, g.baseline),
+                &[glyph],
+                font,
+                &g.cluster,
+                g.size,
+                false,
+            );
         }
         s.set_fill(None);
-        s.set_stroke(Some(Stroke { width: 0.5, ..Default::default() }));
+        s.set_stroke(Some(Stroke {
+            width: 0.5,
+            ..Default::default()
+        }));
         for &ry in &l.rules {
             let mut pb = PathBuilder::new();
             pb.move_to(36.0, ry);
@@ -405,11 +555,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::write(format!("out/receipt-{name}.bin"), &bytes)?;
         let (w, rows) = decode_escpos(&bytes)?;
         write_png(Path::new(&format!("out/receipt-{name}.png")), w, &rows)?;
-        println!("receipt {name}: {} dots × {} rows, {} bytes ESC/POS, {ms:.1} ms", w, rows.len(), bytes.len());
+        println!(
+            "receipt {name}: {} dots × {} rows, {} bytes ESC/POS, {ms:.1} ms",
+            w,
+            rows.len(),
+            bytes.len()
+        );
     }
     let t = std::time::Instant::now();
     let bytes = pdf(&mut fs, &blocks)?;
-    println!("invoice A5 PDF: {} bytes, {:.1} ms", bytes.len(), t.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "invoice A5 PDF: {} bytes, {:.1} ms",
+        bytes.len(),
+        t.elapsed().as_secs_f64() * 1000.0
+    );
     fs::write("out/invoice-a5.pdf", bytes)?;
     Ok(())
 }
@@ -420,8 +579,22 @@ mod tests {
 
     #[test]
     fn money_is_exact() {
-        assert_eq!(line_amount(&Line { name: "", qty_milli: 1_250, unit_minor: 18_000 }), 22_500);
-        assert_eq!(line_amount(&Line { name: "", qty_milli: 333, unit_minor: 1_000 }), 333);
+        assert_eq!(
+            line_amount(&Line {
+                name: "",
+                qty_milli: 1_250,
+                unit_minor: 18_000
+            }),
+            22_500
+        );
+        assert_eq!(
+            line_amount(&Line {
+                name: "",
+                qty_milli: 333,
+                unit_minor: 1_000
+            }),
+            333
+        );
         assert_eq!(dzd(123_450), "\u{2068}1 234.50\u{2069} دج");
         assert_eq!(qty(1_250), "1.25");
         assert_eq!(qty(3_000), "3");
@@ -434,6 +607,9 @@ mod tests {
         let (w, rows) = decode_escpos(&bytes).expect("decode");
         assert_eq!(w, 384);
         assert_eq!(rows, bits);
-        assert!(rows.iter().flatten().filter(|&&b| b).count() > 1000, "receipt has ink");
+        assert!(
+            rows.iter().flatten().filter(|&&b| b).count() > 1000,
+            "receipt has ink"
+        );
     }
 }
