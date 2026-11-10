@@ -52,3 +52,5 @@ settings.theme = Appearance
 settings.theme.light = Light
 settings.theme.dark = Dark
 settings.theme.system = System
+
+placeholder.coming = This screen is being built and arrives in the next stages.

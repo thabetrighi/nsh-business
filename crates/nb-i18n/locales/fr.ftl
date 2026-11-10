@@ -52,3 +52,5 @@ settings.theme = Apparence
 settings.theme.light = Clair
 settings.theme.dark = Sombre
 settings.theme.system = Système
+
+placeholder.coming = Cet écran est en construction et arrive dans les prochaines étapes.

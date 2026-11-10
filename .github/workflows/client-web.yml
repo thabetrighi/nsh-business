@@ -1,0 +1,68 @@
+name: client-web
+
+# Builds the NSH Business client for the web and screenshots it in Chromium
+# (Arabic + French, desktop + phone, light + dark). Screenshots go to the
+# ci/client-web branch so they can be reviewed without artifact downloads.
+
+on:
+  push:
+    branches: [main]
+    paths: ["apps/client/**", "crates/**", ".github/workflows/client-web.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NSH_VERSION: v0.4.0
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm libgtk-4-dev
+      - name: Install NSH CLI
+        run: |
+          curl -fsSL -o nsh.tar.gz "https://github.com/longbridge/nsh/releases/download/${NSH_VERSION}/nsh-linux-x86_64.tar.gz"
+          mkdir -p ~/.nsh && tar -xzf nsh.tar.gz -C ~/.nsh
+          echo "$HOME/.nsh/nsh/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm-bindgen CLI matching the lockfile
+        run: |
+          cargo generate-lockfile
+          V=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/version = |"/,""); print; exit}' Cargo.lock || true)
+          echo "wasm-bindgen: ${V:-none}"
+          if [ -n "$V" ]; then cargo install wasm-bindgen-cli --version "$V" --locked; fi
+      - name: Package for web
+        working-directory: apps/client
+        run: |
+          set -o pipefail
+          nsh --verbose package --target web 2>&1 | tail -20
+          ls -la .nsh/out
+      - name: Screenshots in Chromium
+        working-directory: apps/client
+        run: |
+          OUT=$(find .nsh/out -maxdepth 1 -mindepth 1 -type d | head -1)
+          (cd "$OUT" && python3 -m http.server 8000 >/dev/null 2>&1 &)
+          sleep 2
+          mkdir -p /tmp/shots
+          for spec in "ar light 1360 860" "fr dark 1360 860" "ar dark 390 844" "fr light 390 844"; do
+            set -- $spec
+            google-chrome --headless=new --no-sandbox --disable-gpu --hide-scrollbars \
+              --lang=$1 --accept-lang=$1 $( [ "$2" = dark ] && echo --force-dark-mode --blink-settings=preferredColorScheme=0 ) \
+              --window-size=$3,$4 --virtual-time-budget=20000 \
+              --screenshot=/tmp/shots/web-$1-$2-$3x$4.png http://localhost:8000/ || true
+          done
+          ls -la /tmp/shots
+      - name: Publish screenshots
+        run: |
+          cd /tmp/shots
+          git init -q -b ci/client-web
+          git -c user.name=ci -c user.email=ci@localhost add -A
+          git -c user.name=ci -c user.email=ci@localhost commit -q -m "client web screenshots ${GITHUB_SHA::7}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" ci/client-web

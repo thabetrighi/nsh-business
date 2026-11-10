@@ -52,3 +52,5 @@ settings.theme = المظهر
 settings.theme.light = فاتح
 settings.theme.dark = داكن
 settings.theme.system = حسب النظام
+
+placeholder.coming = هذه الشاشة قيد البناء وستتوفر في المراحل القادمة.
