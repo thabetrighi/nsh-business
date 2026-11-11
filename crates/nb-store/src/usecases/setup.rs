@@ -142,7 +142,7 @@ pub fn setup_organization(store: &mut Store, input: SetupInput) -> Result<SetupR
             rusqlite::params![o.id, o.name, w.now()],
         )?;
         crate::usecases::org::first_register(w, org, &branch.to_string(), "01")?;
-        crate::usecases::catalog::seed_defaults(w, org, &o.country)?;
+        crate::usecases::catalog::seed_defaults(w, org, &o.country, &input.language)?;
         org::insert_user(w, org, owner, input.owner_name.trim(), "owner")?;
         access::insert_grant(w, org, owner, &access::GrantRow::org("owner"))?;
         access::ensure_credentials(w, org, owner)?;

@@ -308,6 +308,9 @@ pub fn parse_csv(text: &str) -> Result<Vec<ImportRow>, RuleError> {
             fields,
         });
     }
+    if rows.is_empty() {
+        return Err(RuleError::on("file", "import.no_rows"));
+    }
     Ok(rows)
 }
 
@@ -428,6 +431,10 @@ mod tests {
         let ar = "الاسم,السعر,الوحدة\nسكر,90,kg\n";
         assert_eq!(parse_csv(ar)?[0].get("unit"), "kg");
         assert_eq!(parse_csv(""), Err(RuleError::on("file", "import.empty")));
+        assert_eq!(
+            parse_csv("nom;prix\n\n"),
+            Err(RuleError::on("file", "import.no_rows"))
+        );
         assert_eq!(
             parse_csv("nom;stock\nx;1"),
             Err(RuleError::on("file", "import.missing_column"))

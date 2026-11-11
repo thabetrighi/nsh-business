@@ -200,3 +200,41 @@ test("the activity decides which modules show", async () => {
   await app.waitFor("text:Paramètres enregistrés");
   await app.waitFor("text:Distribution");
 });
+
+test("categories form a tree", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Catalogue");
+  await app.press("id:nav-categories");
+  await app.waitFor("text:Boissons");
+  await app.press("id:category-add");
+  await app.type("id:category-name", "Eaux");
+  await app.press("id:category-parent");
+  await app.press("text:Boissons");
+  await app.press("id:category-save");
+  await app.waitFor("text:Catégorie enregistrée : Boissons › Eaux");
+  expect(app.texts()).toContain("Eaux");
+});
+
+test("importing products checks every line before writing", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Catalogue");
+  await app.press("id:nav-products");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 000 résultats"));
+  await app.press("id:products-import");
+  // One line only (headless typing ends a line with the return key): no rows.
+  await app.type("id:import-text", "Nom;Prix");
+  await app.press("id:import-run");
+  await app.waitFor("text:Le fichier n'a aucune ligne de produit.");
+  await app.clear("id:import-text");
+  await app.paste("id:import-text", { text: "Nom;Prix;Catégorie\nCafé moulu;450;Épicerie\nThé;abc;\n" });
+  await app.press("id:import-run");
+  await app.waitUntil(() =>
+    app.texts().some((t) => plain(t) === "Ligne 3 : Saisissez le prix en chiffres, par exemple 120 ou 120,50."),
+  );
+  await app.clear("id:import-text");
+  await app.paste("id:import-text", { text: "Nom;Prix;Catégorie\nCafé moulu;450;Épicerie\nThé vert;220;Épicerie\n" });
+  await app.press("id:import-run");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 002 résultats"));
+});

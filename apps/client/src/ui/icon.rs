@@ -123,6 +123,10 @@ icons! {
     Lock => "lock",
     UserPlus => "user-plus",
     Backspace => "delete",
+    Folder => "folder",
+    FolderTree => "folder-tree",
+    FileUp => "file-up",
+    SubItem => "corner-down-right",
 }
 
 /// An icon `size` points square, stroked in `tone`.

@@ -88,7 +88,11 @@ pub fn dialog_frame(
     footer: View,
     on_close: impl Fn() + 'static,
 ) -> View {
+    // Shrinks to the sheet or panel around it, so the body scrolls and the
+    // footer's actions stay on screen whatever the form's length.
     view()
+        .flex_shrink(1.0)
+        .min_h(px(0.0))
         .child(
             view()
                 .flex_row()
@@ -116,6 +120,7 @@ pub fn dialog_frame(
         .child(
             scroll()
                 .flex_shrink(1.0)
+                .min_h(px(0.0))
                 .child(body.px(px(24.0)).py(px(sp(20.0)))),
         )
         .child(

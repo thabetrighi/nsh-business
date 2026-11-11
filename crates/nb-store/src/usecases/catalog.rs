@@ -38,7 +38,12 @@ fn constraint<T>(r: &rusqlite::Result<T>) -> bool {
 
 /// What a new organization's catalog starts with: the retail and wholesale
 /// lists, the country's tax classes, the common scale label layout.
-pub(crate) fn seed_defaults(w: &Writer<'_>, org: OrganizationId, country: &str) -> Result<()> {
+pub(crate) fn seed_defaults(
+    w: &Writer<'_>,
+    org: OrganizationId,
+    country: &str,
+    language: &str,
+) -> Result<()> {
     let device = w.device().id.to_string();
     for code in ["retail", "wholesale"] {
         w.tx().execute(
@@ -47,10 +52,20 @@ pub(crate) fn seed_defaults(w: &Writer<'_>, org: OrganizationId, country: &str) 
         )?;
     }
     if country == "DZ" {
+        // Named in the organization's language; renamed freely later.
+        let names = match language {
+            "ar" => [
+                "الرسم على القيمة المضافة 19 %",
+                "الرسم على القيمة المضافة 9 %",
+                "معفى",
+            ],
+            "en" => ["VAT 19 %", "VAT 9 %", "Exempt"],
+            _ => ["TVA 19 %", "TVA 9 %", "Exonéré"],
+        };
         for (name, bps, default) in [
-            ("TVA 19 %", 1_900, true),
-            ("TVA 9 %", 900, false),
-            ("Exonéré", 0, false),
+            (names[0], 1_900, true),
+            (names[1], 900, false),
+            (names[2], 0, false),
         ] {
             w.tx().execute(
                 "INSERT INTO tax_classes (id, org_id, name, rate_bps, is_default, created_at, updated_at, device_id)

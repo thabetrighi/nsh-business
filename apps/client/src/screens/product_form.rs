@@ -11,7 +11,8 @@ use std::rc::Rc;
 
 use nb_core::{CoreError, Currency, Money, Quantity};
 use nb_i18n::{tr, tr_args};
-use nb_store::repo::catalog::{Category, ProductRow};
+use nb_store::repo::catalog::ProductRow;
+use nb_store::usecases::catalog::{CategoryRow, TaxClass};
 use nb_store::usecases::products::{Opening, ProductInput, create_product};
 use nsh_core::element::{KeyboardType, View};
 use nsh_core::prelude::*;
@@ -22,6 +23,7 @@ use crate::ui::form::{chips, field};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{Size, Variant, button, label};
 use crate::ui::overlay::dialog_frame;
+use crate::ui::popup::dropdown;
 use crate::ui::tokens::{Tone, radius, ty};
 
 /// Units a product can be counted in: (code, message key, decimals).
@@ -32,6 +34,13 @@ pub const BASE_UNITS: [(&str, &str, u32); 4] = [
     ("l", "unit.l", 3),
 ];
 
+/// What the form offers to choose from (loaded by the caller).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Choices {
+    pub categories: Vec<CategoryRow>,
+    pub taxes: Vec<TaxClass>,
+}
+
 /// Form state; errors are already translated.
 #[derive(Clone, Copy)]
 struct Draft {
@@ -41,6 +50,13 @@ struct Draft {
     stock: Signal<String>,
     category: Signal<usize>,
     unit: Signal<usize>,
+    barcode: Signal<String>,
+    cost: Signal<String>,
+    per_carton: Signal<String>,
+    tax: Signal<usize>,
+    barcode_err: Signal<String>,
+    cost_err: Signal<String>,
+    carton_err: Signal<String>,
     name_err: Signal<String>,
     sku_err: Signal<String>,
     price_err: Signal<String>,
@@ -58,6 +74,13 @@ impl Draft {
             stock: signal("0".into()),
             category: signal(0),
             unit: signal(0),
+            barcode: signal(String::new()),
+            cost: signal(String::new()),
+            per_carton: signal(String::new()),
+            tax: signal(0),
+            barcode_err: signal(String::new()),
+            cost_err: signal(String::new()),
+            carton_err: signal(String::new()),
             name_err: signal(String::new()),
             sku_err: signal(String::new()),
             price_err: signal(String::new()),
@@ -74,6 +97,9 @@ impl Draft {
             self.price_err,
             self.stock_err,
             self.form_err,
+            self.barcode_err,
+            self.cost_err,
+            self.carton_err,
         ] {
             s.set(String::new());
         }
@@ -102,12 +128,7 @@ pub fn error_text(st: AppState, code: &str) -> String {
 }
 
 /// Checks what the form can check; returns the input for the use case.
-fn read(
-    st: AppState,
-    d: Draft,
-    session: &Session,
-    categories: &[Category],
-) -> Option<ProductInput> {
+fn read(st: AppState, d: Draft, session: &Session, choices: &Choices) -> Option<ProductInput> {
     let lang = st.lang();
     d.clear_errors();
     let name = d.name.get_untracked();
@@ -134,14 +155,44 @@ fn read(
             None
         }
     };
+    let cost = match d.cost.get_untracked().trim() {
+        "" => Ok(None),
+        c => match parse_price(c, session.currency) {
+            Ok(m) if !m.is_negative() => Ok(Some(m.minor())),
+            _ => Err(()),
+        },
+    };
+    if cost.is_err() {
+        d.cost_err
+            .set(tr(lang, "products.form.price_invalid").into_owned());
+    }
+    let per_carton = match d.per_carton.get_untracked().trim() {
+        "" => Ok(None),
+        n => match n.parse::<u32>() {
+            Ok(v) if v >= 2 => Ok(Some(v)),
+            _ => Err(()),
+        },
+    };
+    if per_carton.is_err() {
+        d.carton_err
+            .set(tr(lang, "products.form.carton_invalid").into_owned());
+    }
     let price = price.ok()?;
     let stock = stock?;
+    let cost = cost.ok()?;
+    let per_carton = per_carton.ok()?;
     if name.trim().is_empty() {
         return None;
     }
-    let category_id = categories
-        .get(d.category.get_untracked())
+    // Index 0 is "no category".
+    let category_id = d
+        .category
+        .get_untracked()
+        .checked_sub(1)
+        .and_then(|i| choices.categories.get(i))
         .map(|c| c.id.clone());
+    let tax_class = choices.taxes.get(d.tax.get_untracked());
+    let barcode = d.barcode.get_untracked();
     Some(ProductInput {
         name,
         sku: d.sku.get_untracked(),
@@ -149,16 +200,24 @@ fn read(
         category_id,
         base_unit: unit.into(),
         base_precision: precision,
-        extra_units: vec![],
-        barcodes: vec![],
-        tax_bps: 1_900,
+        extra_units: per_carton
+            .map(|n| vec![("ctn".to_owned(), n.to_string())])
+            .unwrap_or_default(),
+        barcodes: if barcode.trim().is_empty() {
+            vec![]
+        } else {
+            vec![barcode]
+        },
+        tax_bps: tax_class.map_or(1_900, |t| t.rate_bps),
+        tax_class_id: tax_class.map(|t| t.id.clone()),
+        cost_minor: cost,
         price_minor: price.minor(),
         min_price_minor: None,
         min_stock: None,
         opening: (!stock.is_zero()).then(|| Opening {
             warehouse_id: session.warehouse().to_string(),
             qty: stock.to_string(),
-            unit_cost_minor: 0,
+            unit_cost_minor: cost.unwrap_or(0),
         }),
         ..Default::default()
     })
@@ -168,7 +227,7 @@ fn read(
 pub fn product_form(
     st: AppState,
     session: Session,
-    categories: Vec<Category>,
+    choices: Memo<Choices>,
     next_sku: String,
     on_cancel: impl Fn() + Clone + 'static,
     on_saved: impl Fn(ProductRow) + 'static,
@@ -177,27 +236,27 @@ pub fn product_form(
     // One operation per opening of the form: a second tap returns the first result.
     let meta = session.meta("product.create");
     let on_saved = Rc::new(on_saved);
-    let cats = Rc::new(categories);
-    let options = cats
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let name = c.name.clone();
-            (i, Box::new(move || name.clone()) as Box<dyn Fn() -> String>)
-        })
-        .collect();
+    // The choices may arrive after the form opens: the lists follow them.
+    let defaulted = signal(false);
+    effect(move || {
+        let c = choices.get();
+        if !defaulted.get_untracked() && !c.taxes.is_empty() {
+            defaulted.set(true);
+            d.tax
+                .set(c.taxes.iter().position(|t| t.is_default).unwrap_or(0));
+        }
+    });
     let units = BASE_UNITS
         .iter()
         .enumerate()
         .map(|(i, (_, key, _))| (i, Box::new(st.t(key)) as Box<dyn Fn() -> String>))
         .collect();
     let save = {
-        let cats = cats.clone();
         move || {
             if d.saving.get_untracked() {
                 return;
             }
-            let Some(input) = read(st, d, &session, &cats) else {
+            let Some(input) = read(st, d, &session, &choices.get_untracked()) else {
                 return;
             };
             d.saving.set(true);
@@ -215,6 +274,9 @@ pub fn product_form(
                                 "name" => d.name_err,
                                 "sku" => d.sku_err,
                                 "price" => d.price_err,
+                                "barcode" | "barcodes" => d.barcode_err,
+                                "cost" => d.cost_err,
+                                "units" => d.carton_err,
                                 "opening_qty" | "quantity" => d.stock_err,
                                 _ => d.form_err,
                             };
@@ -295,8 +357,78 @@ pub fn product_form(
             KeyboardType::Default,
             "product-sku",
         ))
-        .child(chips(st.t("products.col.category"), options, d.category))
-        .child(chips(st.t("products.col.unit"), units, d.unit));
+        .child(
+            view()
+                .flex_row()
+                .gap(px(12.0))
+                .child(view().flex_1().child(field(
+                    st.t("products.form.barcode"),
+                    d.barcode,
+                    st.t("products.form.barcode_hint"),
+                    err(d.barcode_err),
+                    KeyboardType::Number,
+                    "product-barcode",
+                )))
+                .child(view().w(px(140.0)).child(field(
+                    st.t("products.form.cost"),
+                    d.cost,
+                    String::new,
+                    err(d.cost_err),
+                    KeyboardType::Decimal,
+                    "product-cost",
+                ))),
+        )
+        .child(
+            view()
+                .gap(px(6.0))
+                .child(label(
+                    st.t("products.col.category"),
+                    ty::SM,
+                    FontWeight::SEMIBOLD,
+                    Tone::Ink,
+                ))
+                .child(dropdown(
+                    move || {
+                        let c = choices.get();
+                        std::iter::once((0, st.tn("products.form.no_category")))
+                            .chain(
+                                c.categories
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, n)| (i + 1, n.path.join(" › "))),
+                            )
+                            .collect()
+                    },
+                    d.category,
+                    Some(Icon::FolderTree),
+                    st.t("products.col.category"),
+                    "product-category",
+                )),
+        )
+        .child(dynamic(move || {
+            let options = choices
+                .get()
+                .taxes
+                .into_iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    (
+                        i,
+                        Box::new(move || t.name.clone()) as Box<dyn Fn() -> String>,
+                    )
+                })
+                .collect();
+            chips(st.t("products.form.tax"), options, d.tax).into_element()
+        }))
+        .child(chips(st.t("products.col.unit"), units, d.unit))
+        .child(field(
+            st.t("products.form.per_carton"),
+            d.per_carton,
+            st.t("products.form.per_carton_hint"),
+            err(d.carton_err),
+            KeyboardType::Number,
+            "product-carton",
+        ));
     let cancel = on_cancel.clone();
     let footer = view()
         .child(button(

@@ -39,7 +39,11 @@ pub fn section_tabs(st: AppState, route: Route) -> View {
         return view();
     };
     let mut row = view().flex_row().items_end().gap(px(4.0));
-    for &r in section.routes {
+    for &r in section
+        .routes
+        .iter()
+        .filter(|r| **r == route || st.shows(**r))
+    {
         let active = r == route;
         let ink = if active { Tone::Ink } else { Tone::Muted };
         row = row.child(

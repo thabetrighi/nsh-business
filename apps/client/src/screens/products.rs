@@ -163,6 +163,22 @@ pub fn products(st: AppState, compact: bool) -> View {
         },
     );
     let cat_list = computed(move || cats.get().unwrap_or_default());
+    let choices = resource(
+        move || st.session.get().map(|_| st.data_rev.get()),
+        move |_, _| {
+            let db = st.db();
+            async move {
+                db.call(|s| {
+                    Ok(crate::screens::product_form::Choices {
+                        categories: nb_store::usecases::catalog::list_categories(s)?,
+                        taxes: nb_store::usecases::catalog::list_tax_classes(s)?,
+                    })
+                })
+                .await
+            }
+        },
+    );
+    let choices_now = computed(move || choices.get().unwrap_or_default());
     let page = resource(
         move || {
             st.session.get()?;
@@ -793,6 +809,7 @@ pub fn products(st: AppState, compact: bool) -> View {
     )
     .otherwise(move || dynamic(grid).into_element());
 
+    let importing = signal(false);
     let actions = if compact {
         view().child(button(
             Variant::Primary,
@@ -803,20 +820,16 @@ pub fn products(st: AppState, compact: bool) -> View {
         ))
     } else {
         view()
-            .child(button(
-                Variant::Secondary,
-                Size::Md,
-                Some(Icon::Upload),
-                st.t("action.import"),
-                || {},
-            ))
-            .child(button(
-                Variant::Secondary,
-                Size::Md,
-                Some(Icon::Download),
-                st.t("action.export"),
-                || {},
-            ))
+            .child(
+                button(
+                    Variant::Secondary,
+                    Size::Md,
+                    Some(Icon::Upload),
+                    st.t("action.import"),
+                    move || importing.set(true),
+                )
+                .test_id("products-import"),
+            )
             .child(button(
                 Variant::Primary,
                 Size::Md,
@@ -868,6 +881,9 @@ pub fn products(st: AppState, compact: bool) -> View {
                 )
                 .child(table_footer(count, view())),
         )
+        .child(modal(importing, compact, move || {
+            crate::screens::catalog::import_dialog(st, move || importing.set(false)).into_element()
+        }))
         .child(modal(adding, compact, move || {
             let Some(session) = st.session.get_untracked() else {
                 return view().into_element();
@@ -875,7 +891,7 @@ pub fn products(st: AppState, compact: bool) -> View {
             product_form(
                 st,
                 session,
-                cat_list.get_untracked(),
+                choices_now,
                 st.tn("products.form.sku_auto"),
                 move || adding.set(false),
                 move |p: ProductRow| {
