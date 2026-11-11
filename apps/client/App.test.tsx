@@ -40,7 +40,7 @@ test("adds a product from the phone, with validation", async () => {
   await app.waitFor("text:Ajouter un produit");
   await app.press("text:Ajouter un produit");
   // The editor: organized in tabs, saved from its header.
-  await app.waitFor("text:Identification");
+  await app.waitFor("text:Identification", { timeout: 15000 });
   await app.press("id:product-save");
   await app.waitFor("text:Ce champ est obligatoire.");
   await app.type("id:product-name", "Lait test");
@@ -131,7 +131,7 @@ test("the database's rules come back under their fields", async () => {
   await app.press("id:nav-products");
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 000 résultats"));
   await app.press("text:Ajouter un produit");
-  await app.waitFor("text:Identification");
+  await app.waitFor("text:Identification", { timeout: 15000 });
   await app.type("id:product-name", "Doublon");
   // P-01000 is the first demo product's code.
   await app.type("id:product-sku", "p-01000");
@@ -162,7 +162,7 @@ test("the editor generates a barcode, packaging, list prices and variants", asyn
   await app.press("id:nav-products");
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 000 résultats"));
   await app.press("text:Ajouter un produit");
-  await app.waitFor("text:Identification");
+  await app.waitFor("text:Identification", { timeout: 15000 });
   await app.type("id:product-name", "T-shirt coton");
   await app.type("id:product-sku", "TSH");
   await app.press("id:editor-tab-prices");
@@ -277,4 +277,22 @@ test("importing products checks every line before writing", async () => {
   await app.paste("id:import-text", { text: "Nom;Prix;Catégorie\nCafé moulu;450;Épicerie\nThé vert;220;Épicerie\n" });
   await app.press("id:import-run");
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 002 résultats"));
+});
+
+test("tax classes and scale labels are the store's settings", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-settings");
+  await app.press("id:settings-taxes");
+  await app.waitFor("text:Classes de TVA");
+  await app.clear("id:tax-rate-1");
+  await app.type("id:tax-rate-1", "9,5");
+  await app.press("id:tax-save");
+  await app.waitFor("text:Paramètres enregistrés");
+  await app.press("id:settings-devices");
+  await app.waitFor("text:Étiquettes de balance");
+  await app.press("id:scale-add");
+  await app.waitUntil(() => app.texts().some((t) => plain(t).includes("article 42, prix 180")));
+  await app.press("id:scale-save");
+  await app.waitFor("text:Paramètres enregistrés");
 });

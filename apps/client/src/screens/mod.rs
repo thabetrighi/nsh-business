@@ -10,4 +10,5 @@ pub mod product_editor;
 pub mod products;
 pub mod sample;
 pub mod settings;
+pub mod settings_catalog;
 pub mod users;

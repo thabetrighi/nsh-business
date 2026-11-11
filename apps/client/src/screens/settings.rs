@@ -899,50 +899,38 @@ fn modules(st: AppState, compact: bool) -> View {
 
 fn taxes(st: AppState, compact: bool) -> View {
     let b = st.biz;
-    view().child(group_card(
-        st,
-        None,
-        vec![
-            row(
-                st,
-                "tax.included",
-                "tax.included.help",
-                switch(b.prices_incl_tax, st.t("tax.included")),
-                compact,
-            ),
-            row(
-                st,
-                "tax.default_rate",
-                "tax.default_rate.help",
-                segmented(
-                    vec![
-                        (
-                            0usize,
-                            Box::new(|| "19 %".to_owned()) as Box<dyn Fn() -> String>,
-                        ),
-                        (1, Box::new(|| "9 %".to_owned())),
-                        (2, Box::new(st.t("tax.exempt"))),
-                    ],
-                    b.tva_rate,
+    view()
+        .gap(px(20.0))
+        .child(crate::screens::settings_catalog::tax_classes_card(
+            st, compact,
+        ))
+        .child(group_card(
+            st,
+            None,
+            vec![
+                row(
+                    st,
+                    "tax.included",
+                    "tax.included.help",
+                    switch(b.prices_incl_tax, st.t("tax.included")),
+                    compact,
                 ),
-                compact,
-            ),
-            row(
-                st,
-                "tax.stamp",
-                "tax.stamp.help",
-                switch(b.stamp_duty, st.t("tax.stamp")),
-                compact,
-            ),
-            row(
-                st,
-                "tax.on_receipt",
-                "tax.on_receipt.help",
-                switch(b.tax_on_receipt, st.t("tax.on_receipt")),
-                compact,
-            ),
-        ],
-    ))
+                row(
+                    st,
+                    "tax.stamp",
+                    "tax.stamp.help",
+                    switch(b.stamp_duty, st.t("tax.stamp")),
+                    compact,
+                ),
+                row(
+                    st,
+                    "tax.on_receipt",
+                    "tax.on_receipt.help",
+                    switch(b.tax_on_receipt, st.t("tax.on_receipt")),
+                    compact,
+                ),
+            ],
+        ))
 }
 
 fn printing(st: AppState, compact: bool) -> View {
@@ -1018,46 +1006,51 @@ fn printing(st: AppState, compact: bool) -> View {
 
 fn devices(st: AppState, compact: bool) -> View {
     let b = st.biz;
-    view().child(group_card(
-        st,
-        None,
-        vec![
-            row(
-                st,
-                "device.scale",
-                "device.scale.help",
-                dropdown(
-                    move || {
-                        vec![
-                            (0usize, st.tn("device.scale.none")),
-                            (1, st.tn("device.scale.barcode")),
-                            (2, st.tn("device.scale.serial")),
-                        ]
-                    },
-                    b.scale,
-                    Some(Icon::Scale),
-                    st.t("device.scale"),
-                    "scale-select",
-                )
-                .w_full(),
-                compact,
-            ),
-            row(
-                st,
-                "device.scanner",
-                "device.scanner.help",
-                switch(b.scanner, st.t("device.scanner")),
-                compact,
-            ),
-            row(
-                st,
-                "device.drawer",
-                "device.drawer.help",
-                switch(b.drawer, st.t("device.drawer")),
-                compact,
-            ),
-        ],
-    ))
+    view()
+        .gap(px(20.0))
+        .child(group_card(
+            st,
+            None,
+            vec![
+                row(
+                    st,
+                    "device.scale",
+                    "device.scale.help",
+                    dropdown(
+                        move || {
+                            vec![
+                                (0usize, st.tn("device.scale.none")),
+                                (1, st.tn("device.scale.barcode")),
+                                (2, st.tn("device.scale.serial")),
+                            ]
+                        },
+                        b.scale,
+                        Some(Icon::Scale),
+                        st.t("device.scale"),
+                        "scale-select",
+                    )
+                    .w_full(),
+                    compact,
+                ),
+                row(
+                    st,
+                    "device.scanner",
+                    "device.scanner.help",
+                    switch(b.scanner, st.t("device.scanner")),
+                    compact,
+                ),
+                row(
+                    st,
+                    "device.drawer",
+                    "device.drawer.help",
+                    switch(b.drawer, st.t("device.drawer")),
+                    compact,
+                ),
+            ],
+        ))
+        .child(crate::screens::settings_catalog::scale_formats_card(
+            st, compact,
+        ))
 }
 
 fn sync(st: AppState, compact: bool) -> View {
