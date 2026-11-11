@@ -849,3 +849,43 @@ test("goods brought back pay for others in one exchange", async () => {
   await seen(/^Échange fait : retour AV-01-\d\d-A\d+, vente FV-01-\d\d-A\d+\. À rendre : .+\.$/);
   await app.waitUntil(() => !app.texts().some((t) => plain(t).startsWith("Repris de ")));
 });
+
+test("a sale shows on the dashboard and in the reports", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-confirm");
+  await app.press("id:pay-confirm");
+  let number = "";
+  await app.waitUntil(() =>
+    app.texts().some((t) => {
+      const m = /^Vente (FV-01-\d\d-A\d+) enregistrée/.exec(plain(t));
+      if (m) number = m[1];
+      return !!m;
+    }),
+  );
+  // The dashboard lists it.
+  await app.press("id:nav-home");
+  await app.waitFor("id:home-sale-0");
+  await seen(new RegExp(`^${number}$`));
+  // The report counts it, with its profit; by product, the two items.
+  await app.press("text:Rapports");
+  await app.press("id:nav-reports");
+  await app.waitFor("id:rep-sales");
+  await app.waitFor("id:rep-profit");
+  await app.press("text:Par produit");
+  await app.waitFor("id:rep-row-0");
+  await seen(/^2$/);
+  // Stock: its value at cost.
+  await app.press("id:nav-stock_reports");
+  await app.waitFor("id:stk-value");
+  await app.waitFor("id:stk-row-0");
+});

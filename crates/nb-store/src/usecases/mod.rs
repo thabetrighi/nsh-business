@@ -16,6 +16,7 @@ pub mod org;
 pub mod products;
 pub mod purchase_orders;
 pub mod purchasing;
+pub mod reports;
 pub mod returns;
 pub mod sales;
 pub mod setup;

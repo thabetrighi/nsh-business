@@ -1,31 +1,33 @@
-//! Home: the store at a glance — KPIs with trends, sales over time, payment
-//! methods, recent invoices with their status, sales by category and what
-//! runs out. SAMPLE DATA (`sample.rs`) until the modules feed projections.
+//! Home: the store at a glance (M13) — sales, invoices, average basket and
+//! what customers owe, with their trend against the period before; sales
+//! over time, payment methods, the latest invoices, sales by category and
+//! what runs out. Everything is read from the records
+//! (`nb_store::usecases::reports::dashboard`).
 
 use std::rc::Rc;
 
-use nb_core::{Currency, Money};
+use nb_core::Money;
+use nb_store::usecases::reports::{Dashboard, Period, dashboard};
 use nsh_core::element::View;
 use nsh_core::prelude::*;
 
-use super::sample::{
-    self, CATEGORY_SALES, INVOICES, InvoiceStatus, LOW_STOCK, PAYMENTS, Period, pick,
-};
 use crate::nav::Route;
+use crate::screens::common::date_time;
 use crate::state::AppState;
 use crate::ui::chart::{Series, area_chart, bar_list, donut, legend, legend_row, sparkline};
 use crate::ui::icon::Icon;
 use crate::ui::kit::{Size, Variant, avatar, badge, button, figure, label, label_line, segmented};
-use crate::ui::popup::{Action, row_menu};
 use crate::ui::surface::{
-    card, card_body, card_header_icon, delta, kpi, page_header_full, page_pad,
+    card, card_body, card_header_icon, delta, empty_state, kpi, page_header_full, page_pad,
 };
 use crate::ui::tokens::{Status, Tone, sp, ty};
 
-const DZD: Currency = Currency::DZD;
-
-fn dzd(minor: i64) -> Money {
-    Money::from_minor(minor, DZD)
+fn money(st: AppState, minor: i64) -> Money {
+    let c = st
+        .session
+        .get_untracked()
+        .map_or(nb_core::Currency::DZD, |s| s.currency);
+    Money::from_minor(minor, c)
 }
 
 /// Change in basis points between two totals (display only).
@@ -37,29 +39,51 @@ fn change_bps(cur: i64, prev: i64) -> i64 {
     }
 }
 
+fn period_key(p: Period) -> &'static str {
+    match p {
+        Period::Week => "period.7d",
+        Period::Month => "period.30d",
+        Period::Year => "period.12m",
+    }
+}
+
 pub fn home(st: AppState, compact: bool) -> View {
     let period = signal(Period::Month);
     let gap = if compact { 16.0 } else { 20.0 };
-
-    let periods = segmented(
-        [Period::Week, Period::Month, Period::Year]
-            .into_iter()
-            .map(|p| (p, Box::new(st.t(p.key())) as Box<dyn Fn() -> String>))
-            .collect(),
-        period,
+    let data = resource(
+        move || st.session.get().map(|_| (period.get(), st.data_rev.get())),
+        move |(p, _), _| {
+            let db = st.db();
+            async move { db.call(move |s| dashboard(s, p)).await }
+        },
     );
+    let board = computed(move || data.with(|d: Option<&Dashboard>| d.cloned()));
+    let periods = move || {
+        segmented(
+            [Period::Week, Period::Month, Period::Year]
+                .into_iter()
+                .map(|p| (p, Box::new(st.t(period_key(p))) as Box<dyn Fn() -> String>))
+                .collect(),
+            period,
+        )
+    };
     let actions = if compact {
         view()
     } else {
-        view().child(periods).child(button(
-            Variant::Secondary,
-            Size::Md,
-            Some(Icon::Download),
-            st.t("action.export"),
-            || {},
+        view().child(periods()).child(when(
+            move || st.can("reports.view"),
+            move || {
+                button(
+                    Variant::Secondary,
+                    Size::Md,
+                    Some(Icon::ChartLine),
+                    st.t("reports.open"),
+                    move || st.route.set(Route::Reports),
+                )
+                .into_element()
+            },
         ))
     };
-
     let mut page = view()
         .w_full()
         .p(px(page_pad(compact)))
@@ -73,36 +97,33 @@ pub fn home(st: AppState, compact: bool) -> View {
             compact,
         ));
     if compact {
-        page = page.child(
-            scroll().horizontal().child(segmented(
-                [Period::Week, Period::Month, Period::Year]
-                    .into_iter()
-                    .map(|p| (p, Box::new(st.t(p.key())) as Box<dyn Fn() -> String>))
-                    .collect(),
-                period,
-            )),
-        );
+        page = page.child(scroll().horizontal().child(periods()));
     }
     page.child(dynamic(move || {
-        kpis(st, period.get(), compact).into_element()
-    }))
-    .child(
-        row(compact, gap)
-            .child(column(compact, 2.0).child(dynamic(move || {
-                sales_card(st, period.get(), compact).into_element()
-            })))
-            .child(column(compact, 1.0).child(payments_card(st))),
-    )
-    .child(
-        row(compact, gap)
-            .child(column(compact, 2.0).child(invoices_card(st, compact)))
+        let Some(d) = board.get() else {
+            return view().into_element();
+        };
+        let p = period.get_untracked();
+        view()
+            .gap(px(gap))
+            .child(kpis(st, &d, compact))
             .child(
-                column(compact, 1.0)
-                    .gap(px(gap))
-                    .child(categories_card(st))
-                    .child(low_stock_card(st)),
-            ),
-    )
+                row(compact, gap)
+                    .child(column(compact, 2.0).child(sales_card(st, &d, p, compact)))
+                    .child(column(compact, 1.0).child(payments_card(st, &d))),
+            )
+            .child(
+                row(compact, gap)
+                    .child(column(compact, 2.0).child(invoices_card(st, &d, compact)))
+                    .child(
+                        column(compact, 1.0)
+                            .gap(px(gap))
+                            .child(categories_card(st, &d))
+                            .child(low_stock_card(st, &d)),
+                    ),
+            )
+            .into_element()
+    }))
 }
 
 /// A column of a dashboard row: shares the width on desktop, full width on phones.
@@ -122,51 +143,47 @@ fn row(compact: bool, gap: f32) -> View {
     }
 }
 
-fn kpis(st: AppState, period: Period, compact: bool) -> View {
-    let (cur, prev) = sample::sales(period);
+fn kpis(st: AppState, d: &Dashboard, compact: bool) -> View {
     let rtl = st.rtl();
-    let total: i64 = cur.iter().sum();
-    let total_prev: i64 = prev.iter().sum();
-    // Invoices: about one per 1 450 DA sold.
-    let orders: Vec<i64> = cur.iter().map(|v| v / 145_000).collect();
-    let orders_prev: i64 = prev.iter().map(|v| v / 145_000).sum();
-    let n_orders: i64 = orders.iter().sum();
+    let total: i64 = d.current.iter().sum();
+    let total_prev: i64 = d.previous.iter().sum();
+    let n_orders: i64 = d.orders.iter().sum();
     let basket = if n_orders == 0 { 0 } else { total / n_orders };
-    let basket_prev = if orders_prev == 0 {
+    let basket_prev = if d.orders_previous == 0 {
         0
     } else {
-        total_prev / orders_prev
+        total_prev / d.orders_previous
     };
-    let credit: i64 = 2_875_050;
-
+    let credit = d.credit_minor;
+    let owing = i64::from(d.customers_owing);
     let pct = move |bps: i64| {
         let f = st.fmt();
         move || f.percent_signed(bps)
     };
     let d_total = change_bps(total, total_prev);
-    let d_orders = change_bps(n_orders, orders_prev);
+    let d_orders = change_bps(n_orders, d.orders_previous);
     let d_basket = change_bps(basket, basket_prev);
     let spark_w = if compact { 110.0 } else { 160.0 };
-
+    let trend = |bps: i64, prev: i64| (prev > 0).then(|| delta(bps, pct(bps)));
     let tiles = [
         kpi(
             st.t("kpi.revenue"),
-            move || st.fmt().money_whole(dzd(total)),
-            Some(delta(d_total, pct(d_total))),
-            sparkline(cur.clone(), spark_w, 36.0, Tone::Primary, rtl),
+            move || st.fmt().money_whole(money(st, total)),
+            trend(d_total, total_prev),
+            sparkline(d.current.clone(), spark_w, 36.0, Tone::Primary, rtl),
             compact,
         ),
         kpi(
             st.t("kpi.orders"),
             move || st.fmt().integer(n_orders),
-            Some(delta(d_orders, pct(d_orders))),
-            sparkline(orders, spark_w, 36.0, Tone::Primary, rtl),
+            trend(d_orders, d.orders_previous),
+            sparkline(d.orders.clone(), spark_w, 36.0, Tone::Primary, rtl),
             compact,
         ),
         kpi(
             st.t("kpi.basket"),
-            move || st.fmt().money_whole(dzd(basket)),
-            Some(delta(d_basket, pct(d_basket))),
+            move || st.fmt().money_whole(money(st, basket)),
+            trend(d_basket, basket_prev),
             view().child(label(
                 st.t("kpi.vs_prev"),
                 ty::XS,
@@ -177,13 +194,17 @@ fn kpis(st: AppState, period: Period, compact: bool) -> View {
         ),
         kpi(
             st.t("kpi.credit"),
-            move || st.fmt().money_whole(dzd(credit * 100)),
+            move || st.fmt().money_whole(money(st, credit)),
             None,
             view().flex_row().child(badge(
-                Status::Warning,
+                if owing > 0 {
+                    Status::Warning
+                } else {
+                    Status::Neutral
+                },
                 Some(Icon::Users),
-                st.t_with("kpi.customers_owing", |s| {
-                    vec![("count", s.fmt().integer(14))]
+                st.t_with("kpi.customers_owing", move |s| {
+                    vec![("count", s.fmt().integer(owing))]
                 }),
             )),
             compact,
@@ -203,20 +224,34 @@ fn kpis(st: AppState, period: Period, compact: bool) -> View {
     grid
 }
 
-fn sales_card(st: AppState, period: Period, compact: bool) -> View {
-    let (cur, prev) = sample::sales(period);
-    let fmt = st.fmt();
-    let x = sample::labels(period, &fmt);
-    let total: i64 = cur.iter().sum();
+/// A bucket's label: its day, or its month for the year.
+fn labels(st: AppState, d: &Dashboard, p: Period) -> Vec<String> {
+    let f = st.fmt();
+    d.labels
+        .iter()
+        .map(|iso| {
+            let m: u32 = iso.get(5..7).and_then(|x| x.parse().ok()).unwrap_or(1);
+            let day: u32 = iso.get(8..10).and_then(|x| x.parse().ok()).unwrap_or(1);
+            if p == Period::Year {
+                f.month_short(m).to_owned()
+            } else {
+                f.day_month(m, day)
+            }
+        })
+        .collect()
+}
+
+fn sales_card(st: AppState, d: &Dashboard, p: Period, compact: bool) -> View {
+    let total: i64 = d.current.iter().sum();
     let series = vec![
         Series {
             name: st.tn("chart.current"),
-            values: cur,
+            values: d.current.clone(),
             filled: true,
         },
         Series {
             name: st.tn("chart.previous"),
-            values: prev,
+            values: d.previous.clone(),
             filled: false,
         },
     ];
@@ -244,14 +279,14 @@ fn sales_card(st: AppState, period: Period, compact: bool) -> View {
                     view()
                 })
                 .child(figure(
-                    move || st.fmt().money_whole(dzd(total)),
+                    move || st.fmt().money_whole(money(st, total)),
                     ty::H2,
                     FontWeight::BOLD,
                     || Tone::Ink,
                 ))
                 .child(area_chart(
                     series,
-                    x,
+                    labels(st, d, p),
                     if compact { 180.0 } else { 248.0 },
                     st.rtl(),
                     y,
@@ -259,18 +294,58 @@ fn sales_card(st: AppState, period: Period, compact: bool) -> View {
         )
 }
 
-fn payments_card(st: AppState) -> View {
-    let total: i64 = PAYMENTS.iter().map(|p| p.1).sum();
-    let tones = [Tone::Primary, Tone::Info, Tone::Warning];
-    let parts = PAYMENTS.iter().zip(tones).map(|(p, t)| (p.1, t)).collect();
+fn method_key(code: &str) -> String {
+    format!("pay.{code}")
+}
+
+fn payments_card(st: AppState, d: &Dashboard) -> View {
+    let total: i64 = d.methods.iter().map(|p| p.net_minor).sum();
+    let tones = [
+        Tone::Primary,
+        Tone::Info,
+        Tone::Warning,
+        Tone::Success,
+        Tone::Danger,
+    ];
+    let parts = d
+        .methods
+        .iter()
+        .zip(tones)
+        .map(|(p, t)| (p.net_minor, t))
+        .collect::<Vec<_>>();
     let mut legend_list = view().gap(px(12.0)).w_full();
-    for ((key, v), tone) in PAYMENTS.into_iter().zip(tones) {
+    for (m, tone) in d.methods.iter().zip(tones) {
+        let v = m.net_minor;
         let share = v.saturating_mul(10_000) / total.max(1);
-        legend_list = legend_list.child(legend_row(tone, st.t(key), move || {
-            let f = st.fmt();
-            format!("{} · {}", f.compact(v / 100), percent_plain(&f, share))
-        }));
+        let key = method_key(&m.key);
+        legend_list = legend_list.child(legend_row(
+            tone,
+            move || st.tn(&key),
+            move || {
+                let f = st.fmt();
+                format!("{} · {}", f.compact(v / 100), percent_plain(&f, share))
+            },
+        ));
     }
+    let body = if parts.is_empty() {
+        card_body().child(label(
+            st.t("dashboard.nothing_yet"),
+            ty::SM,
+            FontWeight::NORMAL,
+            Tone::Muted,
+        ))
+    } else {
+        card_body()
+            .items_center()
+            .gap(px(20.0))
+            .child(donut(
+                parts,
+                168.0,
+                move || st.fmt().compact(total / 100),
+                st.t("pay.total"),
+            ))
+            .child(legend_list)
+    };
     card()
         .child(card_header_icon(
             Some(Icon::Wallet),
@@ -278,18 +353,7 @@ fn payments_card(st: AppState) -> View {
             None,
             view(),
         ))
-        .child(
-            card_body()
-                .items_center()
-                .gap(px(20.0))
-                .child(donut(
-                    parts,
-                    168.0,
-                    move || st.fmt().compact(total / 100),
-                    st.t("pay.total"),
-                ))
-                .child(legend_list),
-        )
+        .child(body)
 }
 
 fn percent_plain(f: &nb_i18n::Format, bps: i64) -> String {
@@ -299,58 +363,29 @@ fn percent_plain(f: &nb_i18n::Format, bps: i64) -> String {
     )
 }
 
-fn status_of(s: InvoiceStatus) -> (Status, Icon) {
-    match s {
-        InvoiceStatus::Paid => (Status::Success, Icon::Check),
-        InvoiceStatus::Partial => (Status::Info, Icon::Clock),
-        InvoiceStatus::Unpaid => (Status::Neutral, Icon::Clock),
-        InvoiceStatus::Overdue => (Status::Danger, Icon::Alert),
-    }
-}
-
-fn invoices_card(st: AppState, compact: bool) -> View {
-    let head = |key: &'static str, w: Option<f32>, end: bool| {
-        let v = view().px(px(12.0));
-        let v = match w {
-            Some(w) => v.w(px(w)).flex_shrink_0(),
-            None => v.flex_1().min_w(px(0.0)),
-        };
-        let v = if end { v.items_end() } else { v.items_start() };
-        v.child(label_line(
-            st.t(key),
-            ty::XS,
-            FontWeight::SEMIBOLD,
-            Tone::Muted,
-        ))
-    };
+fn invoices_card(st: AppState, d: &Dashboard, compact: bool) -> View {
     let mut table = view();
-    if !compact {
-        table = table.child(
-            view()
-                .flex_row()
-                .items_center()
-                .h(px(sp(36.0)))
-                .px(px(8.0))
-                .bg(Tone::Subtle.color())
-                .border_t_1()
-                .border_b_1()
-                .border_color(Tone::Border.color())
-                .child(head("col.customer", None, false))
-                .child(head("col.date", Some(120.0), false))
-                .child(head("col.status", Some(130.0), false))
-                .child(head("col.amount", Some(140.0), true))
-                .child(view().w(px(40.0))),
-        );
+    if d.recent.is_empty() {
+        table = table.child(empty_state(
+            Icon::Receipt,
+            st.t("sales.empty"),
+            st.t("dashboard.nothing_yet"),
+            None,
+        ));
     }
-    for inv in INVOICES.iter() {
-        let (status, ic) = status_of(inv.status);
-        let name = move || pick(st.lang(), inv.ar, inv.fr);
-        let when = move || {
-            let f = st.fmt();
-            let (m, d) = sample::day_back(inv.back_days);
-            format!("{} · {}", f.day_month(m, d), f.time(inv.hour, inv.minute))
+    for (i, s) in d.recent.iter().enumerate() {
+        let credit = s.methods.iter().any(|m| m == "credit");
+        let (status, key) = if s.returned_minor >= s.total_minor && s.total_minor > 0 {
+            (Status::Neutral, "dashboard.returned")
+        } else if credit {
+            (Status::Warning, "pay.credit")
+        } else {
+            (Status::Success, "status.paid")
         };
-        let amount = move || st.fmt().money(dzd(inv.total));
+        let number = s.number.clone();
+        let when = date_time(st, s.created_at);
+        let total = s.total_minor;
+        let n = number.clone();
         let who = view()
             .flex_row()
             .items_center()
@@ -358,76 +393,49 @@ fn invoices_card(st: AppState, compact: bool) -> View {
             .flex_1()
             .min_w(px(0.0))
             .px(px(12.0))
-            .child(avatar(name, 30.0, Status::Neutral))
+            .child(avatar(move || n.clone(), 30.0, status))
             .child(
                 view()
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(label_line(name, ty::SM, FontWeight::SEMIBOLD, Tone::Ink))
                     .child(label_line(
-                        move || inv.number.to_owned(),
+                        move || number.clone(),
+                        ty::SM,
+                        FontWeight::SEMIBOLD,
+                        Tone::Ink,
+                    ))
+                    .child(label_line(
+                        move || when.clone(),
                         ty::XS,
                         FontWeight::NORMAL,
                         Tone::Muted,
                     )),
             );
-        let menu = row_menu(
-            move || {
-                vec![
-                    Action::new(Icon::Eye, st.tn("action.view"), || {}),
-                    Action::new(Icon::Printer, st.tn("action.print"), || {}),
-                    Action::new(Icon::Copy, st.tn("action.duplicate"), || {}),
-                ]
-            },
-            st.t("action.row_actions"),
-        );
-        let r = if compact {
+        table = table.child(
             view()
+                .test_id(&format!("home-sale-{i}"))
                 .flex_row()
                 .items_center()
-                .py(px(sp(12.0)))
+                .py(px(sp(if compact { 12.0 } else { 10.0 })))
                 .px(px(8.0))
                 .border_t_1()
                 .border_color(Tone::Border.color())
                 .child(who)
                 .child(
                     view()
-                        .items_end()
-                        .gap(px(4.0))
+                        .flex_row()
+                        .items_center()
+                        .gap(px(10.0))
                         .px(px(8.0))
-                        .child(figure(amount, ty::SM, FontWeight::SEMIBOLD, || Tone::Ink))
-                        .child(badge(status, None, st.t(inv.status.key()))),
-                )
-        } else {
-            view()
-                .flex_row()
-                .items_center()
-                .h(px(sp(56.0)))
-                .px(px(8.0))
-                .border_b_1()
-                .border_color(Tone::Border.color())
-                .hover(|s| s.bg(Tone::Subtle.color()))
-                .child(who)
-                .child(view().w(px(120.0)).px(px(12.0)).child(figure(
-                    when,
-                    ty::SM,
-                    FontWeight::NORMAL,
-                    || Tone::Muted,
-                )))
-                .child(view().w(px(130.0)).px(px(12.0)).child(badge(
-                    status,
-                    Some(ic),
-                    st.t(inv.status.key()),
-                )))
-                .child(view().w(px(140.0)).px(px(12.0)).items_end().child(figure(
-                    amount,
-                    ty::SM,
-                    FontWeight::SEMIBOLD,
-                    || Tone::Ink,
-                )))
-                .child(view().w(px(40.0)).items_center().child(menu))
-        };
-        table = table.child(r);
+                        .child(badge(status, None, st.t(key)))
+                        .child(figure(
+                            move || st.fmt().money(money(st, total)),
+                            ty::SM,
+                            FontWeight::SEMIBOLD,
+                            || Tone::Ink,
+                        )),
+                ),
+        );
     }
     card()
         .min_w(px(0.0))
@@ -446,13 +454,28 @@ fn invoices_card(st: AppState, compact: bool) -> View {
         .child(table)
 }
 
-fn categories_card(st: AppState) -> View {
-    let rows = move || {
-        let f = st.fmt();
-        CATEGORY_SALES
-            .iter()
-            .map(|(ar, fr, v)| (pick(st.lang(), ar, fr), *v, f.compact(v / 100)))
-            .collect::<Vec<_>>()
+fn categories_card(st: AppState, d: &Dashboard) -> View {
+    let rows: Vec<(String, i64, String)> = d
+        .categories
+        .iter()
+        .map(|c| {
+            let name = if c.name.is_empty() {
+                st.tn("reports.uncategorized")
+            } else {
+                c.name.clone()
+            };
+            (name, c.net_minor, st.fmt().compact(c.net_minor / 100))
+        })
+        .collect();
+    let body = if rows.is_empty() {
+        card_body().child(label(
+            st.t("dashboard.nothing_yet"),
+            ty::SM,
+            FontWeight::NORMAL,
+            Tone::Muted,
+        ))
+    } else {
+        card_body().child(bar_list(rows, Tone::Primary))
     };
     card()
         .child(card_header_icon(
@@ -461,20 +484,27 @@ fn categories_card(st: AppState) -> View {
             None,
             view(),
         ))
-        .child(card_body().child(dynamic(move || {
-            bar_list(rows(), Tone::Primary).into_element()
-        })))
+        .child(body)
 }
 
-fn low_stock_card(st: AppState) -> View {
+fn low_stock_card(st: AppState, d: &Dashboard) -> View {
     let mut list = view();
-    for (ar, fr, left, min) in LOW_STOCK {
-        let status = if left == 0 {
-            Status::Danger
+    if d.low_stock.is_empty() {
+        list = list.child(view().px(px(20.0)).py(px(12.0)).child(label(
+            st.t("dashboard.stock_fine"),
+            ty::SM,
+            FontWeight::NORMAL,
+            Tone::Muted,
+        )));
+    }
+    for r in &d.low_stock {
+        let (status, word) = if r.out() {
+            (Status::Danger, "stock.out")
         } else {
-            Status::Warning
+            (Status::Warning, "stock.low")
         };
-        let word = if left == 0 { "stock.out" } else { "stock.low" };
+        let name = r.name.clone();
+        let (left, min) = (r.on_hand_milli, r.min_stock_milli.unwrap_or(0));
         list = list.child(
             view()
                 .flex_row()
@@ -490,17 +520,16 @@ fn low_stock_card(st: AppState) -> View {
                         .min_w(px(0.0))
                         .gap(px(2.0))
                         .child(label_line(
-                            move || pick(st.lang(), ar, fr),
+                            move || name.clone(),
                             ty::SM,
                             FontWeight::SEMIBOLD,
                             Tone::Ink,
                         ))
                         .child(label_line(
                             st.t_with("dashboard.left", move |s| {
-                                vec![(
-                                    "qty",
-                                    format!("{} / {}", s.fmt().integer(left), s.fmt().integer(min)),
-                                )]
+                                let q =
+                                    |m: i64| s.fmt().quantity(nb_core::Quantity::from_milli(m), 3);
+                                vec![("qty", format!("{} / {}", q(left), q(min)))]
                             }),
                             ty::XS,
                             FontWeight::NORMAL,
@@ -520,7 +549,7 @@ fn low_stock_card(st: AppState) -> View {
                 Size::Sm,
                 None,
                 st.t("dashboard.see_all"),
-                move || st.route.set(Route::Products),
+                move || st.route.set(Route::StockReports),
             )),
         ))
         .child(list)
