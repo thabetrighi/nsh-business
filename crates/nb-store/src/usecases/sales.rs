@@ -57,8 +57,12 @@ pub struct ShiftRow {
     pub cash_out_minor: i64,
     /// Cash given back for returns.
     pub refunds_minor: i64,
+    /// Cash received from customers for their debts.
+    #[serde(default)]
+    pub collections_minor: i64,
     pub sales: u32,
-    /// What the till should hold: opening + cash sales + in − out − refunds.
+    /// What the till should hold: opening + cash sales + collections + in
+    /// − out − refunds.
     pub expected_minor: i64,
     pub counted_minor: Option<i64>,
     pub difference_minor: Option<i64>,
@@ -90,6 +94,7 @@ pub(crate) fn shift_of(conn: &Connection, id: &str) -> Result<ShiftRow> {
                     cash_in_minor: 0,
                     cash_out_minor: 0,
                     refunds_minor: 0,
+                    collections_minor: 0,
                     sales: 0,
                     expected_minor: 0,
                 })
@@ -128,8 +133,14 @@ pub(crate) fn shift_of(conn: &Connection, id: &str) -> Result<ShiftRow> {
         [id],
         |r| r.get(0),
     )?;
-    row.expected_minor =
-        row.opening_minor + row.cash_sales_minor + cash_in - cash_out - row.refunds_minor;
+    row.collections_minor = conn.query_row(
+        "SELECT COALESCE(SUM(amount_minor), 0) FROM receipts WHERE shift_id = ?1 AND method = 'cash'",
+        [id],
+        |r| r.get(0),
+    )?;
+    row.expected_minor = row.opening_minor + row.cash_sales_minor + row.collections_minor + cash_in
+        - cash_out
+        - row.refunds_minor;
     Ok(row)
 }
 

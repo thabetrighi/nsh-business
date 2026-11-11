@@ -1,6 +1,7 @@
 //! Screens. Each screen is a function of the app state.
 
 pub mod accounting;
+pub mod approval;
 pub mod catalog;
 pub mod common;
 pub mod customers;

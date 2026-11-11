@@ -29,6 +29,7 @@ use nsh_core::prelude::*;
 
 use crate::db::DbError;
 use crate::nav::Route;
+use crate::screens::approval::{Ask, approval_dialog, needs_approval};
 use crate::screens::common::page_head;
 use crate::screens::forms::{error_text, parse_price};
 use crate::state::AppState;
@@ -548,8 +549,9 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
                 .test_id("pos-held")
                 .into_element()
             }))
+            // A cashier may ask a supervisor for a return.
             .child(when(
-                move || st.can("sales.return"),
+                move || st.can("sales.return") || st.can("sales.sell"),
                 move || {
                     if compact {
                         icon_button(
@@ -1855,6 +1857,24 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
     let given = signal(Money::from_minor(due, c).to_plain_string());
     let error = signal(String::new());
     let busy = signal(false);
+    // A supervisor's approval, when the sale needs one (a large discount,
+    // credit past the limit…): asked on the spot, then the sale is sent again.
+    let owner = Owner::current();
+    let approval: Signal<Option<String>> = signal(None);
+    let asking: Signal<Option<Ask>> = signal(None);
+    let asking_open = signal(false);
+    effect(move || {
+        let open = asking.get().is_some();
+        if asking_open.get_untracked() != open {
+            asking_open.set(open);
+        }
+    });
+    effect(move || {
+        if !asking_open.get() {
+            asking.set(None);
+        }
+    });
+    let branch_id = session.branch().to_string();
     let given_minor = move || parse_price(&given.get(), c).ok().map(|m| m.minor());
     let change = computed(move || match (way.get(), given_minor()) {
         (Way::Cash, Some(g)) if g > due => g - due,
@@ -1915,10 +1935,12 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                 discount_minor: (sale_discount.minor > 0).then_some(sale_discount.minor),
                 document_id: t.document.get_untracked().map(|d| d.0),
                 customer_id: t.customer.get_untracked().map(|c| c.id),
+                approval: approval.get_untracked(),
                 ..Default::default()
             };
             busy.set(true);
             let close = close.clone();
+            let ask_at = (branch_id.clone(), register.clone());
             let db = st.db();
             let task = spawn(async move {
                 let r = db.call(move |s| complete_sale(s, meta, input)).await;
@@ -1943,19 +1965,38 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                         show_toast(st, text);
                         t.search.focus();
                     }
-                    Err(e) => error.set(first_error(st, &e)),
+                    Err(e) => {
+                        if let Some(p) = needs_approval(&e) {
+                            asking.set(Some(Ask {
+                                permission: p,
+                                branch_id: Some(ask_at.0),
+                                register_id: Some(ask_at.1),
+                            }));
+                        }
+                        error.set(first_error(st, &e));
+                    }
                 }
             });
             drop(task); // runs to completion: tasks end with their owner, not their handle
         }
     };
+    let retry = save.clone();
+    // While a supervisor is asked, the keys are theirs.
     on_key("f9", {
         let save = save.clone();
-        move |_| save()
+        move |_| {
+            if !asking_open.get_untracked() {
+                save()
+            }
+        }
     });
     on_key("enter", {
         let save = save.clone();
-        move |_| save()
+        move |_| {
+            if !asking_open.get_untracked() {
+                save()
+            }
+        }
     });
     let quick = {
         let mut v = view().flex_row().flex_wrap().gap(px(8.0));
@@ -2177,14 +2218,36 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
             )
             .test_id("pay-confirm"),
         );
-    dialog_frame(
-        st,
-        st.t("pos.pay"),
-        st.t("pos.pay.help"),
-        body,
-        footer,
-        close,
-    )
+    view()
+        .flex_shrink(1.0)
+        .min_h(px(0.0))
+        .child(dialog_frame(
+            st,
+            st.t("pos.pay"),
+            st.t("pos.pay.help"),
+            body,
+            footer,
+            close,
+        ))
+        .child(modal(asking_open, false, move || {
+            match asking.get_untracked() {
+                Some(ask) => {
+                    let retry = retry.clone();
+                    approval_dialog(
+                        st,
+                        ask,
+                        move |id| {
+                            approval.set(Some(id));
+                            // Under this dialog: the approval's own closes now.
+                            owner.run(&retry);
+                        },
+                        move || asking_open.set(false),
+                    )
+                    .into_element()
+                }
+                None => view().into_element(),
+            }
+        }))
 }
 
 fn error_line(error: Signal<String>) -> AnyElement {
@@ -2336,6 +2399,7 @@ fn close_dialog(st: AppState, shift: ShiftRow, close: impl Fn() + Clone + 'stati
         ("pos.float", shift.opening_minor),
         ("pos.cash_sales", shift.cash_sales_minor),
         ("pos.cash_in", shift.cash_in_minor),
+        ("pos.collections", shift.collections_minor),
         ("pos.cash_out", -shift.cash_out_minor),
         ("pos.expected", shift.expected_minor),
     ];
@@ -2617,6 +2681,22 @@ fn return_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> V
     let reason = signal(String::new());
     let error = signal(String::new());
     let busy = signal(false);
+    let owner = Owner::current();
+    let approval: Signal<Option<String>> = signal(None);
+    let asking: Signal<Option<Ask>> = signal(None);
+    let asking_open = signal(false);
+    effect(move || {
+        let open = asking.get().is_some();
+        if asking_open.get_untracked() != open {
+            asking_open.set(open);
+        }
+    });
+    effect(move || {
+        if !asking_open.get() {
+            asking.set(None);
+        }
+    });
+    let branch_id = session.branch().to_string();
 
     let find = move || {
         let key = number.get_untracked();
@@ -2705,8 +2785,9 @@ fn return_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> V
                 lines,
                 refund: method.get_untracked().to_owned(),
                 reason: reason.get_untracked(),
-                approval: None,
+                approval: approval.get_untracked(),
             };
+            let ask_at = (branch_id.clone(), input.register_id.clone());
             busy.set(true);
             let close = close.clone();
             let db = st.db();
@@ -2726,6 +2807,13 @@ fn return_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> V
                     }
                     Err(e) => {
                         busy.set(false);
+                        if let Some(p) = needs_approval(&e) {
+                            asking.set(Some(Ask {
+                                permission: p,
+                                branch_id: Some(ask_at.0),
+                                register_id: Some(ask_at.1),
+                            }));
+                        }
                         error.set(first_error(st, &e));
                     }
                 }
@@ -2925,6 +3013,7 @@ fn return_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> V
             },
         ))
         .child(error_line(error));
+    let save_again = save.clone();
     let footer = view()
         .child(button(
             Variant::Secondary,
@@ -2939,18 +3028,41 @@ fn return_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> V
                 Size::Md,
                 Some(Icon::Undo),
                 st.t("pos.return.confirm"),
-                save,
+                save.clone(),
             )
             .test_id("ret-confirm"),
         );
-    dialog_frame(
-        st,
-        st.t("pos.return.title"),
-        st.t("pos.return.help"),
-        body,
-        footer,
-        close,
-    )
+    let retry = save_again;
+    view()
+        .flex_shrink(1.0)
+        .min_h(px(0.0))
+        .child(dialog_frame(
+            st,
+            st.t("pos.return.title"),
+            st.t("pos.return.help"),
+            body,
+            footer,
+            close,
+        ))
+        .child(modal(asking_open, false, move || {
+            match asking.get_untracked() {
+                Some(ask) => {
+                    let retry = retry.clone();
+                    approval_dialog(
+                        st,
+                        ask,
+                        move |id| {
+                            approval.set(Some(id));
+                            // Under this dialog: the approval's own closes now.
+                            owner.run(&retry);
+                        },
+                        move || asking_open.set(false),
+                    )
+                    .into_element()
+                }
+                None => view().into_element(),
+            }
+        }))
 }
 
 // ---------------------------------------------------------------------------

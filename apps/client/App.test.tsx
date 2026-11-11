@@ -567,4 +567,76 @@ test("a customer buys on account, and owes it", async () => {
   await app.press("text:Débiteurs");
   await app.waitFor("text:Épicerie Test");
   await app.waitUntil(() => app.texts().filter((t) => t === "Épicerie Test").length === 1 && app.texts().includes("Doit"));
+  // The debts by age list it; its card collects the payment into the till.
+  await app.press("id:tab-debts");
+  await app.waitFor("id:debt-0");
+  await app.waitFor("text:0–30 jours");
+  await app.press("id:debt-0");
+  await app.waitFor("id:card-collect");
+  await app.waitFor("text:Relevé");
+  await app.waitFor("text:Vente");
+  await app.press("id:card-collect");
+  await app.waitFor("id:rc-confirm");
+  await app.press("id:rc-confirm");
+  await seen(/^Reçu RC-01-\d\d-A\d+ : .+ encaissés\.$/);
+  await app.waitFor("text:Encaissement");
+  await app.waitFor("text:Personne ne vous doit rien");
+});
+
+test("a cashier's large discount is approved by a supervisor's PIN", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-settings");
+  await app.press("id:settings-users");
+  await app.waitFor("text:Propriétaire");
+  // A store manager who may approve, and a cashier.
+  await app.press("id:user-add");
+  await app.waitFor("id:user-name");
+  await app.type("id:user-name", "Sara Gérante");
+  await app.type("id:user-pin", "3691");
+  await app.press("text:Responsable de magasin");
+  await app.press("id:user-save");
+  await app.waitFor("text:Sara Gérante");
+  await app.waitUntil(() => !app.shows("id:user-name"));
+  await new Promise((r) => setTimeout(r, 500));
+  await app.press("id:user-add");
+  await app.waitFor("id:user-name");
+  await app.type("id:user-name", "Karim Caisse");
+  await app.type("id:user-pin", "2580");
+  await app.press("id:user-save");
+  await app.waitFor("text:Karim Caisse");
+  // The cashier signs in and sells with 20 % off a line.
+  await app.press("id:lock-now");
+  await app.waitFor("id:lock-screen");
+  await app.waitUntil(() => app.texts().includes("Karim Caisse"), { timeout: 10000 });
+  await app.press("text:Karim Caisse");
+  await app.waitFor("id:pin-ok");
+  for (const d of "2580") await app.press(`id:pin-${d}`);
+  await app.press("id:pin-ok");
+  await app.waitFor("id:lock-now");
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:cart-qty-0");
+  await app.waitFor("id:line-discount");
+  await app.type("id:line-discount", "20");
+  await app.press("id:line-apply");
+  await app.waitUntil(() => !app.shows("id:line-apply"));
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-confirm");
+  await app.press("id:pay-confirm");
+  // A supervisor approves on the spot; a wrong PIN is refused.
+  await app.waitFor("id:approval-confirm");
+  await seen(/^Il faut l'accord d'un responsable : une remise au-delà de l'habituel\.$/);
+  await app.type("id:approval-pin", "1478");
+  await app.press("id:approval-confirm");
+  await app.waitFor("text:Identifiants incorrects.");
+  await app.clear("id:approval-pin");
+  await app.type("id:approval-pin", "3691");
+  await app.press("id:approval-confirm");
+  await seen(/^Vente FV-01-\d\d-A\d+ enregistrée/);
 });
