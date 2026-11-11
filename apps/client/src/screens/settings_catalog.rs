@@ -276,7 +276,7 @@ fn example(st: AppState, r: ScaleRow) -> String {
                 "code",
                 &nb_i18n::bidi::isolate_ltr(&format!("{prefix} {art} {raw}{filler} C")),
             ),
-            ("article", &art.trim_start_matches('0').to_owned()),
+            ("article", art.trim_start_matches('0')),
             ("value", &nb_i18n::bidi::isolate_ltr(&shown_value)),
         ],
     )
