@@ -30,6 +30,36 @@ pub fn field(
     keyboard: KeyboardType,
     test_id: &'static str,
 ) -> View {
+    field_inner(caption, value, placeholder, error, keyboard, test_id, false)
+}
+
+/// A [`field`] whose text is hidden (passwords).
+pub fn secret_field(
+    caption: impl Fn() -> String + 'static,
+    value: Signal<String>,
+    error: impl Fn() -> String + Clone + 'static,
+    test_id: &'static str,
+) -> View {
+    field_inner(
+        caption,
+        value,
+        String::new,
+        error,
+        KeyboardType::Default,
+        test_id,
+        true,
+    )
+}
+
+fn field_inner(
+    caption: impl Fn() -> String + 'static,
+    value: Signal<String>,
+    placeholder: impl Fn() -> String + 'static,
+    error: impl Fn() -> String + Clone + 'static,
+    keyboard: KeyboardType,
+    test_id: &'static str,
+    masked: bool,
+) -> View {
     let err_for_border = error.clone();
     let err_for_text = error.clone();
     let err_shown = error.clone();
@@ -53,6 +83,7 @@ pub fn field(
                         .on_change(move |t: &str| value.set(t.to_owned()))
                         .placeholder(placeholder)
                         .keyboard_type(keyboard)
+                        .masked(masked)
                         .text_size(px(fs(ty::MD)))
                         .text_color(Tone::Ink.color()),
                 ),

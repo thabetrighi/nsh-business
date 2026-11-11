@@ -56,11 +56,14 @@ impl DbError {
 pub struct Session {
     pub setup: SetupResult,
     pub currency: Currency,
+    /// Who works on this device now (the owner until someone signs in).
+    pub actor: UserId,
 }
 
 impl Session {
+    /// A new operation run by the person signed in.
     pub fn meta(&self, kind: &'static str) -> OpMeta {
-        OpMeta::new(kind, Some(self.setup.org), Some(self.setup.owner))
+        OpMeta::new(kind, Some(self.setup.org), Some(self.actor))
     }
     pub fn warehouse(&self) -> WarehouseId {
         self.setup.warehouse
@@ -107,14 +110,16 @@ fn open(lang: DemoLang) -> Result<(Store, Session), Error> {
             [org.to_string()],
             |row| row.get(0),
         )?;
+        let owner = nb_store::repo::parse_id(&owner)?;
         Ok(Some(Session {
             setup: SetupResult {
                 org,
                 branch: nb_store::repo::parse_id(&branch.id)?,
                 warehouse: nb_store::repo::parse_id(&warehouse.id)?,
-                owner: nb_store::repo::parse_id(&owner)?,
+                owner,
             },
             currency: o.currency()?,
+            actor: owner,
         }))
     })?;
     let session = match existing {
@@ -146,6 +151,7 @@ fn open(lang: DemoLang) -> Result<(Store, Session), Error> {
             Session {
                 setup,
                 currency: Currency::DZD,
+                actor: setup.owner,
             }
         }
     };

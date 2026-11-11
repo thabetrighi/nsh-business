@@ -149,3 +149,54 @@ test("the database's rules come back under their fields", async () => {
   await app.type("id:product-search", "doublon");
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "1 résultat"));
 });
+
+test("the owner adds a cashier with a PIN, locks the screen, and the cashier signs in", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  // No PIN or password on the device yet: no lock.
+  expect(app.shows("id:lock-now")).toBe(false);
+  await app.press("id:nav-settings");
+  await app.press("id:settings-users");
+  await app.waitFor("text:Propriétaire");
+  await app.press("id:user-add");
+  await app.waitFor("text:Code rapide (4 à 6 chiffres)");
+  await app.type("id:user-name", "Karim Caisse");
+  await app.type("id:user-pin", "1234");
+  await app.press("id:user-save");
+  // The rules come from the database: a guessable PIN is refused.
+  await app.waitFor("text:Code trop facile à deviner (1234, 0000…). Choisissez-en un autre.");
+  await app.clear("id:user-pin");
+  await app.type("id:user-pin", "2580");
+  await app.press("id:user-save");
+  await app.waitFor("text:Karim Caisse");
+  expect(app.texts()).toContain("Caissier");
+  // Someone has a PIN now: the screen can be locked.
+  await app.waitFor("id:lock-now");
+  await app.press("id:lock-now");
+  await app.waitFor("id:lock-screen");
+  await app.press("text:Karim Caisse");
+  await app.waitFor("id:pin-ok");
+  for (const d of "1111") await app.press(`id:pin-${d}`);
+  await app.press("id:pin-ok");
+  await app.waitFor("text:Identifiants incorrects.");
+  for (const d of "2580") await app.press(`id:pin-${d}`);
+  await app.press("id:pin-ok");
+  await app.waitFor("id:lock-now");
+  // A cashier sees no accounting.
+  expect(app.texts()).not.toContain("Comptabilité");
+});
+
+test("the activity decides which modules show", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  // A grocery has no delivery rounds.
+  await app.waitUntil(() => !app.texts().includes("Distribution"));
+  await app.press("id:nav-settings");
+  await app.press("id:settings-store");
+  await app.waitFor("text:Modules activés");
+  await app.press("id:activity-select");
+  await app.press("text:Commerce de gros");
+  await app.press("id:store-save");
+  await app.waitFor("text:Paramètres enregistrés");
+  await app.waitFor("text:Distribution");
+});

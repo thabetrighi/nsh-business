@@ -2,6 +2,8 @@
 //! icon and its name. The sidebar, the phone's "More" sheet, the page tabs,
 //! the breadcrumbs and the command palette are all built from this table.
 
+use nb_domain::features::Feature;
+
 use crate::ui::icon::Icon;
 
 macro_rules! routes {
@@ -164,6 +166,47 @@ pub const TOP: &[Route] = &[Route::Home, Route::Sell];
 pub const BOTTOM: &[Route] = &[Route::Design, Route::Settings];
 
 impl Route {
+    /// The feature a page belongs to: it shows only when the organization's
+    /// activity profile (or a switch) turns that feature on (M4.3).
+    pub fn feature(self) -> Option<Feature> {
+        use Feature as F;
+        Some(match self {
+            Route::Sell => F::Pos,
+            Route::Sales | Route::Quotes | Route::Returns => F::Sales,
+            Route::Promotions => F::Promotions,
+            Route::Purchases | Route::PurchaseOrders | Route::Suppliers => F::Purchasing,
+            Route::Products | Route::Categories | Route::Units => F::Catalog,
+            Route::PriceLists => F::PriceLists,
+            Route::Inventory | Route::Movements | Route::StockCounts | Route::Warehouses => {
+                F::Inventory
+            }
+            Route::Transfers => F::MultiWarehouse,
+            Route::Customers => F::Customers,
+            Route::Debts => F::Debts,
+            Route::Installments => F::Installments,
+            Route::Cash | Route::Banks | Route::Expenses | Route::Shifts => F::Cash,
+            Route::Journal | Route::Accounts | Route::Ledger | Route::TrialBalance => F::Accounting,
+            Route::Tours => F::Routes,
+            Route::Vans => F::Vehicles,
+            Route::FieldOrders => F::SalesReps,
+            Route::Reports | Route::StockReports | Route::FinanceReports => F::Reports,
+            Route::Home | Route::Settings | Route::Design => return None,
+        })
+    }
+
+    /// The permission needed to see a page at all (others show to everyone
+    /// and protect their actions).
+    pub fn permission(self) -> Option<&'static str> {
+        Some(match self {
+            Route::Journal | Route::Accounts | Route::Ledger | Route::TrialBalance => {
+                "accounting.view"
+            }
+            Route::Reports | Route::StockReports | Route::FinanceReports => "reports.view",
+            Route::Purchases | Route::PurchaseOrders => "purchases.order",
+            _ => return None,
+        })
+    }
+
     /// The section it belongs to, with its index.
     pub fn section(self) -> Option<(usize, &'static Section)> {
         SECTIONS

@@ -119,6 +119,10 @@ icons! {
     UserCog => "user-cog",
     Dollar => "circle-dollar-sign",
     FileChart => "file-chart-column",
+    Key => "key-round",
+    Lock => "lock",
+    UserPlus => "user-plus",
+    Backspace => "delete",
 }
 
 /// An icon `size` points square, stroked in `tone`.

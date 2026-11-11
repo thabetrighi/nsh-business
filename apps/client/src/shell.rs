@@ -10,6 +10,7 @@ use nsh_core::prelude::*;
 use crate::command_palette::command_palette;
 use crate::nav::{BOTTOM, Route, SECTIONS, Section, TOP};
 use crate::screens::common::coming_soon;
+use crate::screens::lock::lock_screen;
 use crate::screens::{design::design, home::home, products::products, settings::settings};
 use crate::state::AppState;
 use crate::ui::icon::{Icon, icon};
@@ -32,8 +33,15 @@ pub fn shell(st: AppState) -> impl IntoElement {
         .bg(Tone::Canvas.color())
         .text_color(Tone::Body.color())
         .child(
-            when(compact, move || phone(st).into_element())
-                .otherwise(move || desktop(st).into_element()),
+            when(
+                move || st.needs_sign_in.get() && st.user.get().is_none(),
+                move || lock_screen(st).into_element(),
+            )
+            .otherwise(move || {
+                when(compact, move || phone(st).into_element())
+                    .otherwise(move || desktop(st).into_element())
+                    .into_element()
+            }),
         )
         .child(dynamic(move || {
             toast_layer(st, compact.get()).into_element()
@@ -78,13 +86,7 @@ fn store_place(st: AppState) -> impl Fn() -> String + 'static {
 }
 
 pub fn user_name(st: AppState) -> impl Fn() -> String + 'static {
-    move || {
-        if st.lang() == Lang::Ar {
-            "أحمد بن علي".into()
-        } else {
-            "Ahmed Benali".into()
-        }
-    }
+    move || st.user.get().map(|u| u.name).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- desktop
@@ -161,7 +163,11 @@ fn sidebar(st: AppState) -> View {
         Tone::Faint,
     )));
     for (i, section) in SECTIONS.iter().enumerate() {
-        nav = nav.child(section_group(st, i, section));
+        // A section shows when one of its pages does (activity, permissions).
+        nav = nav.child(when(
+            move || section.routes.iter().any(|r| st.shows(*r)),
+            move || section_group(st, i, section).into_element(),
+        ));
     }
     view()
         .w(px(SIDEBAR_W))
@@ -252,7 +258,10 @@ fn section_group(st: AppState, i: usize, section: &'static Section) -> View {
             .gap(px(1.0))
             .py(px(2.0));
         for &r in section.routes {
-            list = list.child(nav_item(st, r, true));
+            list = list.child(when(
+                move || st.shows(r),
+                move || nav_item(st, r, true).into_element(),
+            ));
         }
         list.into_element()
     });
@@ -361,6 +370,19 @@ fn top_bar(st: AppState) -> View {
             move || st.route.set(Route::Sell),
         ))
         .child(view().w(px(6.0)))
+        .child(when(
+            move || st.needs_sign_in.get(),
+            move || {
+                icon_button(
+                    || Icon::Lock,
+                    st.t("action.lock"),
+                    Variant::Ghost,
+                    move || st.lock(),
+                )
+                .test_id("lock-now")
+                .into_element()
+            },
+        ))
         .child(avatar(user_name(st), 32.0, Status::Accent))
 }
 
@@ -493,8 +515,17 @@ fn more_sheet(st: AppState, open: Signal<bool>) -> View {
         icon: Icon::Settings,
         routes: BOTTOM,
     })) {
+        let routes: Vec<Route> = section
+            .routes
+            .iter()
+            .copied()
+            .filter(|r| st.shows(*r))
+            .collect();
+        if routes.is_empty() {
+            continue;
+        }
         let mut grid = view().flex_row().flex_wrap();
-        for &r in section.routes {
+        for r in routes {
             grid = grid.child(tile(r));
         }
         body = body.child(

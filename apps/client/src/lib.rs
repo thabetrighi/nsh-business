@@ -76,15 +76,35 @@ pub fn App() -> impl IntoElement {
     // The look (accent, font, sizes, density, corners) is read by every
     // component as plain values: a change installs the new look and rebuilds
     // the tree. Navigation and data live in `st`, outside, and stay.
+    // The automatic lock (M4.7) lives here, at the root, so that no screen
+    // change cancels it. Touches and page changes count as activity.
+    effect(move || {
+        st.route.get();
+        st.touch();
+    });
+    let lock_timer = set_interval(std::time::Duration::from_secs(15), move || {
+        let Some(me) = st.user.get_untracked() else {
+            return;
+        };
+        let idle = state::now_ms() - st.last_active.get();
+        if me.auto_lock_min > 0 && idle >= i64::from(me.auto_lock_min) * 60_000 {
+            st.lock();
+        }
+    });
+    drop(lock_timer); // runs while the root lives: tasks end with their owner
+
     let look = computed(move || st.prefs.look());
-    view().flex_1().child(dynamic(move || {
-        let l = look.get();
-        ui::tokens::install(l);
-        ui::theme::apply(l);
-        view()
-            .flex_1()
-            .font_family(l.font.family())
-            .child(shell::shell(st))
-            .into_element()
-    }))
+    view()
+        .flex_1()
+        .on_touch(move |_: &nsh_core::TouchEvent| st.touch())
+        .child(dynamic(move || {
+            let l = look.get();
+            ui::tokens::install(l);
+            ui::theme::apply(l);
+            view()
+                .flex_1()
+                .font_family(l.font.family())
+                .child(shell::shell(st))
+                .into_element()
+        }))
 }

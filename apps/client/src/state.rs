@@ -6,8 +6,18 @@ use nb_i18n::{Digits, Direction, Format, Lang, tr, tr_args};
 use nsh_core::prelude::*;
 use nsh_core::storage::Storage;
 
+use nb_core::Clock;
+use nb_domain::features::{Feature, FeatureSet};
+use nb_store::usecases::access::{SignedIn, session_of, sign_in_required};
+use nb_store::usecases::org as org_usecases;
+
 use crate::nav::Route;
 use crate::ui::tokens::{Accent, Corners, Density, Look, TextSize, UiFont};
+
+/// Wall-clock milliseconds (works in the browser too).
+pub fn now_ms() -> i64 {
+    nb_core::SystemClock.now_ms()
+}
 
 /// Something a screen should do when it opens (e.g. from the command palette).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,13 +130,6 @@ impl Prefs {
     }
 }
 
-/// A text setting saved on the device whenever it changes.
-pub fn persisted_text(key: &'static str, default: &str) -> Signal<String> {
-    let s = signal(Storage::get_item(key).unwrap_or_else(|| default.to_owned()));
-    effect(move || save(key, &s.get()));
-    s
-}
-
 /// A choice (by index) saved on the device.
 pub fn persisted_index(key: &'static str, default: usize) -> Signal<usize> {
     let s = signal(stored(key, |v| v.parse().ok()).unwrap_or(default));
@@ -141,21 +144,13 @@ pub fn persisted_flag(key: &'static str, default: bool) -> Signal<bool> {
     s
 }
 
-/// Store and device settings. Kept on the device for now; they move to the
-/// organization's database with M2 (and sync from there).
+/// Device and display settings kept on this device. The store's identity
+/// and legal data live in the organization's database (settings › store).
 #[derive(Clone, Copy)]
 pub struct BizPrefs {
     pub start_page: Signal<usize>,
     pub confirm_delete: Signal<bool>,
     pub show_cents: Signal<bool>,
-    pub store_name: Signal<String>,
-    pub activity: Signal<usize>,
-    pub phone: Signal<String>,
-    pub address: Signal<String>,
-    pub nif: Signal<String>,
-    pub nis: Signal<String>,
-    pub rc: Signal<String>,
-    pub ai: Signal<String>,
     pub prices_incl_tax: Signal<bool>,
     pub tva_rate: Signal<usize>,
     pub stamp_duty: Signal<bool>,
@@ -176,14 +171,6 @@ impl BizPrefs {
             start_page: persisted_index("nb.app.start", 0),
             confirm_delete: persisted_flag("nb.app.confirm_delete", true),
             show_cents: persisted_flag("nb.fmt.cents", true),
-            store_name: persisted_text("nb.store.name", ""),
-            activity: persisted_index("nb.store.activity", 0),
-            phone: persisted_text("nb.store.phone", ""),
-            address: persisted_text("nb.store.address", ""),
-            nif: persisted_text("nb.store.nif", ""),
-            nis: persisted_text("nb.store.nis", ""),
-            rc: persisted_text("nb.store.rc", ""),
-            ai: persisted_text("nb.store.ai", ""),
             prices_incl_tax: persisted_flag("nb.tax.included", true),
             tva_rate: persisted_index("nb.tax.rate", 0),
             stamp_duty: persisted_flag("nb.tax.stamp", true),
@@ -224,6 +211,15 @@ pub struct AppState {
     pub db_error: Signal<Option<String>>,
     /// Bumped after every write, so lists load again.
     pub data_rev: Signal<u64>,
+    /// The person using the app; `None` while the lock screen shows.
+    pub user: Signal<Option<SignedIn>>,
+    /// Whether this device asks who is there (someone has a PIN or password).
+    pub needs_sign_in: Signal<bool>,
+    /// The organization's features (activity profile and switches); `None`
+    /// until loaded, when everything shows.
+    pub features: Signal<Option<FeatureSet>>,
+    /// Last time someone touched the app (ms), for the automatic lock.
+    pub last_active: Stored<i64>,
 }
 
 impl AppState {
@@ -250,6 +246,10 @@ impl AppState {
             session: signal(None),
             db_error: signal(None),
             data_rev: signal(0),
+            user: signal(None),
+            needs_sign_in: signal(false),
+            features: signal(None),
+            last_active: nsh_core::prelude::stored(now_ms()),
         };
         if st.biz.start_page.get_untracked() == 1 {
             st.route.set(Route::Sell);
@@ -295,12 +295,36 @@ impl AppState {
         db
     }
 
-    /// Starts the database and records its session when ready.
+    /// Starts the database and records its session when ready. Without
+    /// any PIN or password on the device, the owner works without signing in.
     pub fn connect(self) {
         let db = self.db();
         let task = spawn(async move {
-            match db.session().await {
-                Ok(s) => self.session.set(Some(s)),
+            let opened = async {
+                let s = db.session().await?;
+                let owner = s.owner();
+                let (needs, features, me) = db
+                    .call(move |store| {
+                        let needs = sign_in_required(store)?;
+                        let me = if needs {
+                            None
+                        } else {
+                            Some(session_of(store, owner)?)
+                        };
+                        Ok((needs, org_usecases::features(store)?, me))
+                    })
+                    .await?;
+                Ok::<_, crate::db::DbError>((s, needs, features, me))
+            };
+            match opened.await {
+                Ok((s, needs, features, me)) => {
+                    self.needs_sign_in.set(needs);
+                    self.features.set(Some(features));
+                    self.session.set(Some(s));
+                    if let Some(me) = me {
+                        self.signed_in(me);
+                    }
+                }
                 Err(e) => {
                     log::error!("database: {}", e.message);
                     self.db_error.set(Some(e.message));
@@ -308,6 +332,50 @@ impl AppState {
             }
         });
         drop(task); // runs to completion: tasks end with their owner, not their handle
+    }
+
+    /// Someone signed in: operations now run in their name.
+    pub fn signed_in(self, me: SignedIn) {
+        if let Ok(id) = me.user_id.parse() {
+            self.session.update(|s| {
+                if let Some(s) = s {
+                    s.actor = id;
+                }
+            });
+        }
+        self.touch();
+        self.user.set(Some(me));
+    }
+
+    /// Shows the lock screen (by hand, or after inactivity).
+    pub fn lock(self) {
+        if self.needs_sign_in.get_untracked() {
+            self.user.set(None);
+        }
+    }
+
+    /// Records activity (postpones the automatic lock).
+    pub fn touch(self) {
+        self.last_active.replace(now_ms());
+    }
+
+    /// Whether the person signed in holds `permission` somewhere.
+    pub fn can(&self, permission: &str) -> bool {
+        self.user
+            .get()
+            .is_some_and(|u| u.permissions.iter().any(|p| p == permission))
+    }
+
+    /// Whether a feature is on (everything is, until the profile is loaded).
+    pub fn has(&self, f: Feature) -> bool {
+        self.features.get().is_none_or(|set| set.has(f))
+    }
+
+    /// Whether a page shows: its feature is on and the person may see it.
+    pub fn shows(&self, r: Route) -> bool {
+        r.feature().is_none_or(|f| self.has(f))
+            && r.permission()
+                .is_none_or(|p| self.user.get().is_none() || self.can(p))
     }
 
     /// Lists depending on data load again.

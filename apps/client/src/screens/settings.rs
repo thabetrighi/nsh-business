@@ -8,6 +8,9 @@ use nb_i18n::{Digits, Lang};
 use nsh_core::element::{SharedString, View};
 use nsh_core::prelude::*;
 
+use nb_domain::features::{Feature, Profiles};
+use nb_store::usecases::org::{self as org_usecases, BusinessProfile, OrgSettings};
+
 use crate::shell::user_name;
 use crate::state::{AppState, ThemeMode};
 use crate::ui::form::field;
@@ -444,8 +447,157 @@ fn formats(st: AppState, compact: bool) -> View {
     ))
 }
 
+/// Auto-lock choices, in minutes (0 = never).
+const AUTO_LOCK: [u32; 8] = [0, 1, 2, 5, 10, 15, 30, 60];
+
+/// The store's settings and legal identity, from the organization's
+/// database (M4.1, M4.9), and the modules its activity turns on (M4.3–M4.4).
 fn store(st: AppState, compact: bool) -> View {
-    let b = st.biz;
+    let profiles = Profiles::builtin();
+    let activities: Vec<String> = profiles.activities().map(str::to_owned).collect();
+    let s = |v: &str| signal(v.to_owned());
+    let (name, legal, phone, address, email) = (s(""), s(""), s(""), s(""), s(""));
+    let (nif, nis, rc, ai) = (s(""), s(""), s(""), s(""));
+    let activity = signal(0usize);
+    let language = signal(0usize);
+    let fiscal = signal(1u32);
+    let auto_lock = signal(3usize);
+    let errs: [Signal<String>; 5] = std::array::from_fn(|_| signal(String::new()));
+    let [name_err, nif_err, nis_err, email_err, form_err] = errs;
+    let saving = signal(false);
+
+    let loaded = resource(
+        move || st.session.get().map(|_| st.data_rev.get()),
+        move |_, _| {
+            let db = st.db();
+            async move {
+                db.call(|s| {
+                    Ok((
+                        org_usecases::settings(s)?,
+                        org_usecases::business_profile(s)?,
+                    ))
+                })
+                .await
+            }
+        },
+    );
+    {
+        let activities = activities.clone();
+        effect(move || {
+            let Some((o, p)) = loaded.with(|v: Option<&(OrgSettings, BusinessProfile)>| v.cloned())
+            else {
+                return;
+            };
+            name.set(o.name);
+            activity.set(
+                activities
+                    .iter()
+                    .position(|a| *a == o.activity)
+                    .unwrap_or(0),
+            );
+            language.set(
+                org_usecases::LANGUAGES
+                    .iter()
+                    .position(|l| *l == o.language)
+                    .unwrap_or(0),
+            );
+            fiscal.set(u32::from(o.fiscal_year_start));
+            auto_lock.set(
+                AUTO_LOCK
+                    .iter()
+                    .position(|m| *m == o.auto_lock_min)
+                    .unwrap_or(3),
+            );
+            legal.set(p.legal_name);
+            phone.set(p.phone);
+            address.set(p.address);
+            email.set(p.email);
+            nif.set(p.nif);
+            nis.set(p.nis);
+            rc.set(p.rc);
+            ai.set(p.ai);
+        });
+    }
+
+    let save = {
+        let activities = activities.clone();
+        move || {
+            let Some(session) = st.session.get_untracked() else {
+                return;
+            };
+            if saving.get_untracked() {
+                return;
+            }
+            for e in errs {
+                e.set(String::new());
+            }
+            let settings = OrgSettings {
+                name: name.get_untracked(),
+                activity: activities
+                    .get(activity.get_untracked())
+                    .cloned()
+                    .unwrap_or_default(),
+                language: org_usecases::LANGUAGES[language.get_untracked().min(2)].to_owned(),
+                fiscal_year_start: u8::try_from(fiscal.get_untracked()).unwrap_or(1),
+                auto_lock_min: AUTO_LOCK[auto_lock.get_untracked().min(AUTO_LOCK.len() - 1)],
+            };
+            let profile = BusinessProfile {
+                legal_name: legal.get_untracked(),
+                nif: nif.get_untracked(),
+                nis: nis.get_untracked(),
+                rc: rc.get_untracked(),
+                ai: ai.get_untracked(),
+                address: address.get_untracked(),
+                phone: phone.get_untracked(),
+                email: email.get_untracked(),
+            };
+            saving.set(true);
+            let db = st.db();
+            let task = spawn(async move {
+                let r = db
+                    .call(move |s| {
+                        let o =
+                            org_usecases::update_settings(s, session.meta("org.update"), settings)?;
+                        org_usecases::update_business_profile(
+                            s,
+                            session.meta("org.profile"),
+                            profile,
+                        )?;
+                        Ok((o, org_usecases::features(s)?))
+                    })
+                    .await;
+                saving.set(false);
+                match r {
+                    Ok((o, features)) => {
+                        st.changed();
+                        st.features.set(Some(features));
+                        st.user.update(|u| {
+                            if let Some(u) = u {
+                                u.auto_lock_min = o.auto_lock_min;
+                            }
+                        });
+                        show_toast(st, st.tn("settings.saved"));
+                    }
+                    Err(e) => {
+                        for (field, code) in &e.codes {
+                            let target = match field.unwrap_or("") {
+                                "name" => name_err,
+                                "nif" => nif_err,
+                                "nis" => nis_err,
+                                "email" => email_err,
+                                _ => form_err,
+                            };
+                            if target.get_untracked().is_empty() {
+                                target.set(crate::screens::product_form::error_text(st, code));
+                            }
+                        }
+                    }
+                }
+            });
+            drop(task); // runs to completion: tasks end with their owner, not their handle
+        }
+    };
+
     let pair = move |a: View, c: View| {
         if compact {
             view().gap(px(16.0)).child(a).child(c)
@@ -457,8 +609,25 @@ fn store(st: AppState, compact: bool) -> View {
                 .child(c.flex_1())
         }
     };
-    let f = move |key: &'static str, sig: Signal<String>, kb: KeyboardType, id: &'static str| {
-        field(st.t(key), sig, String::new, String::new, kb, id)
+    let f = move |key: &'static str,
+                  sig: Signal<String>,
+                  err: Signal<String>,
+                  kb: KeyboardType,
+                  id: &'static str| {
+        field(st.t(key), sig, String::new, move || err.get(), kb, id)
+    };
+    let none = signal(String::new());
+    let caption =
+        move |key: &'static str| label(st.t(key), ty::SM, FontWeight::SEMIBOLD, Tone::Ink);
+    let activity_options = {
+        let activities = activities.clone();
+        move || {
+            activities
+                .iter()
+                .enumerate()
+                .map(|(i, a)| (i, st.tn(&format!("activity.{a}"))))
+                .collect()
+        }
     };
     let profile = card()
         .child(card_header_icon(
@@ -475,43 +644,42 @@ fn store(st: AppState, compact: bool) -> View {
                 .child(pair(
                     f(
                         "store.name",
-                        b.store_name,
+                        name,
+                        name_err,
                         KeyboardType::Default,
                         "store-name",
                     ),
-                    f("store.phone", b.phone, KeyboardType::Phone, "store-phone"),
+                    f(
+                        "store.phone",
+                        phone,
+                        none,
+                        KeyboardType::Phone,
+                        "store-phone",
+                    ),
                 ))
-                .child(f(
-                    "store.address",
-                    b.address,
-                    KeyboardType::Default,
-                    "store-address",
+                .child(pair(
+                    f(
+                        "store.address",
+                        address,
+                        none,
+                        KeyboardType::Default,
+                        "store-address",
+                    ),
+                    f(
+                        "store.email",
+                        email,
+                        email_err,
+                        KeyboardType::Email,
+                        "store-email",
+                    ),
                 ))
-                .child(
+                .child(pair(
                     view()
                         .gap(px(6.0))
-                        .child(label(
-                            st.t("store.activity"),
-                            ty::SM,
-                            FontWeight::SEMIBOLD,
-                            Tone::Ink,
-                        ))
+                        .child(caption("store.activity"))
                         .child(dropdown(
-                            move || {
-                                [
-                                    "activity.grocery",
-                                    "activity.wholesale",
-                                    "activity.distribution",
-                                    "activity.restaurant",
-                                    "activity.clothing",
-                                    "activity.pharmacy",
-                                ]
-                                .iter()
-                                .enumerate()
-                                .map(|(i, k)| (i, st.tn(k)))
-                                .collect()
-                            },
-                            b.activity,
+                            activity_options,
+                            activity,
                             Some(Icon::Tag),
                             st.t("store.activity"),
                             "activity-select",
@@ -522,9 +690,76 @@ fn store(st: AppState, compact: bool) -> View {
                             FontWeight::NORMAL,
                             Tone::Muted,
                         )),
-                ),
+                    view()
+                        .gap(px(6.0))
+                        .child(caption("store.language"))
+                        .child(dropdown(
+                            || {
+                                org_usecases::LANGUAGES
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(i, l)| {
+                                        Lang::from_tag(l).map(|l| (i, l.native_name().to_owned()))
+                                    })
+                                    .collect()
+                            },
+                            language,
+                            Some(Icon::Languages),
+                            st.t("store.language"),
+                            "org-language",
+                        )),
+                ))
+                .child(pair(
+                    view()
+                        .gap(px(6.0))
+                        .child(caption("store.fiscal_start"))
+                        .child(dropdown(
+                            move || {
+                                (1..=12)
+                                    .map(|m| (m, st.fmt().month_short(m).to_owned()))
+                                    .collect()
+                            },
+                            fiscal,
+                            Some(Icon::Calendar),
+                            st.t("store.fiscal_start"),
+                            "org-fiscal",
+                        )),
+                    view()
+                        .gap(px(6.0))
+                        .child(caption("store.auto_lock"))
+                        .child(dropdown(
+                            move || {
+                                AUTO_LOCK
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, m)| {
+                                        let t = if *m == 0 {
+                                            st.tn("store.auto_lock.never")
+                                        } else {
+                                            nb_i18n::tr_args(
+                                                st.lang(),
+                                                "store.auto_lock.min",
+                                                &[("count", &st.fmt().integer(i64::from(*m)))],
+                                            )
+                                        };
+                                        (i, t)
+                                    })
+                                    .collect()
+                            },
+                            auto_lock,
+                            Some(Icon::Lock),
+                            st.t("store.auto_lock"),
+                            "org-autolock",
+                        ))
+                        .child(label(
+                            st.t("store.auto_lock.help"),
+                            ty::XS,
+                            FontWeight::NORMAL,
+                            Tone::Muted,
+                        )),
+                )),
         );
-    let legal = card()
+    let legal_card = card()
         .child(card_header_icon(
             Some(Icon::FileText),
             st.t("store.legal"),
@@ -536,13 +771,32 @@ fn store(st: AppState, compact: bool) -> View {
             view()
                 .p(px(20.0))
                 .gap(px(16.0))
-                .child(pair(
-                    f("store.nif", b.nif, KeyboardType::Number, "store-nif"),
-                    f("store.nis", b.nis, KeyboardType::Number, "store-nis"),
+                .child(f(
+                    "store.legal_name",
+                    legal,
+                    none,
+                    KeyboardType::Default,
+                    "store-legal",
                 ))
                 .child(pair(
-                    f("store.rc", b.rc, KeyboardType::Default, "store-rc"),
-                    f("store.ai", b.ai, KeyboardType::Number, "store-ai"),
+                    f("store.nif", nif, nif_err, KeyboardType::Number, "store-nif"),
+                    f("store.nis", nis, nis_err, KeyboardType::Number, "store-nis"),
+                ))
+                .child(pair(
+                    f("store.rc", rc, none, KeyboardType::Default, "store-rc"),
+                    f("store.ai", ai, none, KeyboardType::Number, "store-ai"),
+                ))
+                .child(when(
+                    move || !form_err.get().is_empty(),
+                    move || {
+                        label(
+                            move || form_err.get(),
+                            ty::SM,
+                            FontWeight::MEDIUM,
+                            Tone::Danger,
+                        )
+                        .into_element()
+                    },
                 )),
         )
         .child(
@@ -554,15 +808,93 @@ fn store(st: AppState, compact: bool) -> View {
                 .bg(Tone::Subtle.color())
                 .border_t_1()
                 .border_color(Tone::Border.color())
-                .child(button(
-                    Variant::Primary,
-                    Size::Md,
-                    Some(Icon::Check),
-                    st.t("action.save_changes"),
-                    move || show_toast(st, st.tn("settings.saved")),
-                )),
+                .child(
+                    button(
+                        Variant::Primary,
+                        Size::Md,
+                        Some(Icon::Check),
+                        st.t("action.save_changes"),
+                        save,
+                    )
+                    .test_id("store-save"),
+                ),
         );
-    view().gap(px(20.0)).child(profile).child(legal)
+    view()
+        .gap(px(20.0))
+        .child(profile)
+        .child(legal_card)
+        .child(modules(st, compact))
+}
+
+/// The optional modules, switched on by the activity; each can be changed.
+fn modules(st: AppState, compact: bool) -> View {
+    let profiles = Profiles::builtin();
+    let mut rows = Vec::new();
+    for &f in Feature::ALL.iter().filter(|f| !profiles.is_core(**f)) {
+        let on = signal(st.has(f));
+        // Follow the organization's features as they load or change…
+        effect(move || {
+            let now = st.has(f);
+            if on.get_untracked() != now {
+                on.set(now);
+            }
+        });
+        // …and save a switch the person flips.
+        effect(move || {
+            let want = on.get();
+            if want == st.features.get_untracked().is_none_or(|s| s.has(f)) {
+                return;
+            }
+            let Some(session) = st.session.get_untracked() else {
+                return;
+            };
+            let db = st.db();
+            let task = spawn(async move {
+                let r = db
+                    .call(move |s| {
+                        org_usecases::set_feature(
+                            s,
+                            session.meta("org.feature"),
+                            f.code(),
+                            Some(want),
+                        )
+                    })
+                    .await;
+                match r {
+                    Ok(set) => st.features.set(Some(set)),
+                    Err(e) => {
+                        on.set(!want);
+                        show_toast(
+                            st,
+                            crate::screens::product_form::error_text(
+                                st,
+                                e.codes.first().map_or("internal", |c| c.1),
+                            ),
+                        );
+                    }
+                }
+            });
+            drop(task); // runs to completion: tasks end with their owner, not their handle
+        });
+        let key = format!("feature.{}", f.code());
+        let label_key = key.clone();
+        rows.push(setting_row(
+            move || st.tn(&label_key),
+            String::new,
+            view().child(switch(on, move || st.tn(&key))),
+            compact,
+        ));
+    }
+    let mut c = card().child(card_header_icon(
+        Some(Icon::Layers),
+        st.t("settings.card.modules"),
+        Some(Box::new(st.t("settings.card.modules.help"))),
+        view(),
+    ));
+    for r in rows {
+        c = c.child(divider()).child(r);
+    }
+    c
 }
 
 fn taxes(st: AppState, compact: bool) -> View {
@@ -728,93 +1060,6 @@ fn devices(st: AppState, compact: bool) -> View {
     ))
 }
 
-fn users(st: AppState, compact: bool) -> View {
-    let people: [(&str, &str, &str, Status, &str); 4] = [
-        (
-            "أحمد بن علي",
-            "Ahmed Benali",
-            "role.owner",
-            Status::Accent,
-            "10/11 · 22:40",
-        ),
-        (
-            "سارة بلقاسم",
-            "Sara Belkacem",
-            "role.cashier",
-            Status::Info,
-            "10/11 · 19:05",
-        ),
-        (
-            "يوسف مداني",
-            "Youcef Madani",
-            "role.rep",
-            Status::Success,
-            "09/11 · 17:32",
-        ),
-        (
-            "ليلى قاسمي",
-            "Leila Kacemi",
-            "role.accountant",
-            Status::Neutral,
-            "07/11 · 11:10",
-        ),
-    ];
-    let mut list = card().child(card_header_icon(
-        Some(Icon::Users),
-        st.t("settings.card.team"),
-        None,
-        view().child(button(
-            Variant::Primary,
-            Size::Sm,
-            Some(Icon::Plus),
-            st.t("action.invite"),
-            || {},
-        )),
-    ));
-    for (ar, fr, role, status, seen) in people {
-        let name = move || {
-            if st.lang() == Lang::Ar {
-                ar.to_owned()
-            } else {
-                fr.to_owned()
-            }
-        };
-        let mut r = view()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .px(px(20.0))
-            .py(px(12.0))
-            .border_t_1()
-            .border_color(Tone::Border.color())
-            .child(avatar(name, 34.0, status))
-            .child(
-                view()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(label_line(name, ty::SM, FontWeight::SEMIBOLD, Tone::Ink))
-                    .child(label_line(
-                        st.t_with("users.last_seen", move |_| {
-                            vec![("when", nb_i18n::bidi::isolate_ltr(seen))]
-                        }),
-                        ty::XS,
-                        FontWeight::NORMAL,
-                        Tone::Muted,
-                    )),
-            )
-            .child(badge(status, None, st.t(role)));
-        if !compact {
-            r = r.child(badge(
-                Status::Success,
-                Some(Icon::Check),
-                st.t("users.active"),
-            ));
-        }
-        list = list.child(r);
-    }
-    list
-}
-
 fn sync(st: AppState, compact: bool) -> View {
     let stat = move |key: &'static str, value: Box<dyn Fn() -> String>| {
         view()
@@ -950,7 +1195,7 @@ fn panel(st: AppState, tab: usize, compact: bool) -> View {
         Some("taxes") => taxes(st, compact),
         Some("printing") => printing(st, compact),
         Some("devices") => devices(st, compact),
-        Some("users") => users(st, compact),
+        Some("users") => crate::screens::users::users_tab(st, compact),
         Some("sync") => sync(st, compact),
         Some("about") => about(st, compact),
         _ => general(st, compact),
