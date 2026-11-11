@@ -1,0 +1,92 @@
+name: client-windows
+
+# Builds the NSH Business client for Windows on every push to main that
+# touches the app, and publishes it as the "windows-latest" pre-release
+# (a zip: unpack it anywhere and run NSH Business.exe). Also downloadable as
+# the run's artifact.
+
+on:
+  push:
+    branches: [main]
+    paths: ["apps/client/**", "crates/**", "Cargo.toml", "Cargo.lock", ".github/workflows/client-windows.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: client-windows
+  cancel-in-progress: true
+
+env:
+  NSH_VERSION: v0.4.0
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        shell: bash
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install NSH CLI
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/longbridge/nsh/releases/download/$env:NSH_VERSION/nsh-windows-x86_64.zip" -OutFile nsh.zip
+          Expand-Archive nsh.zip -DestinationPath "$HOME\.nsh" -Force
+          $exe = Get-ChildItem -Path "$HOME\.nsh" -Recurse -Filter nsh.exe | Select-Object -First 1
+          if (-not $exe) { throw "nsh.exe not found in the archive" }
+          Write-Host "nsh: $($exe.FullName)"
+          $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Package for Windows
+        id: package
+        continue-on-error: true
+        working-directory: apps/client
+        shell: bash
+        run: |
+          set -o pipefail
+          nsh --verbose package --target windows 2>&1 | tail -80
+          ls -la .nsh/out
+
+      # Without NSH's packager, the plain release build still runs on its
+      # own: fonts are compiled in and the database lives in %APPDATA%.
+      - name: Fallback release build
+        if: steps.package.outcome != 'success'
+        shell: bash
+        run: |
+          cargo build --release -p nb-client
+          mkdir -p apps/client/.nsh/out/NSH-Business
+          cp target/release/nb-client.exe "apps/client/.nsh/out/NSH-Business/NSH Business.exe"
+
+      - name: Zip
+        id: zip
+        shell: pwsh
+        run: |
+          $short = "${{ github.sha }}".Substring(0, 7)
+          $name = "nsh-business-windows-$short.zip"
+          $dir = Get-ChildItem -Path apps/client/.nsh/out -Directory | Select-Object -First 1
+          Compress-Archive -Path "$($dir.FullName)\*" -DestinationPath $name -Force
+          "name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Get-Item $name | Format-List Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsh-business-windows
+          path: ${{ steps.zip.outputs.name }}
+          retention-days: 14
+
+      - name: Publish pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ZIP="${{ steps.zip.outputs.name }}"
+          gh release delete windows-latest -y --cleanup-tag 2>/dev/null || true
+          gh release create windows-latest "$ZIP" --prerelease --target "$GITHUB_SHA" \
+            --title "NSH Business — Windows (آخر نسخة)" \
+            --notes "نسخة اختبار لويندوز 10/11 من آخر تعديل (${GITHUB_SHA::7}). فك الضغط في أي مجلد ثم شغّل NSH Business.exe. البيانات تُحفظ في مجلد بيانات المستخدم. غير موقّعة: إن ظهر تحذير SmartScreen اختر «مزيد من المعلومات» ثم «تشغيل على أي حال»."
