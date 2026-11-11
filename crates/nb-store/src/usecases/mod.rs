@@ -14,6 +14,7 @@ pub mod inventory;
 pub mod ledger;
 pub mod org;
 pub mod products;
+pub mod purchase_orders;
 pub mod purchasing;
 pub mod returns;
 pub mod sales;

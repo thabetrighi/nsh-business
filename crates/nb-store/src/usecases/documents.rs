@@ -121,7 +121,7 @@ fn kind_of(code: &str) -> Result<DocKind> {
     }
 }
 
-fn valid_date(d: &str) -> bool {
+pub(crate) fn valid_date(d: &str) -> bool {
     let b = d.as_bytes();
     b.len() == 10
         && b[4] == b'-'

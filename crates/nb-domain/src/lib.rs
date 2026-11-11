@@ -14,6 +14,7 @@ pub mod numbering;
 pub mod posting;
 pub mod pricing;
 pub mod product;
+pub mod purchase;
 pub mod sale;
 pub mod stock;
 pub mod tax;

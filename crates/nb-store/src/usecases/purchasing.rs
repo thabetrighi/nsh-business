@@ -304,6 +304,9 @@ pub struct PurchaseLineInput {
     /// Empty: the product's rate.
     #[serde(default)]
     pub tax_bps: Option<i64>,
+    /// The line of the order (`PurchaseInput::order_id`) it receives.
+    #[serde(default)]
+    pub order_position: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -331,6 +334,12 @@ pub struct PurchaseInput {
     pub register_id: Option<String>,
     #[serde(default)]
     pub note: String,
+    /// The approved order these goods are received against (M10.3).
+    #[serde(default)]
+    pub order_id: Option<String>,
+    /// A supervisor's approval of a cost above the one ordered.
+    #[serde(default)]
+    pub approval_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +354,55 @@ pub struct PurchaseResult {
     pub credit_minor: i64,
     /// Per line: the landed cost of one base unit.
     pub landed: Vec<i64>,
+}
+
+/// A line to buy, resolved: the product, its unit, the quantity in it and
+/// in the base unit, the VAT rate.
+pub(crate) type BuyLine = (catalog::ProductRow, String, Quantity, Quantity, i64);
+
+/// Resolves lines to buy and prices them before tax.
+pub(crate) fn parse_buy_lines(
+    conn: &Connection,
+    lines: &[PurchaseLineInput],
+    currency: nb_core::Currency,
+) -> Result<(Vec<BuyLine>, Vec<CartLine>)> {
+    let mut products = Vec::with_capacity(lines.len());
+    let mut cart_lines = Vec::with_capacity(lines.len());
+    for l in lines {
+        let qty: Quantity = l
+            .qty
+            .trim()
+            .replace(',', ".")
+            .parse()
+            .map_err(|_| RuleError::on("qty", "invalid_quantity"))?;
+        if to_milli(qty)? <= 0 {
+            return Err(RuleError::on("qty", "invalid_quantity").into());
+        }
+        if l.unit_cost_minor < 0 {
+            return Err(RuleError::on("unit_cost", "ledger.negative").into());
+        }
+        let p = catalog::get(conn, parse_id::<ProductId>(&l.product_id)?)?;
+        let units = p.unit_set()?;
+        let unit = if l.unit.is_empty() {
+            p.units[0].code.clone()
+        } else {
+            l.unit.clone()
+        };
+        let base_qty = units.to_base(qty, &unit)?;
+        let tax_bps = l.tax_bps.unwrap_or(p.tax_bps);
+        if !(0..=10_000).contains(&tax_bps) {
+            return Err(RuleError::on("tax_rate", "invalid_value").into());
+        }
+        cart_lines.push(CartLine {
+            qty,
+            unit_price: Money::from_minor(l.unit_cost_minor, currency),
+            min_price: None,
+            tax_rate: Rate::from_bps(tax_bps),
+            discount: Discount::None,
+        });
+        products.push((p, unit, qty, base_qty, tax_bps));
+    }
+    Ok((products, cart_lines))
 }
 
 /// The open till of a register, if one is asked (cash needs it).
@@ -400,40 +458,7 @@ pub fn record_purchase(
         let at = Target::warehouse(parse_id(&branch.id)?, warehouse_id);
         w.require(Permission::PurchasesReceive, &at)?;
 
-        // The goods, before tax, and their VAT (prices are before tax).
-        let mut products = Vec::with_capacity(input.lines.len());
-        let mut cart_lines = Vec::with_capacity(input.lines.len());
-        for l in &input.lines {
-            let qty: Quantity = l
-                .qty
-                .trim()
-                .replace(',', ".")
-                .parse()
-                .map_err(|_| RuleError::on("qty", "invalid_quantity"))?;
-            if l.unit_cost_minor < 0 {
-                return Err(RuleError::on("unit_cost", "ledger.negative").into());
-            }
-            let p = catalog::get(w.tx(), parse_id::<ProductId>(&l.product_id)?)?;
-            let units = p.unit_set()?;
-            let unit = if l.unit.is_empty() {
-                p.units[0].code.clone()
-            } else {
-                l.unit.clone()
-            };
-            let base_qty = units.to_base(qty, &unit)?;
-            let tax_bps = l.tax_bps.unwrap_or(p.tax_bps);
-            if !(0..=10_000).contains(&tax_bps) {
-                return Err(RuleError::on("tax_rate", "invalid_value").into());
-            }
-            cart_lines.push(CartLine {
-                qty,
-                unit_price: Money::from_minor(l.unit_cost_minor, currency),
-                min_price: None,
-                tax_rate: Rate::from_bps(tax_bps),
-                discount: Discount::None,
-            });
-            products.push((p, unit, qty, base_qty, tax_bps));
-        }
+        let (products, cart_lines) = parse_buy_lines(w.tx(), &input.lines, currency)?;
         let totals = Cart {
             mode: TaxMode::Exclusive,
             lines: cart_lines.clone(),
@@ -482,6 +507,27 @@ pub fn record_purchase(
             w.require(Permission::SuppliersPay, &at)?;
         }
 
+        // Against an order: matched line by line, its lines then received.
+        let ordered_costs = match input.order_id.as_deref().filter(|o| !o.is_empty()) {
+            Some(order) => crate::usecases::purchase_orders::receive(
+                w,
+                order,
+                &supplier.id,
+                &warehouse.id,
+                &input.lines,
+                &products,
+                input.approval_id.as_deref(),
+            )?
+            .into_iter()
+            .map(Some)
+            .collect(),
+            None => {
+                if input.lines.iter().any(|l| l.order_position.is_some()) {
+                    return Err(RuleError::on("order", "purchase.order_unknown").into());
+                }
+                vec![None; products.len()]
+            }
+        };
         let number = w.next_number(DocKind::Purchase, &branch.id, &branch.code)?;
         let id = nb_core::uuid::Uuid::now_v7().to_string();
         let mut landed = Vec::with_capacity(products.len());
@@ -523,8 +569,8 @@ pub fn record_purchase(
         w.tx().execute(
             "INSERT INTO purchases (id, org_id, branch_id, warehouse_id, supplier_id, number, supplier_ref, goods_minor,
                     charges_minor, charges_by, net_minor, vat_minor, total_minor, cash_minor, bank_minor, credit_minor,
-                    register_id, shift_id, note, operation_id, created_at, created_by, device_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                    register_id, shift_id, note, operation_id, created_at, created_by, device_id, order_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             params![
                 id,
                 w.org()?.to_string(),
@@ -548,14 +594,16 @@ pub fn record_purchase(
                 w.meta().id.to_string(),
                 w.now(),
                 w.actor_text(),
-                w.device().id.to_string()
+                w.device().id.to_string(),
+                input.order_id.as_deref().filter(|o| !o.is_empty())
             ],
         )?;
         for (i, (p, unit, qty, base_qty, tax_bps)) in products.iter().enumerate() {
             w.tx().execute(
                 "INSERT INTO purchase_lines (purchase_id, position, product_id, name, unit, qty_milli, base_qty_milli,
-                        unit_cost_minor, tax_bps, net_minor, tax_minor, charges_minor, landed_cost_minor, movement_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                        unit_cost_minor, tax_bps, net_minor, tax_minor, charges_minor, landed_cost_minor, movement_id,
+                        order_position, ordered_cost_minor)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     id,
                     i64::try_from(i).unwrap_or(0),
@@ -570,7 +618,9 @@ pub fn record_purchase(
                     totals.lines[i].taxed.tax.minor(),
                     shares[i].minor(),
                     landed[i],
-                    moves[i]
+                    moves[i],
+                    input.lines[i].order_position,
+                    ordered_costs[i]
                 ],
             )?;
         }

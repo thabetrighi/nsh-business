@@ -7,11 +7,14 @@ mod common;
 
 use common::*;
 use nb_domain::{ProductId, WarehouseId};
+use nb_store::repo::access::GrantRow;
+use nb_store::usecases::access::{UserInput, create_user};
 use nb_store::usecases::inventory::available;
 use nb_store::usecases::products::{Opening, create_product};
+use nb_store::usecases::purchase_orders::*;
 use nb_store::usecases::purchasing::*;
 use nb_store::usecases::sales::{current_shift, open_shift};
-use nb_store::{Error, Store};
+use nb_store::{Error, OpMeta, Store};
 
 type R = Result<(), Error>;
 
@@ -49,6 +52,7 @@ fn line(product: &str, qty: &str, cost: i64) -> PurchaseLineInput {
         unit: String::new(),
         unit_cost_minor: cost,
         tax_bps: None,
+        order_position: None,
     }
 }
 
@@ -283,6 +287,263 @@ fn cash_goes_out_of_the_open_till() -> R {
     let shift = current_shift(&s, &reg)?.unwrap_or_else(|| panic!("open"));
     assert_eq!((shift.suppliers_minor, shift.expected_minor), (2_000, 0));
     assert_eq!(get_supplier(&s, &sup.id)?.balance_minor, 3_950);
+    assert!(s.health()?.is_sound());
+    Ok(())
+}
+
+#[test]
+fn an_order_is_approved_then_received_against_line_by_line() -> R {
+    let (mut s, setup) = store();
+    let sup = |s: &mut Store, name: &str| {
+        save_supplier(
+            s,
+            meta(&setup, "s"),
+            SupplierInput {
+                kind: "company".into(),
+                name: name.into(),
+                status: "active".into(),
+                ..Default::default()
+            },
+        )
+    };
+    let cevital = sup(&mut s, "Cevital")?;
+    let other = sup(&mut s, "Autre")?;
+    let oil = create_product(&mut s, meta(&setup, "p"), product("Huile", "", 3_570))?.id;
+    let sugar = create_product(&mut s, meta(&setup, "p"), product("Sucre", "", 1_500))?.id;
+    let wh = setup.warehouse.to_string();
+    let mut input = OrderInput {
+        supplier_id: cevital.id.clone(),
+        warehouse_id: wh.clone(),
+        expected_date: Some("2026-12-01".into()),
+        lines: vec![line(&oil, "10", 1_000), line(&sugar, "5", 2_000)],
+        ..Default::default()
+    };
+    let draft = save_order(&mut s, meta(&setup, "o"), input.clone())?;
+    assert!(draft.row.number.starts_with("BCF-"));
+    assert_eq!(
+        (
+            draft.row.status.as_str(),
+            draft.net_minor,
+            draft.row.total_minor
+        ),
+        ("draft", 20_000, 23_800)
+    );
+    // A draft changes; nothing is received against it.
+    input.id = Some(draft.row.id.clone());
+    input.lines[0].qty = "12".into();
+    let draft = save_order(&mut s, meta(&setup, "o"), input.clone())?;
+    assert_eq!((draft.net_minor, draft.version), (22_000, 2));
+    let buy = |lines: Vec<PurchaseLineInput>, supplier: &str| PurchaseInput {
+        supplier_id: supplier.into(),
+        warehouse_id: wh.clone(),
+        lines,
+        order_id: Some(draft.row.id.clone()),
+        ..Default::default()
+    };
+    let at = |product: &str, qty: &str, cost: i64, pos: u32| PurchaseLineInput {
+        order_position: Some(pos),
+        ..line(product, qty, cost)
+    };
+    assert_eq!(
+        err(record_purchase(
+            &mut s,
+            meta(&setup, "b"),
+            buy(vec![at(&oil, "1", 1_000, 0)], &cevital.id)
+        )),
+        ["doc.wrong_state"]
+    );
+
+    // Approving takes a right a buyer only asks for.
+    let buyer = create_user(
+        &mut s,
+        meta(&setup, "user"),
+        UserInput {
+            name: "Achats".into(),
+            phone: None,
+            login: None,
+            password: None,
+            pin: None,
+            grants: vec![GrantRow::org("purchasing")],
+        },
+    )?;
+    let as_buyer = |kind: &'static str| {
+        OpMeta::new(
+            kind,
+            Some(setup.org),
+            Some(buyer.id.parse().unwrap_or_default()),
+        )
+    };
+    assert_eq!(
+        err(approve_order(&mut s, as_buyer("a"), &draft.row.id, None)),
+        ["access.needs_approval"]
+    );
+    let approved = approve_order(&mut s, meta(&setup, "a"), &draft.row.id, None)?;
+    assert_eq!(approved.row.status, "approved");
+    assert_eq!(
+        err(save_order(&mut s, meta(&setup, "o"), input)),
+        ["doc.not_draft"]
+    );
+    assert!(
+        s.connection()
+            .execute(
+                "UPDATE purchase_order_lines SET qty_milli = 1000 WHERE order_id = ?1",
+                [&draft.row.id]
+            )
+            .is_err(),
+        "an approved order keeps its contents"
+    );
+
+    // Matching: the right supplier, ordered lines, never more than left.
+    for (lines, supplier, code) in [
+        (
+            vec![at(&oil, "4", 1_000, 0)],
+            &other.id,
+            "purchase.order_mismatch",
+        ),
+        (
+            vec![line(&oil, "4", 1_000)],
+            &cevital.id,
+            "purchase.not_ordered",
+        ),
+        (
+            vec![at(&sugar, "4", 1_000, 0)],
+            &cevital.id,
+            "purchase.not_ordered",
+        ),
+        (
+            vec![at(&oil, "13", 1_000, 0)],
+            &cevital.id,
+            "purchase.over_ordered",
+        ),
+        (
+            vec![at(&oil, "7", 1_000, 0), at(&oil, "6", 1_000, 0)],
+            &cevital.id,
+            "purchase.over_ordered",
+        ),
+    ] {
+        assert_eq!(
+            err(record_purchase(
+                &mut s,
+                meta(&setup, "b"),
+                buy(lines, supplier)
+            )),
+            [code]
+        );
+    }
+    // A cost above the order needs the right to approve purchases.
+    assert_eq!(
+        err(record_purchase(
+            &mut s,
+            as_buyer("b"),
+            buy(vec![at(&oil, "4", 1_100, 0)], &cevital.id)
+        )),
+        ["access.needs_approval"]
+    );
+    let first = record_purchase(
+        &mut s,
+        as_buyer("b"),
+        buy(
+            vec![at(&oil, "4", 1_000, 0), at(&sugar, "5", 1_900, 1)],
+            &cevital.id,
+        ),
+    )?;
+    let o = get_order(&s, &draft.row.id)?;
+    assert_eq!(o.row.status, "partial");
+    assert_eq!(
+        o.lines
+            .iter()
+            .map(|l| l.remaining_milli())
+            .collect::<Vec<_>>(),
+        [8_000, 0]
+    );
+    assert_eq!(o.receipts, std::slice::from_ref(&first.number));
+    assert_eq!(
+        err(cancel_order(&mut s, meta(&setup, "c"), &draft.row.id, "x")),
+        ["doc.wrong_state"]
+    );
+    // The rest: received in full.
+    record_purchase(
+        &mut s,
+        meta(&setup, "b"),
+        buy(vec![at(&oil, "8", 1_050, 0)], &cevital.id),
+    )?;
+    let o = get_order(&s, &draft.row.id)?;
+    assert_eq!((o.row.status.as_str(), o.receipts.len()), ("received", 2));
+    assert_eq!(
+        count(
+            &s,
+            "SELECT COUNT(*) FROM purchase_lines WHERE ordered_cost_minor = 1000 AND unit_cost_minor = 1050"
+        ),
+        1
+    );
+    assert_eq!(
+        list_orders(
+            &s,
+            &OrderQuery {
+                status: "open".into(),
+                limit: 10,
+                ..Default::default()
+            }
+        )?
+        .total,
+        0
+    );
+
+    // Another order, partly received then closed; a third cancelled.
+    let mut second = OrderInput {
+        supplier_id: cevital.id.clone(),
+        warehouse_id: wh.clone(),
+        lines: vec![line(&oil, "3", 1_000)],
+        ..Default::default()
+    };
+    let o2 = save_order(&mut s, meta(&setup, "o"), second.clone())?;
+    assert_eq!(
+        err(close_order(
+            &mut s,
+            meta(&setup, "c"),
+            &o2.row.id,
+            "Rupture"
+        )),
+        ["doc.wrong_state"]
+    );
+    approve_order(&mut s, meta(&setup, "a"), &o2.row.id, None)?;
+    record_purchase(
+        &mut s,
+        meta(&setup, "b"),
+        PurchaseInput {
+            supplier_id: cevital.id.clone(),
+            warehouse_id: wh.clone(),
+            lines: vec![at(&oil, "1", 1_000, 0)],
+            order_id: Some(o2.row.id.clone()),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(
+        err(close_order(&mut s, meta(&setup, "c"), &o2.row.id, " ")),
+        ["required"]
+    );
+    let closed = close_order(
+        &mut s,
+        meta(&setup, "c"),
+        &o2.row.id,
+        "Rupture chez le fournisseur",
+    )?;
+    assert_eq!(
+        (closed.row.status.as_str(), closed.reason.as_str()),
+        ("closed", "Rupture chez le fournisseur")
+    );
+    second.lines = vec![line(&sugar, "1", 2_000)];
+    let o3 = save_order(&mut s, meta(&setup, "o"), second)?;
+    let cancelled = cancel_order(&mut s, meta(&setup, "c"), &o3.row.id, "Doublon")?;
+    assert_eq!(cancelled.row.status, "cancelled");
+    assert!(
+        s.connection()
+            .execute(
+                "UPDATE purchase_orders SET status = 'draft' WHERE id = ?1",
+                [&o3.row.id]
+            )
+            .is_err()
+    );
     assert!(s.health()?.is_sound());
     Ok(())
 }

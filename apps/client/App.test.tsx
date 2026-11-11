@@ -760,3 +760,49 @@ test("a supplier's invoice comes into stock, and the supplier is paid", async ()
   await app.press("id:sp-confirm");
   await seen(/^Paiement .+ : 1 190,00 DA payé\.$/);
 });
+
+test("a purchase order is approved, then received in part", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Achats");
+  await app.press("id:nav-suppliers");
+  await app.waitFor("id:supplier-new");
+  await app.press("id:supplier-new");
+  await app.waitFor("id:supplier-save");
+  await app.type("id:supplier-name", "Cevital");
+  await app.press("id:supplier-save");
+  await app.waitFor("id:supplier-0");
+  // Ten at 100.00 before tax, as a draft.
+  await app.press("id:nav-purchase_orders");
+  await app.waitFor("id:order-new");
+  await app.waitFor("text:Aucun bon de commande");
+  await app.press("id:order-new");
+  await app.waitFor("id:order-save");
+  await app.type("id:order-search", "Biscuits");
+  await app.press("id:order-search-result-0");
+  await app.waitFor("id:order-cost-0");
+  await app.clear("id:order-qty-0");
+  await app.type("id:order-qty-0", "10");
+  await app.type("id:order-cost-0", "100");
+  await app.press("id:order-save");
+  await seen(/^Commande BCF-.+ enregistrée en brouillon\.$/);
+  await app.press("text:Brouillons");
+  await app.waitFor("id:order-0");
+  await app.press("id:order-0");
+  await app.waitFor("id:order-approve");
+  await app.press("id:order-approve");
+  await seen(/^Commande BCF-.+ approuvée\.$/);
+  // Four came: received at the cost ordered.
+  await app.waitFor("id:order-receive");
+  await app.press("id:order-receive");
+  await app.waitFor("id:buy-qty-0");
+  await seen(/^Reste à recevoir : 10$/);
+  await app.clear("id:buy-qty-0");
+  await app.type("id:buy-qty-0", "4");
+  await app.press("id:buy-save");
+  await seen(/^Achat FA-.+ enregistré : 476,00 DA\.$/);
+  await app.press("text:À recevoir");
+  await app.waitFor("id:order-0");
+  await app.waitFor("text:Reçu en partie");
+});
