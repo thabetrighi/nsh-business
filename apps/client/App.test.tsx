@@ -285,6 +285,7 @@ test("tax classes and scale labels are the store's settings", async () => {
   await app.press("id:nav-settings");
   await app.press("id:settings-taxes");
   await app.waitFor("text:Classes de TVA");
+  await app.waitFor("id:tax-rate-1", { timeout: 10000 });
   await app.clear("id:tax-rate-1");
   await app.type("id:tax-rate-1", "9,5");
   await app.press("id:tax-save");

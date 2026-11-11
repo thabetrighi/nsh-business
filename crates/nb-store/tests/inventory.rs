@@ -38,6 +38,7 @@ fn stocked(
         warehouse_id: setup.warehouse.to_string(),
         qty: qty.into(),
         unit_cost_minor: cost,
+        tracked: Default::default(),
     });
     Ok(create_product(s, meta(setup, "product.create"), p)?
         .id
@@ -138,6 +139,7 @@ fn transfers_move_stock_and_cost_and_book_shortfalls() -> R {
             product_id: milk.to_string(),
             qty: "6".into(),
             unit: String::new(),
+            tracked: Default::default(),
         }],
         note: "réassort".into(),
     };
@@ -229,6 +231,7 @@ fn transfers_move_stock_and_cost_and_book_shortfalls() -> R {
             product_id: milk.to_string(),
             qty: "50".into(),
             unit: String::new(),
+            tracked: Default::default(),
         }],
         ..input
     };
@@ -342,4 +345,394 @@ fn counts_bring_the_book_to_what_was_counted() -> R {
         ["cancelled", "closed"]
     );
     healthy(&s)
+}
+
+// --- Lots, expiry and serial numbers (M6.8, M6.9) ---
+
+use nb_store::usecases::stock::{AdjustInput, adjust_stock};
+use nb_store::usecases::tracked::Tracked;
+
+fn tracked_product(
+    s: &mut Store,
+    setup: &nb_store::usecases::setup::SetupResult,
+    name: &str,
+    tracking: &str,
+    opening: Option<(&str, Tracked)>,
+) -> Result<ProductId, Error> {
+    let mut p = product(name, "", 2_000);
+    p.tracking = Some(tracking.into());
+    p.opening = opening.map(|(qty, tracked)| Opening {
+        warehouse_id: setup.warehouse.to_string(),
+        qty: qty.into(),
+        unit_cost_minor: 1_000,
+        tracked,
+    });
+    Ok(create_product(s, meta(setup, "product.create"), p)?
+        .id
+        .parse()
+        .unwrap_or_default())
+}
+
+fn lot(code: &str, expiry: &str) -> Tracked {
+    Tracked {
+        lot: Some(code.into()),
+        expiry: Some(expiry.into()),
+        serials: vec![],
+    }
+}
+
+fn serials(list: &[&str]) -> Tracked {
+    Tracked {
+        serials: list.iter().map(|s| (*s).to_owned()).collect(),
+        ..Default::default()
+    }
+}
+
+fn move_stock(
+    product: ProductId,
+    wh: WarehouseId,
+    kind: &str,
+    qty: &str,
+    tracked: Tracked,
+) -> AdjustInput {
+    AdjustInput {
+        product_id: product.to_string(),
+        warehouse_id: wh.to_string(),
+        kind: kind.into(),
+        qty: qty.into(),
+        unit: "pc".into(),
+        unit_cost_minor: Some(1_000),
+        reason: "test".into(),
+        may_go_negative: false,
+        approval: None,
+        tracked,
+    }
+}
+
+/// Lot codes with stock in a warehouse, by expiry (none first), in
+/// thousandths.
+fn lots(s: &Store, product: ProductId, wh: WarehouseId) -> Vec<(String, i64)> {
+    let mut q = s
+        .connection()
+        .prepare(
+            "SELECT l.code, b.on_hand_milli FROM lots l JOIN lot_balances b ON b.lot_id = l.id
+             WHERE l.product_id = ?1 AND b.warehouse_id = ?2 AND b.on_hand_milli <> 0 ORDER BY l.expiry, l.code",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    q.query_map([product.to_string(), wh.to_string()], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })
+    .and_then(|rows| rows.collect())
+    .unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn in_stock(s: &Store, product: ProductId, wh: WarehouseId) -> Vec<String> {
+    let mut q = s
+        .connection()
+        .prepare("SELECT serial FROM serials WHERE product_id = ?1 AND warehouse_id = ?2 AND status = 'in_stock' ORDER BY serial")
+        .unwrap_or_else(|e| panic!("{e}"));
+    q.query_map([product.to_string(), wh.to_string()], |r| r.get(0))
+        .and_then(|rows| rows.collect())
+        .unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn tracked_healthy(s: &Store) -> R {
+    assert_eq!(
+        nb_store::repo::tracking::rebuild_lot_balances(s.connection())?,
+        0,
+        "lot balances = replayed lots"
+    );
+    healthy(s)
+}
+
+#[test]
+fn lots_go_first_expiring_first_and_follow_transfers() -> R {
+    let (mut s, setup) = store();
+    let wh = setup.warehouse;
+    // Opening stock needs its lot.
+    assert_eq!(
+        err(tracked_product(
+            &mut s,
+            &setup,
+            "Yaourt",
+            "lot",
+            Some(("10", Tracked::default()))
+        )),
+        ["lot.required"]
+    );
+    assert_eq!(
+        err(tracked_product(
+            &mut s,
+            &setup,
+            "Yaourt",
+            "lot",
+            Some(("10", lot("a1", "2031/01/01")))
+        )),
+        ["lot.expiry_format"]
+    );
+    let yog = tracked_product(
+        &mut s,
+        &setup,
+        "Yaourt",
+        "lot",
+        Some(("10", lot("a1", "2031-03-01"))),
+    )?;
+    adjust_stock(
+        &mut s,
+        meta(&setup, "stock.adjust"),
+        move_stock(yog, wh, "adjust_in", "5", lot("B2", "2030-12-01")),
+    )?;
+    adjust_stock(
+        &mut s,
+        meta(&setup, "stock.adjust"),
+        move_stock(yog, wh, "adjust_in", "4", lot("OLD", "2020-01-01")),
+    )?;
+    // A known lot keeps its expiry.
+    assert_eq!(
+        err(adjust_stock(
+            &mut s,
+            meta(&setup, "stock.adjust"),
+            move_stock(yog, wh, "adjust_in", "1", lot("B2", "2032-01-01"))
+        )),
+        ["lot.expiry_mismatch"]
+    );
+    assert_eq!(
+        lots(&s, yog, wh),
+        [
+            ("OLD".into(), 4_000),
+            ("B2".into(), 5_000),
+            ("A1".into(), 10_000)
+        ]
+    );
+
+    // The expired lot shows in the alerts; far lots do not.
+    let soon = expiring_lots(&s, 30)?;
+    assert_eq!(
+        soon.iter()
+            .map(|l| (l.lot.as_str(), l.qty_milli))
+            .collect::<Vec<_>>(),
+        [("OLD", 4_000)]
+    );
+    assert!(soon[0].days_left < 0);
+    assert_eq!(expiring_lots(&s, 365 * 10)?.len(), 3);
+    // Waste takes the expired lot first.
+    adjust_stock(
+        &mut s,
+        meta(&setup, "stock.adjust"),
+        move_stock(yog, wh, "waste", "4", Tracked::default()),
+    )?;
+    assert_eq!(
+        lots(&s, yog, wh),
+        [("B2".into(), 5_000), ("A1".into(), 10_000)]
+    );
+    // A named lot, then not more than it holds.
+    adjust_stock(
+        &mut s,
+        meta(&setup, "stock.adjust"),
+        move_stock(
+            yog,
+            wh,
+            "adjust_out",
+            "2",
+            Tracked {
+                lot: Some("a1".into()),
+                ..Default::default()
+            },
+        ),
+    )?;
+    assert_eq!(
+        err(adjust_stock(
+            &mut s,
+            meta(&setup, "stock.adjust"),
+            move_stock(
+                yog,
+                wh,
+                "adjust_out",
+                "6",
+                Tracked {
+                    lot: Some("B2".into()),
+                    ..Default::default()
+                }
+            )
+        )),
+        ["lot.insufficient"]
+    );
+    assert_eq!(
+        err(adjust_stock(
+            &mut s,
+            meta(&setup, "stock.adjust"),
+            move_stock(
+                yog,
+                wh,
+                "adjust_out",
+                "1",
+                Tracked {
+                    lot: Some("ZZ".into()),
+                    ..Default::default()
+                }
+            )
+        )),
+        ["lot.unknown"]
+    );
+
+    // A transfer sends the first expiring lots; they arrive as they left.
+    let other = create_branch(&mut s, meta(&setup, "branch"), "Touggourt")?;
+    let to: WarehouseId = other.warehouses[0].id.parse().unwrap_or_default();
+    let t = send_transfer(
+        &mut s,
+        meta(&setup, "transfer.send"),
+        TransferInput {
+            from_warehouse: wh.to_string(),
+            to_warehouse: to.to_string(),
+            lines: vec![TransferLineInput {
+                product_id: yog.to_string(),
+                qty: "7".into(),
+                unit: String::new(),
+                tracked: Tracked::default(),
+            }],
+            note: String::new(),
+        },
+    )?;
+    assert_eq!(lots(&s, yog, wh), [("A1".into(), 6_000)]);
+    receive_transfer(
+        &mut s,
+        meta(&setup, "transfer.receive"),
+        &t.id,
+        vec![(0, "6".into())],
+    )?;
+    assert_eq!(
+        lots(&s, yog, to),
+        [("B2".into(), 5_000), ("A1".into(), 1_000)]
+    );
+
+    // Units found at a count form a lot named after the count.
+    let c = open_count(&mut s, meta(&setup, "count.open"), wh, None)?;
+    record_count(&mut s, meta(&setup, "count.record"), &c.id, yog, "8", "")?;
+    close_count(&mut s, meta(&setup, "count.close"), &c.id, None)?;
+    assert_eq!(
+        lots(&s, yog, wh),
+        [(c.number.clone(), 2_000), ("A1".into(), 6_000)]
+    );
+    tracked_healthy(&s)
+}
+
+#[test]
+fn serial_numbers_enter_and_leave_once() -> R {
+    let (mut s, setup) = store();
+    let wh = setup.warehouse;
+    assert_eq!(
+        err(tracked_product(
+            &mut s,
+            &setup,
+            "Téléphone",
+            "serial",
+            Some(("2", serials(&["S1"])))
+        )),
+        ["serial.count"]
+    );
+    assert_eq!(
+        err(tracked_product(
+            &mut s,
+            &setup,
+            "Téléphone",
+            "serial",
+            Some(("2", serials(&["S1", "S1"])))
+        )),
+        ["serial.duplicate"]
+    );
+    let phone = tracked_product(
+        &mut s,
+        &setup,
+        "Téléphone",
+        "serial",
+        Some(("2", serials(&["S1", "S2"]))),
+    )?;
+    assert_eq!(
+        err(adjust_stock(
+            &mut s,
+            meta(&setup, "stock.adjust"),
+            move_stock(phone, wh, "adjust_in", "1", serials(&["S2"]))
+        )),
+        ["serial.in_stock"]
+    );
+    adjust_stock(
+        &mut s,
+        meta(&setup, "stock.adjust"),
+        move_stock(phone, wh, "adjust_in", "1", serials(&["S3"])),
+    )?;
+    adjust_stock(
+        &mut s,
+        meta(&setup, "stock.adjust"),
+        move_stock(phone, wh, "waste", "1", serials(&["S1"])),
+    )?;
+    assert_eq!(
+        err(adjust_stock(
+            &mut s,
+            meta(&setup, "stock.adjust"),
+            move_stock(phone, wh, "waste", "1", serials(&["S1"]))
+        )),
+        ["serial.not_in_stock"]
+    );
+    assert_eq!(in_stock(&s, phone, wh), ["S2", "S3"]);
+
+    // Serials travel with a transfer, and arrive whole.
+    let other = create_branch(&mut s, meta(&setup, "branch"), "Touggourt")?;
+    let to: WarehouseId = other.warehouses[0].id.parse().unwrap_or_default();
+    let t = send_transfer(
+        &mut s,
+        meta(&setup, "transfer.send"),
+        TransferInput {
+            from_warehouse: wh.to_string(),
+            to_warehouse: to.to_string(),
+            lines: vec![TransferLineInput {
+                product_id: phone.to_string(),
+                qty: "2".into(),
+                unit: String::new(),
+                tracked: serials(&["S2", "S3"]),
+            }],
+            note: String::new(),
+        },
+    )?;
+    assert!(in_stock(&s, phone, wh).is_empty());
+    assert_eq!(
+        err(receive_transfer(
+            &mut s,
+            meta(&setup, "transfer.receive"),
+            &t.id,
+            vec![(0, "1".into())]
+        )),
+        ["transfer.serial_partial"]
+    );
+    receive_transfer(&mut s, meta(&setup, "transfer.receive"), &t.id, vec![])?;
+    assert_eq!(in_stock(&s, phone, to), ["S2", "S3"]);
+
+    // Counted unit by unit elsewhere; tracking is fixed once stock moved.
+    let c = open_count(&mut s, meta(&setup, "count.open"), to, None)?;
+    assert_eq!(
+        err(record_count(
+            &mut s,
+            meta(&setup, "count.record"),
+            &c.id,
+            phone,
+            "2",
+            ""
+        )),
+        ["count.serial_product"]
+    );
+    // An untracked product refuses lots.
+    let salt = create_product(
+        &mut s,
+        meta(&setup, "product.create"),
+        product("Sel", "", 500),
+    )?;
+    let salt: ProductId = salt.id.parse().unwrap_or_default();
+    assert_eq!(
+        err(adjust_stock(
+            &mut s,
+            meta(&setup, "stock.adjust"),
+            move_stock(salt, wh, "adjust_in", "1", lot("X", "2030-01-01"))
+        )),
+        ["tracking.not_tracked"]
+    );
+    tracked_healthy(&s)
 }

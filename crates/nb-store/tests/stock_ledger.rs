@@ -31,6 +31,7 @@ fn setup_item() -> Result<
         warehouse_id: setup.warehouse.to_string(),
         qty: "8".into(),
         unit_cost_minor: 80_000,
+        tracked: Default::default(),
     });
     let row = create_product(&mut s, meta(&setup, "product.create"), p)?;
     Ok((s, setup, row.id))
@@ -47,6 +48,7 @@ fn adjust(product: &str, wh: &str, kind: &str, qty: &str, unit: &str) -> AdjustI
         reason: "casse".into(),
         may_go_negative: false,
         approval: None,
+        tracked: Default::default(),
     }
 }
 

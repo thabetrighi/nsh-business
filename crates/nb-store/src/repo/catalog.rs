@@ -61,6 +61,8 @@ pub struct ProductRow {
     /// A variant's values, or a parent's attributes (JSON).
     pub variant_attrs: Option<String>,
     pub tags: Vec<String>,
+    /// `none`, `lot` or `serial`.
+    pub tracking: String,
 }
 
 /// What a product row carries besides its rules-checked fields.
@@ -74,6 +76,7 @@ pub struct ProductExtra {
     pub plu: Option<String>,
     pub parent_id: Option<String>,
     pub variant_attrs: Option<String>,
+    pub tracking: Option<String>,
 }
 
 /// Stock state for lists and filters.
@@ -185,7 +188,7 @@ pub fn fts_query(text: &str) -> Option<String> {
     }
 }
 
-const EXTRA_COLS: &str = "p.brand_id, br.name, p.tax_class_id, p.alt_name, p.description, p.cost_minor, p.plu, p.parent_id, p.variant_attrs";
+const EXTRA_COLS: &str = "p.brand_id, br.name, p.tax_class_id, p.alt_name, p.description, p.cost_minor, p.plu, p.parent_id, p.variant_attrs, p.tracking";
 
 const STOCK_EXPR: &str =
     "COALESCE((SELECT SUM(b.on_hand_milli) FROM stock_balances b WHERE b.product_id = p.id), 0)";
@@ -318,6 +321,7 @@ fn row_basic(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProductRow> {
         parent_id: r.get(20)?,
         variant_attrs: r.get(21)?,
         tags: Vec::new(),
+        tracking: r.get(22)?,
     })
 }
 
@@ -439,8 +443,8 @@ pub fn insert(
     let r = w.tx().execute(
         "INSERT INTO products (id, org_id, sku, name, kind, category_id, tax_bps, price_minor, min_price_minor, min_stock_milli,
                                created_at, updated_at, created_by, device_id, brand_id, tax_class_id, alt_name, description,
-                               cost_minor, plu, parent_id, variant_attrs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                               cost_minor, plu, parent_id, variant_attrs, tracking)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             id.to_string(),
             org.to_string(),
@@ -462,7 +466,8 @@ pub fn insert(
             d.cost.map(|c| c.minor()),
             x.plu,
             x.parent_id,
-            x.variant_attrs
+            x.variant_attrs,
+            x.tracking.as_deref().unwrap_or("none")
         ],
     );
     plu_conflict(r)?;
@@ -485,7 +490,7 @@ pub fn update(
         "UPDATE products SET sku = ?1, name = ?2, kind = ?3, category_id = ?4, tax_bps = ?5, price_minor = ?6,
                 min_price_minor = ?7, min_stock_milli = ?8, updated_at = ?9, version = version + 1,
                 brand_id = ?12, tax_class_id = ?13, alt_name = ?14, description = ?15, cost_minor = ?16, plu = ?17,
-                parent_id = ?18, variant_attrs = ?19
+                parent_id = ?18, variant_attrs = ?19, tracking = ?20
          WHERE id = ?10 AND version = ?11 AND deleted_at IS NULL",
         params![
             d.sku,
@@ -506,7 +511,8 @@ pub fn update(
             d.cost.map(|c| c.minor()),
             x.plu,
             x.parent_id,
-            x.variant_attrs
+            x.variant_attrs,
+            x.tracking.as_deref().unwrap_or("none")
         ],
     ))?;
     if n == 0 {

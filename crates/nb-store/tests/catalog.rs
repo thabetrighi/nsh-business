@@ -27,6 +27,7 @@ fn milk(setup: &nb_store::usecases::setup::SetupResult) -> ProductInput {
         warehouse_id: setup.warehouse.to_string(),
         qty: "10".into(),
         unit_cost_minor: 9_500,
+        tracked: Default::default(),
     });
     p
 }
@@ -109,6 +110,7 @@ fn seed(s: &mut nb_store::Store, setup: &nb_store::usecases::setup::SetupResult)
                 warehouse_id: setup.warehouse.to_string(),
                 qty: qty.into(),
                 unit_cost_minor: price * 8 / 10,
+                tracked: Default::default(),
             });
         }
         create_product(s, meta(setup, "product.create"), p)?;

@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod ledger;
 pub mod org;
 pub mod stock;
+pub mod tracking;
 
 use nb_core::{Decimal, Quantity};
 use nb_domain::RuleError;

@@ -1257,6 +1257,7 @@ pub fn import_products(
                 warehouse_id: warehouse.to_string(),
                 qty: stock,
                 unit_cost_minor: cost.unwrap_or(0),
+                tracked: Default::default(),
             }),
             ..Default::default()
         };

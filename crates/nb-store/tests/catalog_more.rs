@@ -508,6 +508,7 @@ fn a_conversion_in_use_cannot_change() -> R {
         warehouse_id: setup.warehouse.to_string(),
         qty: "24".into(),
         unit_cost_minor: 10_000,
+        tracked: Default::default(),
     });
     let row = create_product(&mut s, meta(&setup, "product.create"), p.clone())?;
     p.opening = None;

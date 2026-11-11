@@ -53,7 +53,16 @@ pub fn shell(st: AppState) -> impl IntoElement {
 
 fn content(st: AppState, compact: bool) -> impl IntoElement {
     // Screens with their own scrolling (tables) fill the area; the rest scroll as a page.
-    dynamic(move || match st.route.get() {
+    // Only the route rebuilds a screen: what a screen reads while it is built
+    // (the session, the data) must not throw away its state (an open editor).
+    dynamic(move || {
+        let route = st.route.get();
+        untracked(move || page_of(st, route, compact))
+    })
+}
+
+fn page_of(st: AppState, route: Route, compact: bool) -> AnyElement {
+    match route {
         Route::Home => scroll().flex_1().child(home(st, compact)).into_element(),
         Route::Products => products(st, compact).into_element(),
         Route::Settings => settings(st, compact).into_element(),
@@ -90,7 +99,7 @@ fn content(st: AppState, compact: bool) -> impl IntoElement {
             .flex_1()
             .child(coming_soon(st, other, compact))
             .into_element(),
-    })
+    }
 }
 
 fn store_name(st: AppState) -> impl Fn() -> String + 'static {

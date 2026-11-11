@@ -22,6 +22,9 @@ pub struct Opening {
     /// Quantity in the base unit, as exact decimal text.
     pub qty: String,
     pub unit_cost_minor: i64,
+    /// Lot (with expiry) or serial numbers of the opening stock.
+    #[serde(default)]
+    pub tracked: crate::usecases::tracked::Tracked,
 }
 
 /// A product as a form or an import sends it.
@@ -63,6 +66,9 @@ pub struct ProductInput {
     /// Article code in scale labels (weighed goods), digits only.
     #[serde(default)]
     pub plu: Option<String>,
+    /// `none` (default), `lot` or `serial`.
+    #[serde(default)]
+    pub tracking: Option<String>,
 }
 
 impl ProductInput {
@@ -92,6 +98,12 @@ impl ProductInput {
                 .map(Into::into),
             parent_id,
             variant_attrs,
+            tracking: Some(
+                self.tracking
+                    .clone()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| "none".into()),
+            ),
         }
     }
 }
@@ -130,6 +142,13 @@ fn resolve_refs(w: &Writer<'_>, input: &ProductInput, valid: &mut ValidProduct) 
                 None => errors.push(RuleError::on("tax_class", "not_found")),
             }
         }
+    }
+    if input
+        .tracking
+        .as_deref()
+        .is_some_and(|t| !t.is_empty() && crate::repo::tracking::Tracking::from_code(t).is_none())
+    {
+        errors.push(RuleError::on("tracking", "invalid_value"));
     }
     if let Some(plu) = input
         .plu
@@ -256,6 +275,7 @@ pub(crate) struct Prepared {
     pub valid: ValidProduct,
     /// Opening stock: warehouse, base quantity, unit cost.
     pub opening: Option<(WarehouseId, Quantity, i64)>,
+    pub opening_tracked: crate::usecases::tracked::Tracked,
 }
 
 /// Checks a product input with the rules that need no database.
@@ -289,10 +309,16 @@ pub(crate) fn prepare(
         }
         None => None,
     };
+    let opening_tracked = input
+        .opening
+        .as_ref()
+        .map(|o| o.tracked.clone())
+        .unwrap_or_default();
     Ok(Prepared {
         input,
         valid,
         opening,
+        opening_tracked,
     })
 }
 
@@ -335,7 +361,7 @@ pub(crate) fn write_new(
             warehouse.policy(),
             false,
         )?;
-        stock::append(
+        let movement = stock::append(
             w,
             id,
             wh,
@@ -345,6 +371,16 @@ pub(crate) fn write_new(
             Some(&number),
             None,
             after,
+        )?;
+        crate::usecases::tracked::record(
+            w,
+            movement,
+            id,
+            wh,
+            MovementKind::Opening,
+            qty,
+            &p.opening_tracked,
+            false,
         )?;
         value = qty.times_price(unit_cost)?;
         // Opening stock enters the books against opening equity
@@ -454,12 +490,22 @@ pub(crate) fn write_update(
     if before.unit_set()?.reinterprets(&p.valid.0.units) && catalog::has_movements(w.tx(), id)? {
         return Err(RuleError::on("units", "units.in_use").into());
     }
+    let tracking = p
+        .input
+        .tracking
+        .clone()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| before.tracking.clone());
+    if tracking != before.tracking && catalog::has_movements(w.tx(), id)? {
+        return Err(RuleError::on("tracking", "product.tracking_in_use").into());
+    }
     let org = w.org()?;
     let parent = before
         .parent_id
         .clone()
         .map(|pid| (pid, before.variant_attrs.clone().unwrap_or_default()));
     let mut extra = p.input.extra(parent);
+    extra.tracking = Some(tracking);
     if extra.parent_id.is_none() {
         extra.variant_attrs = before.variant_attrs.clone();
     }

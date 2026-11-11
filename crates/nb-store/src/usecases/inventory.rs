@@ -353,6 +353,9 @@ pub struct TransferLineInput {
     /// In `unit`, as typed.
     pub qty: String,
     pub unit: String,
+    /// A chosen lot, or the serial numbers sent.
+    #[serde(default)]
+    pub tracked: crate::usecases::tracked::Tracked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +459,7 @@ pub fn send_transfer(store: &mut Store, meta: OpMeta, input: TransferInput) -> R
             parse_id::<ProductId>(&l.product_id)?,
             qty("qty", &l.qty)?,
             l.unit.clone(),
+            l.tracked.clone(),
         ));
     }
     store.write(meta, |w| {
@@ -472,7 +476,7 @@ pub fn send_transfer(store: &mut Store, meta: OpMeta, input: TransferInput) -> R
             params![id, org.to_string(), number, src.id, dst.id, input.note.trim(), w.now(), w.actor_text(), w.device().id.to_string()],
         )?;
         let mut seen = std::collections::BTreeSet::new();
-        for (i, (product, q, unit)) in parsed.iter().enumerate() {
+        for (i, (product, q, unit, tracked)) in parsed.iter().enumerate() {
             if !seen.insert(*product) {
                 return Err(RuleError::on("lines", "transfer.duplicate_line").into());
             }
@@ -483,10 +487,11 @@ pub fn send_transfer(store: &mut Store, meta: OpMeta, input: TransferInput) -> R
             let base = p.unit_set()?.to_base(*q, if unit.is_empty() { &p.units[0].code } else { unit })?;
             let before = stock::balance(w.tx(), *product, from, currency)?;
             let after = before.apply(MovementKind::TransferOut, base, None, src.policy(), may_negative)?;
-            stock::append(w, *product, from, MovementKind::TransferOut, base, Some(before.avg_cost), Some(&number), None, after)?;
+            let movement = stock::append(w, *product, from, MovementKind::TransferOut, base, Some(before.avg_cost), Some(&number), None, after)?;
+            crate::usecases::tracked::record(w, movement, *product, from, MovementKind::TransferOut, base, tracked, false)?;
             w.tx().execute(
-                "INSERT INTO transfer_lines (transfer_id, position, product_id, qty_sent_milli, unit_cost_minor) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, i64::try_from(i).unwrap_or(0), product.to_string(), to_milli(base)?, before.avg_cost.minor()],
+                "INSERT INTO transfer_lines (transfer_id, position, product_id, qty_sent_milli, unit_cost_minor, out_movement_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, i64::try_from(i).unwrap_or(0), product.to_string(), to_milli(base)?, before.avg_cost.minor(), movement.to_string()],
             )?;
         }
         let row = transfer_of(w.tx(), &id)?;
@@ -530,7 +535,15 @@ pub fn receive_transfer(
             if !got.is_zero() {
                 let before = stock::balance(w.tx(), product, to, currency)?;
                 let after = before.apply(MovementKind::TransferIn, got, Some(cost), dst.policy(), true)?;
-                stock::append(w, product, to, MovementKind::TransferIn, got, Some(cost), Some(&t.number), None, after)?;
+                let movement = stock::append(w, product, to, MovementKind::TransferIn, got, Some(cost), Some(&t.number), None, after)?;
+                let sent_by: Option<String> = w.tx().query_row(
+                    "SELECT out_movement_id FROM transfer_lines WHERE transfer_id = ?1 AND position = ?2",
+                    params![t.id, l.position],
+                    |r| r.get(0),
+                )?;
+                if let Some(out) = sent_by {
+                    crate::usecases::tracked::mirror(w, &out, movement, product, to, got)?;
+                }
             }
             loss = loss.checked_add(short.times_price(cost)?)?;
             w.tx().execute(
@@ -695,6 +708,9 @@ pub fn record_count(
         let (_, _, target) = place(w.tx(), parse_id(&c.warehouse_id)?)?;
         w.require(Permission::StockCount, &target)?;
         let p = catalog::get(w.tx(), product)?;
+        if p.tracking == "serial" {
+            return Err(RuleError::on("product", "count.serial_product").into());
+        }
         let base = p.unit_set()?.to_base(q, if unit.is_empty() { &p.units[0].code } else { unit })?;
         if base.is_negative() {
             return Err(RuleError::on("counted", "stock.quantity_positive").into());
@@ -765,7 +781,13 @@ pub fn close_count(
                 continue;
             };
             let after = before.apply(kind, q, None, warehouse.policy(), true)?;
-            stock::append(w, product, wh, kind, q, Some(before.avg_cost), Some(&c.number), None, after)?;
+            let movement = stock::append(w, product, wh, kind, q, Some(before.avg_cost), Some(&c.number), None, after)?;
+            // Found units go to a lot named after the count; missing ones
+            // leave the expired lots first.
+            if crate::repo::tracking::tracking(w.tx(), product)? == crate::repo::tracking::Tracking::Lot {
+                let tracked = crate::usecases::tracked::Tracked { lot: (kind == MovementKind::CountGain).then(|| c.number.clone()), ..Default::default() };
+                crate::usecases::tracked::record(w, movement, product, wh, kind, q, &tracked, true)?;
+            }
             let value = q.times_price(before.avg_cost)?;
             if kind == MovementKind::CountGain {
                 gains = gains.checked_add(value)?;
@@ -825,4 +847,50 @@ pub fn alerts(store: &Store) -> Result<(u32, u32)> {
         },
     )?;
     Ok((page.counts[2], page.counts[3]))
+}
+
+/// A lot in stock that expires soon, or has expired (M6.11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpiringLot {
+    pub product_id: String,
+    pub product: String,
+    pub lot: String,
+    pub expiry: String,
+    pub warehouse: String,
+    pub qty_milli: i64,
+    /// Negative once expired.
+    pub days_left: i64,
+}
+
+/// Lots in stock expiring within `days` (expired ones included), soonest
+/// first.
+pub fn expiring_lots(store: &Store, days: i64) -> Result<Vec<ExpiringLot>> {
+    let now = store.now_ms();
+    store.read(|r| {
+        let (org, _) = the_org(r.conn())?;
+        let today = iso_date(now, r.utc_offset_min);
+        let mut s = r.conn().prepare(
+            "SELECT p.id, p.name, l.code, l.expiry, w.name, b.on_hand_milli,
+                    CAST(julianday(l.expiry) - julianday(?2) AS INTEGER)
+             FROM lots l
+             JOIN lot_balances b ON b.lot_id = l.id
+             JOIN products p ON p.id = l.product_id
+             JOIN warehouses w ON w.id = b.warehouse_id
+             WHERE l.org_id = ?1 AND b.on_hand_milli > 0 AND l.expiry IS NOT NULL
+               AND julianday(l.expiry) - julianday(?2) <= ?3
+             ORDER BY l.expiry, p.name",
+        )?;
+        let rows = s.query_map(params![org.to_string(), today, days], |r| {
+            Ok(ExpiringLot {
+                product_id: r.get(0)?,
+                product: r.get(1)?,
+                lot: r.get(2)?,
+                expiry: r.get(3)?,
+                warehouse: r.get(4)?,
+                qty_milli: r.get(5)?,
+                days_left: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    })
 }

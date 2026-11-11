@@ -15,6 +15,7 @@ use nb_store::usecases::catalog::{
     list_tax_classes, next_internal_barcodes, product_detail, save_product,
 };
 use nb_store::usecases::products::{Opening, ProductInput};
+use nb_store::usecases::tracked::Tracked;
 use nsh_core::element::Owner;
 use nsh_core::element::{KeyboardType, View, image};
 use nsh_core::prelude::*;
@@ -66,7 +67,8 @@ fn tab_of(field: &str) -> Tab {
         "price" | "min_price" | "cost" | "tax_rate" | "tax_class" | "prices" | "list"
         | "min_qty" => Tab::Prices,
         "units" | "unit" | "barcode" | "barcodes" | "plu" => Tab::Units,
-        "opening_qty" | "unit_cost" | "min_stock" | "quantity" => Tab::Stock,
+        "opening_qty" | "unit_cost" | "min_stock" | "quantity" | "lot" | "expiry" | "serials"
+        | "tracking" => Tab::Stock,
         "attributes" => Tab::Variants,
         "image" => Tab::Photos,
         _ => Tab::General,
@@ -144,6 +146,11 @@ struct Form {
     opening: Signal<String>,
     opening_cost: Signal<String>,
     min_stock: Signal<String>,
+    /// 0 none, 1 lots with expiry, 2 serial numbers.
+    tracking: Signal<u8>,
+    opening_lot: Signal<String>,
+    opening_expiry: Signal<String>,
+    opening_serials: Signal<String>,
     attrs: Signal<Vec<AttrRow>>,
     pics: Signal<Vec<Pic>>,
     removed: Signal<Vec<String>>,
@@ -184,6 +191,10 @@ impl Form {
             opening: s(""),
             opening_cost: s(""),
             min_stock: s(""),
+            tracking: signal(0),
+            opening_lot: s(""),
+            opening_expiry: s(""),
+            opening_serials: s(""),
             attrs: signal(vec![]),
             pics: signal(vec![]),
             removed: signal(vec![]),
@@ -246,6 +257,11 @@ impl Form {
         self.sku
             .set(if copy { String::new() } else { p.sku.clone() });
         self.service.set(p.kind == "service");
+        self.tracking.set(match p.tracking.as_str() {
+            "lot" => 1,
+            "serial" => 2,
+            _ => 0,
+        });
         self.category.set(
             p.category_id
                 .as_ref()
@@ -483,7 +499,26 @@ fn read(
             warehouse_id: warehouse,
             qty: opening,
             unit_cost_minor: opening_cost.or(cost).unwrap_or(0),
+            tracked: Tracked {
+                lot: text(f.opening_lot),
+                expiry: text(f.opening_expiry),
+                serials: f
+                    .opening_serials
+                    .get_untracked()
+                    .split(['\n', ',', '،', ';'])
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+                    .collect(),
+            },
         }),
+        tracking: Some(
+            match f.tracking.get_untracked() {
+                1 => "lot",
+                2 => "serial",
+                _ => "none",
+            }
+            .into(),
+        ),
         pack_barcodes,
         tax_class_id: tax.map(|t| t.id.clone()),
         brand_id: f
@@ -1646,27 +1681,78 @@ fn stock(
             "editor.card.opening",
             Some("editor.card.opening.help"),
             view(),
-            view().child(grid2(
-                compact,
-                field(
-                    st.t("products.form.opening_stock"),
-                    f.opening,
-                    || "0".to_owned(),
-                    f.err("opening_qty"),
-                    KeyboardType::Decimal,
-                    "product-stock",
+            view()
+                .child(grid2(
+                    compact,
+                    field(
+                        st.t("products.form.opening_stock"),
+                        f.opening,
+                        || "0".to_owned(),
+                        f.err("opening_qty"),
+                        KeyboardType::Decimal,
+                        "product-stock",
+                    ),
+                    field(
+                        st.t("editor.opening_cost"),
+                        f.opening_cost,
+                        st.t("editor.opening_cost_hint"),
+                        f.err("unit_cost"),
+                        KeyboardType::Decimal,
+                        "product-opening-cost",
+                    ),
+                ))
+                .child(
+                    grid2(
+                        compact,
+                        field(
+                            st.t("editor.opening_lot"),
+                            f.opening_lot,
+                            st.t("editor.opening_lot_hint"),
+                            f.err("lot"),
+                            KeyboardType::Default,
+                            "product-opening-lot",
+                        ),
+                        field(
+                            st.t("editor.opening_expiry"),
+                            f.opening_expiry,
+                            || "2027-06-30".to_owned(),
+                            f.err("expiry"),
+                            KeyboardType::Default,
+                            "product-opening-expiry",
+                        ),
+                    )
+                    .style_when(move || f.tracking.get() != 1, |s| s.hidden()),
+                )
+                .child(
+                    text_area(
+                        st.t("editor.opening_serials"),
+                        f.opening_serials,
+                        st.t("editor.opening_serials_hint"),
+                        90.0,
+                        "product-opening-serials",
+                    )
+                    .style_when(move || f.tracking.get() != 2, |s| s.hidden()),
                 ),
-                field(
-                    st.t("editor.opening_cost"),
-                    f.opening_cost,
-                    st.t("editor.opening_cost_hint"),
-                    f.err("unit_cost"),
-                    KeyboardType::Decimal,
-                    "product-opening-cost",
-                ),
-            )),
         ));
     }
+    out = out.child(section(
+        st,
+        Icon::Layers,
+        "editor.card.tracking",
+        Some("editor.card.tracking.help"),
+        view(),
+        view().child(segmented(
+            vec![
+                (
+                    0u8,
+                    Box::new(st.t("editor.tracking.none")) as Box<dyn Fn() -> String>,
+                ),
+                (1, Box::new(st.t("editor.tracking.lot"))),
+                (2, Box::new(st.t("editor.tracking.serial"))),
+            ],
+            f.tracking,
+        )),
+    ));
     out.child(section(
         st,
         Icon::Bell,

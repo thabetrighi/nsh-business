@@ -7,9 +7,10 @@ use nb_i18n::tr_args;
 use nb_store::repo::catalog::{ProductRow, StockState};
 use nb_store::repo::org::Warehouse;
 use nb_store::usecases::inventory::{
-    CountRow, MovementQuery, MovementView, StockPage, StockQuery, TransferInput, TransferLineInput,
-    TransferRow, cancel_count, close_count, count_detail, list_counts, list_transfers, movements,
-    open_count, receive_transfer, record_count, send_transfer, stock_overview,
+    CountRow, ExpiringLot, MovementQuery, MovementView, StockPage, StockQuery, TransferInput,
+    TransferLineInput, TransferRow, cancel_count, close_count, count_detail, expiring_lots,
+    list_counts, list_transfers, movements, open_count, receive_transfer, record_count,
+    send_transfer, stock_overview,
 };
 use nsh_core::element::{AnyElement, KeyboardType, Owner, View};
 use nsh_core::prelude::*;
@@ -320,20 +321,24 @@ pub fn stock_page(st: AppState, compact: bool) -> View {
             &[("count", &st.fmt().integer(i64::from(data.get().total)))],
         )
     };
-    let body = view().gap(px(16.0)).child(kpis).child(
-        card()
-            .min_h(px(420.0))
-            .child(toolbar)
-            .child(
-                view()
-                    .flex_1()
-                    .min_h(px(360.0))
-                    .border_t_1()
-                    .border_color(Tone::Border.color())
-                    .child(grid),
-            )
-            .child(table_footer(count, view())),
-    );
+    let body = view()
+        .gap(px(16.0))
+        .child(kpis)
+        .child(expiry_card(st))
+        .child(
+            card()
+                .min_h(px(420.0))
+                .child(toolbar)
+                .child(
+                    view()
+                        .flex_1()
+                        .min_h(px(360.0))
+                        .border_t_1()
+                        .border_color(Tone::Border.color())
+                        .child(grid),
+                )
+                .child(table_footer(count, view())),
+        );
     page(
         st,
         Route::Inventory,
@@ -724,6 +729,7 @@ fn new_transfer(st: AppState, close: impl Fn() + Clone + 'static) -> View {
                             product_id: p.id,
                             qty: l.qty.get_untracked(),
                             unit: String::new(),
+                            tracked: Default::default(),
                         })
                     })
                     .collect(),
@@ -1538,4 +1544,92 @@ fn count_sheet(st: AppState, id: String, compact: bool, back: impl Fn() + Clone 
         ))
         .child(entry)
         .child(lines)
+}
+
+/// Lots in stock that expire within 30 days, or have expired (M6.11);
+/// hidden when there are none.
+fn expiry_card(st: AppState) -> View {
+    let lots = resource(
+        move || {
+            st.session.get()?;
+            Some(st.data_rev.get())
+        },
+        move |_, _| {
+            let db = st.db();
+            async move { db.call(move |s| expiring_lots(s, 30)).await }
+        },
+    );
+    let list = computed(move || {
+        lots.with(|l: Option<&Vec<ExpiringLot>>| l.cloned())
+            .unwrap_or_default()
+    });
+    let card = dynamic(move || {
+        let items = list.get();
+        if items.is_empty() {
+            return view().into_element();
+        }
+        let mut rows = view();
+        for (i, l) in items.into_iter().take(8).enumerate() {
+            let (status, key) = if l.days_left < 0 {
+                (Status::Danger, "inventory.expired")
+            } else {
+                (Status::Warning, "inventory.expires_in")
+            };
+            let days = l.days_left.max(0);
+            let qty = Quantity::from_milli(l.qty_milli);
+            let mut row = view()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .px(px(16.0))
+                .py(px(10.0))
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .gap(px(2.0))
+                        .child(label_line(
+                            {
+                                let n = l.product.clone();
+                                move || n.clone()
+                            },
+                            ty::SM,
+                            FontWeight::SEMIBOLD,
+                            Tone::Ink,
+                        ))
+                        .child(label_line(
+                            {
+                                let t = format!("{} · {} · {}", l.lot, l.warehouse, l.expiry);
+                                move || t.clone()
+                            },
+                            ty::XS,
+                            FontWeight::NORMAL,
+                            Tone::Muted,
+                        )),
+                )
+                .child(figure(
+                    move || st.fmt().quantity(qty, 3),
+                    ty::SM,
+                    FontWeight::SEMIBOLD,
+                    || Tone::Ink,
+                ))
+                .child(badge(status, None, move || {
+                    tr_args(st.lang(), key, &[("days", &st.fmt().integer(days))])
+                }));
+            if i > 0 {
+                row = row.border_t_1().border_color(Tone::Border.color());
+            }
+            rows = rows.child(row);
+        }
+        card()
+            .child(card_header_icon(
+                Some(Icon::Bell),
+                st.t("inventory.expiring"),
+                Some(Box::new(st.t("inventory.expiring.help"))),
+                view(),
+            ))
+            .child(rows.border_t_1().border_color(Tone::Border.color()))
+            .into_element()
+    });
+    view().child(card)
 }

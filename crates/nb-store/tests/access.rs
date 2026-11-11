@@ -82,6 +82,7 @@ fn adjust_input(product: &str, wh: &str, approval: Option<String>) -> AdjustInpu
         reason: "casse".into(),
         may_go_negative: false,
         approval,
+        tracked: Default::default(),
     }
 }
 
@@ -121,6 +122,7 @@ fn team(s: &mut Store, setup: &SetupResult) -> Result<Team, Error> {
         warehouse_id: setup.warehouse.to_string(),
         qty: "10".into(),
         unit_cost_minor: 9_000,
+        tracked: Default::default(),
     });
     let product = create_product(s, meta(setup, "product.create"), p)?.id;
     Ok(Team {

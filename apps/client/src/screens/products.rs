@@ -804,13 +804,16 @@ pub fn products(st: AppState, compact: bool) -> View {
 
     let importing = signal(false);
     let actions = if compact {
-        view().child(button(
-            Variant::Primary,
-            Size::Md,
-            Some(Icon::Plus),
-            st.t("products.add"),
-            move || editor.set(Some(Target::New)),
-        ))
+        view().child(
+            button(
+                Variant::Primary,
+                Size::Md,
+                Some(Icon::Plus),
+                st.t("products.add"),
+                move || editor.set(Some(Target::New)),
+            )
+            .test_id("products-add"),
+        )
     } else {
         view()
             .child(
@@ -823,13 +826,16 @@ pub fn products(st: AppState, compact: bool) -> View {
                 )
                 .test_id("products-import"),
             )
-            .child(button(
-                Variant::Primary,
-                Size::Md,
-                Some(Icon::Plus),
-                st.t("products.add"),
-                move || editor.set(Some(Target::New)),
-            ))
+            .child(
+                button(
+                    Variant::Primary,
+                    Size::Md,
+                    Some(Icon::Plus),
+                    st.t("products.add"),
+                    move || editor.set(Some(Target::New)),
+                )
+                .test_id("products-add"),
+            )
     };
 
     let count = move || {
@@ -887,13 +893,16 @@ pub fn products(st: AppState, compact: bool) -> View {
                 .style_when(move || editor.get().is_some(), |s| s.hidden())
                 .child(list),
         )
-        .child(dynamic(move || match editor.get() {
-            Some(target) => scroll()
+        // The scroll area stays put (a sized box); only its content changes.
+        .child(
+            scroll()
                 .flex_1()
-                .child(product_editor(st, target, compact, move || {
-                    editor.set(None)
-                }))
-                .into_element(),
-            None => view().into_element(),
-        }))
+                .style_when(move || editor.get().is_none(), |s| s.hidden())
+                .child(dynamic(move || match editor.get() {
+                    Some(target) => {
+                        product_editor(st, target, compact, move || editor.set(None)).into_element()
+                    }
+                    None => view().into_element(),
+                })),
+        )
 }

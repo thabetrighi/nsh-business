@@ -237,9 +237,156 @@ pub fn available(on_hand: Quantity, reserved: Quantity) -> Quantity {
     Quantity::new(on_hand.decimal() - reserved.decimal())
 }
 
+/// A lot's stock in one warehouse, for allocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LotStock {
+    pub lot: String,
+    /// ISO date, or none.
+    pub expiry: Option<String>,
+    pub qty: Quantity,
+}
+
+/// Which lots a quantity leaves from: first expiring first out (M6.8);
+/// lots without expiry go last. Expired lots (expiry before `today`) are
+/// skipped unless `include_expired` (losses, waste).
+pub fn fefo(
+    lots: &[LotStock],
+    needed: Quantity,
+    today: &str,
+    include_expired: bool,
+) -> Result<Vec<(String, Quantity)>, RuleError> {
+    let mut usable: Vec<&LotStock> = lots
+        .iter()
+        .filter(|l| l.qty.decimal().is_sign_positive() && !l.qty.is_zero())
+        .filter(|l| include_expired || l.expiry.as_deref().is_none_or(|e| e >= today))
+        .collect();
+    usable.sort_by(|a, b| match (&a.expiry, &b.expiry) {
+        (Some(x), Some(y)) => x.cmp(y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    let mut left = needed.decimal();
+    let mut out = Vec::new();
+    for l in usable {
+        if left.is_zero() {
+            break;
+        }
+        let take = left.min(l.qty.decimal());
+        out.push((l.lot.clone(), Quantity::new(take)));
+        left -= take;
+    }
+    if !left.is_zero() {
+        return Err(RuleError::on("lot", "lot.insufficient"));
+    }
+    Ok(out)
+}
+
+/// Checks the serial numbers given for a quantity of a serial-tracked
+/// product: one per unit, none twice, none empty.
+pub fn check_serials(qty: Quantity, serials: &[String]) -> Result<Vec<String>, RuleError> {
+    let clean: Vec<String> = serials
+        .iter()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let whole = qty
+        .fits_precision(0)
+        .then(|| qty.decimal().normalize().to_string().parse::<usize>().ok())
+        .flatten();
+    if whole != Some(clean.len()) {
+        return Err(RuleError::on("serials", "serial.count"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if clean.iter().any(|s| !seen.insert(s.to_uppercase())) {
+        return Err(RuleError::on("serials", "serial.duplicate"));
+    }
+    Ok(clean)
+}
+
+/// A valid expiry date (`YYYY-MM-DD`).
+pub fn check_expiry(date: &str) -> Result<(), RuleError> {
+    let b = date.as_bytes();
+    let ok = b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && date[..4]
+            .parse::<u32>()
+            .is_ok_and(|y| (2000..=2200).contains(&y))
+        && date[5..7]
+            .parse::<u32>()
+            .is_ok_and(|m| (1..=12).contains(&m))
+        && date[8..]
+            .parse::<u32>()
+            .is_ok_and(|d| (1..=31).contains(&d));
+    if ok {
+        Ok(())
+    } else {
+        Err(RuleError::on("expiry", "lot.expiry_format"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_expiring_first_out() -> Result<(), RuleError> {
+        let lot = |l: &str, e: Option<&str>, q: i64| LotStock {
+            lot: l.into(),
+            expiry: e.map(Into::into),
+            qty: Quantity::whole(q),
+        };
+        let lots = [
+            lot("C", None, 10),
+            lot("B", Some("2026-12-01"), 3),
+            lot("A", Some("2026-11-20"), 2),
+            lot("X", Some("2026-11-01"), 5),
+        ];
+        let today = "2026-11-11";
+        assert_eq!(
+            fefo(&lots, Quantity::whole(4), today, false)?,
+            vec![
+                ("A".into(), Quantity::whole(2)),
+                ("B".into(), Quantity::whole(2))
+            ]
+        );
+        assert_eq!(
+            fefo(&lots, Quantity::whole(2), today, true)?,
+            vec![("X".into(), Quantity::whole(2))],
+            "losses take the expired first"
+        );
+        assert_eq!(fefo(&lots, Quantity::whole(14), today, false)?.len(), 3);
+        assert_eq!(
+            fefo(&lots, Quantity::whole(16), today, false),
+            Err(RuleError::on("lot", "lot.insufficient"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serial_numbers_and_dates() {
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            check_serials(Quantity::whole(2), &s(&[" SN1", "SN2 "])),
+            Ok(s(&["SN1", "SN2"]))
+        );
+        assert_eq!(
+            check_serials(Quantity::whole(2), &s(&["SN1"])),
+            Err(RuleError::on("serials", "serial.count"))
+        );
+        assert_eq!(
+            check_serials(Quantity::whole(2), &s(&["sn1", "SN1"])),
+            Err(RuleError::on("serials", "serial.duplicate"))
+        );
+        assert_eq!(
+            check_serials(Quantity::from_milli(1_500), &s(&["A"])),
+            Err(RuleError::on("serials", "serial.count"))
+        );
+        assert!(check_expiry("2027-03-31").is_ok());
+        assert!(check_expiry("31/03/2027").is_err());
+        assert!(check_expiry("2027-13-01").is_err());
+    }
 
     #[test]
     fn counts_and_transfers() -> Result<(), RuleError> {

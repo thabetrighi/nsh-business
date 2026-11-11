@@ -33,6 +33,9 @@ pub struct AdjustInput {
     /// A supervisor's approval (`stock.adjust`) for a user who lacks it.
     #[serde(default)]
     pub approval: Option<String>,
+    /// Lot (in, or a chosen lot out) or serial numbers.
+    #[serde(default)]
+    pub tracked: crate::usecases::tracked::Tracked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +97,7 @@ pub fn adjust_stock(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Resu
         // Adjustments in carry a cost but do not change the average unless priced.
         let after = before.apply(kind, qty, None, warehouse.policy(), may_go_negative)?;
         let number = w.next_number(DocKind::Adjustment, &branch.id, &branch.code)?;
-        stock::append(
+        let movement = stock::append(
             w,
             product_id,
             warehouse_id,
@@ -104,6 +107,16 @@ pub fn adjust_stock(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Resu
             Some(&number),
             Some(input.reason.trim()),
             after,
+        )?;
+        crate::usecases::tracked::record(
+            w,
+            movement,
+            product_id,
+            warehouse_id,
+            kind,
+            qty,
+            &input.tracked,
+            true,
         )?;
         let value = qty.times_price(cost)?;
         if !value.is_zero() {
