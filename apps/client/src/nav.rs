@@ -25,6 +25,11 @@ macro_rules! routes {
                 match self { $(Route::$name => concat!("nav.", $code)),* }
             }
 
+            /// Message key of the line under its title.
+            pub fn desc_key(self) -> &'static str {
+                match self { $(Route::$name => concat!("nav.", $code, ".desc")),* }
+            }
+
             pub fn icon(self) -> Icon {
                 match self { $(Route::$name => Icon::$icon),* }
             }
@@ -243,6 +248,11 @@ mod tests {
         for lang in nb_i18n::Lang::ALL {
             for &r in Route::ALL {
                 assert_ne!(nb_i18n::tr(lang, r.key()), r.key(), "{lang:?} {r:?}");
+                assert_ne!(
+                    nb_i18n::tr(lang, r.desc_key()),
+                    r.desc_key(),
+                    "{lang:?} {r:?}"
+                );
             }
             for s in SECTIONS {
                 assert_ne!(nb_i18n::tr(lang, s.key), s.key, "{lang:?} {}", s.key);

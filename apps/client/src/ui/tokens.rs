@@ -172,8 +172,8 @@ impl Corners {
 /// The interface font (bundled in `assets/fonts`, all OFL).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UiFont {
-    #[default]
     Cairo,
+    #[default]
     Tajawal,
     Almarai,
     ReadexPro,
@@ -182,8 +182,8 @@ pub enum UiFont {
 
 impl UiFont {
     pub const ALL: [UiFont; 5] = [
-        UiFont::Cairo,
         UiFont::Tajawal,
+        UiFont::Cairo,
         UiFont::Almarai,
         UiFont::ReadexPro,
         UiFont::IbmPlex,
@@ -232,7 +232,7 @@ thread_local! {
         text: TextSize::Default,
         density: Density::Comfortable,
         corners: Corners::Soft,
-        font: UiFont::Cairo,
+        font: UiFont::Tajawal,
     }) };
 }
 

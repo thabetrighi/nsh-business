@@ -66,6 +66,9 @@ pub struct StockQuery {
     pub text: String,
     pub state: Option<StockState>,
     pub limit: u32,
+    /// Rows of the matching ones to skip (paging).
+    #[serde(default)]
+    pub offset: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,7 +150,7 @@ pub fn stock_overview(store: &Store, q: &StockQuery) -> Result<StockPage> {
             page.value_minor += row.value_minor.max(0);
             if q.state.is_none_or(|s| s == row.state) {
                 page.total += 1;
-                if page.rows.len() < q.limit.clamp(1, 5_000) as usize {
+                if page.total > q.offset && page.rows.len() < q.limit.clamp(1, 5_000) as usize {
                     page.rows.push(row);
                 }
             }

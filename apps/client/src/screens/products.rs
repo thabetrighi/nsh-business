@@ -23,7 +23,7 @@ use crate::ui::kit::{
 use crate::ui::overlay::{modal, show_toast};
 use crate::ui::popup::{Action, dropdown, row_menu};
 use crate::ui::surface::{card, empty_state, page_pad};
-use crate::ui::table::{Column, Selection, Sort, Width, table, table_footer};
+use crate::ui::table::{Column, Paging, Selection, Sort, Width, pager, table};
 use crate::ui::tokens::{Status, Tone, control, radius, sp, ty};
 use nsh_base::{menu, menu_item};
 use nsh_core::element::{Align, Placement};
@@ -145,6 +145,15 @@ pub fn products(st: AppState, compact: bool) -> View {
     let category = signal(usize::MAX);
     let sort = signal(None::<Sort>);
     let selection = Selection::new();
+    let paging = Paging::new(25);
+    // Other filters or another order start again from the first page.
+    effect(move || {
+        query.with(|_| ());
+        filter.with(|_| ());
+        category.with(|_| ());
+        sort.with(|_| ());
+        paging.reset();
+    });
 
     // The categories, then the page of rows for the current filters (SQL).
     let cats = resource(
@@ -182,8 +191,8 @@ pub fn products(st: AppState, compact: bool) -> View {
                     },
                     sort,
                     desc,
-                    limit: 5_000,
-                    offset: 0,
+                    limit: paging.size.get(),
+                    offset: paging.offset(),
                 },
                 st.data_rev.get(),
             ))
@@ -838,19 +847,6 @@ pub fn products(st: AppState, compact: bool) -> View {
             )
     };
 
-    let count = move || {
-        let n = total.get();
-        nb_i18n::tr_args(
-            st.lang(),
-            if n == 1 {
-                "table.result_one"
-            } else {
-                "table.results"
-            },
-            &[("count", &st.fmt().integer(i64::from(n)))],
-        )
-    };
-
     let list = view()
         .flex_1()
         .w_full()
@@ -867,18 +863,15 @@ pub fn products(st: AppState, compact: bool) -> View {
         .child(quick_row)
         .child(
             card()
-                .flex_1()
-                .min_h(px(360.0))
                 .child(toolbar)
                 .child(chips_row)
                 .child(
                     view()
-                        .flex_1()
                         .border_t_1()
                         .border_color(Tone::Border.color())
                         .child(body),
                 )
-                .child(table_footer(count, view())),
+                .child(pager(st, paging, move || total.get(), compact)),
         )
         .child(modal(importing, compact, move || {
             crate::screens::catalog::import_dialog(st, move || importing.set(false)).into_element()
@@ -887,8 +880,10 @@ pub fn products(st: AppState, compact: bool) -> View {
     // waits underneath, as it was.
     view()
         .flex_1()
+        // The list scrolls as a page (its table is as tall as its page of
+        // rows), with the bar showing where the reader is.
         .child(
-            view()
+            scroll()
                 .flex_1()
                 .style_when(move || editor.get().is_some(), |s| s.hidden())
                 .child(list),

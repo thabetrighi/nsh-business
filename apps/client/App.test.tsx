@@ -78,13 +78,13 @@ test("products: status tabs filter the table and clearing restores it", async ()
   await app.waitFor("text:Ventes brutes");
   await app.press("text:Catalogue");
   await app.press("id:nav-products");
-  await app.waitUntil(shows("2 000 résultats"));
+  await app.waitUntil(shows("1–25 sur 2 000"));
   await app.press("id:tab-3");
-  await app.waitUntil(shows("72 résultats"));
+  await app.waitUntil(shows("1–25 sur 72"));
   await app.type("id:product-search", "zzz");
   await app.waitFor("text:Aucun résultat");
   await app.press("text:Effacer");
-  await app.waitUntil(shows("2 000 résultats"));
+  await app.waitUntil(shows("1–25 sur 2 000"));
 });
 
 test("appearance settings apply at once and keep the page", async () => {
@@ -129,7 +129,7 @@ test("the database's rules come back under their fields", async () => {
   await app.waitFor("text:Ventes brutes");
   await app.press("text:Catalogue");
   await app.press("id:nav-products");
-  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 000 résultats"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 2 000"));
   await app.press("text:Ajouter un produit");
   await app.waitFor("text:Identification", { timeout: 15000 });
   await app.type("id:product-name", "Doublon");
@@ -150,9 +150,9 @@ test("the database's rules come back under their fields", async () => {
   await app.clear("id:product-stock");
   await app.type("id:product-stock", "3");
   await app.press("id:product-save");
-  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 001 résultats"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 2 001"));
   await app.type("id:product-search", "doublon");
-  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1 résultat"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–1 sur 1"));
 });
 
 test("the editor generates a barcode, packaging, list prices and variants", async () => {
@@ -160,7 +160,7 @@ test("the editor generates a barcode, packaging, list prices and variants", asyn
   await app.waitFor("text:Ventes brutes");
   await app.press("text:Catalogue");
   await app.press("id:nav-products");
-  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 000 résultats"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 2 000"));
   await app.press("text:Ajouter un produit");
   await app.waitFor("text:Identification", { timeout: 15000 });
   await app.type("id:product-name", "T-shirt coton");
@@ -187,7 +187,7 @@ test("the editor generates a barcode, packaging, list prices and variants", asyn
   await app.waitUntil(() => app.texts().some((t) => t.includes("T-shirt coton") && t.includes("enregistré")));
   await app.type("id:product-search", "t-shirt coton");
   // The product and its three variants.
-  await app.waitUntil(() => app.texts().some((t) => plain(t) === "4 résultats"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–4 sur 4"));
 });
 
 test("the owner adds a cashier with a PIN, locks the screen, and the cashier signs in", async () => {
@@ -261,7 +261,7 @@ test("importing products checks every line before writing", async () => {
   await app.waitFor("text:Ventes brutes");
   await app.press("text:Catalogue");
   await app.press("id:nav-products");
-  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 000 résultats"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 2 000"));
   await app.press("id:products-import");
   // One line only (headless typing ends a line with the return key): no rows.
   await app.type("id:import-text", "Nom;Prix");
@@ -276,7 +276,7 @@ test("importing products checks every line before writing", async () => {
   await app.clear("id:import-text");
   await app.paste("id:import-text", { text: "Nom;Prix;Catégorie\nCafé moulu;450;Épicerie\nThé vert;220;Épicerie\n" });
   await app.press("id:import-run");
-  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 002 résultats"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 2 002"));
 });
 
 test("tax classes and scale labels are the store's settings", async () => {
@@ -304,9 +304,9 @@ test("stock levels and a stock count", async () => {
   await app.press("text:Stock");
   await app.press("id:nav-inventory");
   await app.waitFor("text:Valeur du stock");
-  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 000 résultats"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 2 000"));
   await app.press("text:Stock faible");
-  await app.waitUntil(() => app.texts().some((t) => plain(t) === "129 résultats"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 129"));
   // A count: 5 units of the first product found, then closed.
   await app.press("id:tab-stock_counts");
   await app.press("id:count-open");
@@ -344,6 +344,7 @@ test("a manual entry, its reversal, and the trial balance", async () => {
   await app.type("id:entry-credit-1", "1500");
   await app.waitFor("text:Équilibrée");
   await app.press("id:entry-post");
+  await app.waitUntil(() => app.texts().some((t) => /^Écriture OD-01-\d\d-A\d+ passée$/.test(plain(t))));
   await app.waitFor("text:Apport en caisse");
   // Reversed, it cancels itself out.
   await app.press("id:entry-reverse-0");
@@ -356,4 +357,22 @@ test("a manual entry, its reversal, and the trial balance", async () => {
   await app.press("id:tab-accounts");
   await app.waitFor("text:Caisses et banques");
   await app.waitFor("id:account-531");
+});
+
+test("the products table pages through the catalog", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Catalogue");
+  await app.press("id:nav-products");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 2 000"));
+  await app.press("id:page-next");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "26–50 sur 2 000"));
+  await app.press("id:page-80");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1 976–2 000 sur 2 000"));
+  // A filter starts again from the first page.
+  await app.press("id:tab-2");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 129"));
+  await app.press("id:page-size");
+  await app.press("text:100");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–100 sur 129"));
 });

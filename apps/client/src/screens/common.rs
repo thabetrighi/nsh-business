@@ -27,7 +27,8 @@ pub fn page_head(
         Some(route.icon()),
         eyebrow,
         st.t(route.key()),
-        subtitle.map(|k| Box::new(st.t(k)) as Box<dyn Fn() -> String>),
+        // Every page says what it is for: its own line, or its route's.
+        Some(Box::new(st.t(subtitle.unwrap_or(route.desc_key()))) as Box<dyn Fn() -> String>),
         actions,
         compact,
     )

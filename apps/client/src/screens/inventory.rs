@@ -27,7 +27,7 @@ use crate::ui::kit::{Size, Variant, badge, button, figure, icon_button, label, l
 use crate::ui::overlay::{dialog_frame, modal, show_toast};
 use crate::ui::popup::dropdown;
 use crate::ui::surface::{card, card_header_icon, empty_state, kpi};
-use crate::ui::table::{Column, Sort, Width, table, table_footer};
+use crate::ui::table::{Column, Paging, Sort, Width, pager, table};
 use crate::ui::tokens::{Status, Tone, radius, ty};
 
 fn first_error(st: AppState, e: &DbError) -> String {
@@ -109,6 +109,13 @@ pub fn stock_page(st: AppState, compact: bool) -> View {
     let text = signal(String::new());
     let state: Signal<Option<StockState>> = signal(None);
     let sort = signal(None::<Sort>);
+    let paging = Paging::new(25);
+    effect(move || {
+        chosen.with(|_| ());
+        text.with(|_| ());
+        state.with(|_| ());
+        paging.reset();
+    });
     let page_data = resource(
         move || {
             st.session.get()?;
@@ -118,7 +125,8 @@ pub fn stock_page(st: AppState, compact: bool) -> View {
                     warehouse_id: wh,
                     text: text.get(),
                     state: state.get(),
-                    limit: 5_000,
+                    limit: paging.size.get(),
+                    offset: paging.offset(),
                 },
                 st.data_rev.get(),
             ))
@@ -314,30 +322,20 @@ pub fn stock_page(st: AppState, compact: bool) -> View {
         )
         .into_element()
     });
-    let count = move || {
-        tr_args(
-            st.lang(),
-            "table.results",
-            &[("count", &st.fmt().integer(i64::from(data.get().total)))],
-        )
-    };
     let body = view()
         .gap(px(16.0))
         .child(kpis)
         .child(expiry_card(st))
         .child(
             card()
-                .min_h(px(420.0))
                 .child(toolbar)
                 .child(
                     view()
-                        .flex_1()
-                        .min_h(px(360.0))
                         .border_t_1()
                         .border_color(Tone::Border.color())
                         .child(grid),
                 )
-                .child(table_footer(count, view())),
+                .child(pager(st, paging, move || data.get().total, compact)),
         );
     page(
         st,

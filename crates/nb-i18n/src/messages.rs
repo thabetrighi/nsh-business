@@ -81,6 +81,23 @@ mod tests {
         }
     }
 
+    /// Placeholders are `{name}`: Fluent's `{ $name }` would show as such.
+    #[test]
+    fn placeholders_are_plain_names() {
+        for lang in Lang::ALL {
+            for key in all_keys() {
+                let t = tr(lang, key);
+                for p in t.split('{').skip(1).filter_map(|p| p.split_once('}')) {
+                    assert!(
+                        p.0.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                        "{key} in {lang:?}: {{{}}}",
+                        p.0
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn placeholders_match_across_languages() {
         let placeholders = |s: &str| -> BTreeSet<String> {

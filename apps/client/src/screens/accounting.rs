@@ -29,6 +29,7 @@ use crate::ui::kit::{
 use crate::ui::overlay::{dialog_frame, modal, show_toast};
 use crate::ui::popup::dropdown;
 use crate::ui::surface::{card, card_header_icon, empty_state, kpi};
+use crate::ui::table::{Paging, pager};
 use crate::ui::tokens::{Status, Tone, ty};
 
 // ------------------------------------------------------------------ helpers
@@ -255,6 +256,13 @@ fn amount_cell(
 pub fn journal_page(st: AppState, compact: bool) -> View {
     let text = signal(String::new());
     let span = Span::this_year();
+    let paging = Paging::new(25);
+    effect(move || {
+        text.with(|_| ());
+        span.from.with(|_| ());
+        span.to.with(|_| ());
+        paging.reset();
+    });
     let data = resource(
         move || {
             st.session.get()?;
@@ -264,7 +272,8 @@ pub fn journal_page(st: AppState, compact: bool) -> View {
                     text: text.get(),
                     from,
                     to,
-                    limit: 200,
+                    limit: paging.size.get(),
+                    offset: paging.offset(),
                     ..Default::default()
                 },
                 st.data_rev.get(),
@@ -321,13 +330,6 @@ pub fn journal_page(st: AppState, compact: bool) -> View {
         }
         v.into_element()
     });
-    let count = move || {
-        tr_args(
-            st.lang(),
-            "table.results",
-            &[("count", &st.fmt().integer(i64::from(page_data.get().total)))],
-        )
-    };
     let body = card()
         .child(
             view()
@@ -344,14 +346,7 @@ pub fn journal_page(st: AppState, compact: bool) -> View {
                 .child(span_bar(st, span, compact)),
         )
         .child(list)
-        .child(
-            view()
-                .px(px(16.0))
-                .py(px(10.0))
-                .border_t_1()
-                .border_color(Tone::Border.color())
-                .child(label_line(count, ty::XS, FontWeight::NORMAL, Tone::Muted)),
-        );
+        .child(pager(st, paging, move || page_data.get().total, compact));
     view()
         .child(page(
             st,

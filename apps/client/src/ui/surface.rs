@@ -36,7 +36,8 @@ pub fn page_header_full(
         });
         return row.child(actions.flex_row().items_center().gap(px(8.0)));
     }
-    let mut heading = view().flex_1().min_w(px(0.0)).gap(px(2.0));
+    // Tajawal sets lines tight: the header's lines keep some air.
+    let mut heading = view().flex_1().min_w(px(0.0)).gap(px(5.0));
     if let Some(e) = eyebrow {
         heading = heading.child(label_line(e, ty::XS, FontWeight::SEMIBOLD, Tone::Primary));
     }

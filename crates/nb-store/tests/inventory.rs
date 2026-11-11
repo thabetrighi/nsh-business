@@ -90,6 +90,23 @@ fn overview_and_reservations() -> R {
         low.rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
         ["Beurre"]
     );
+    // A page of the list: the second row of three.
+    let second = stock_overview(
+        &s,
+        &StockQuery {
+            limit: 1,
+            offset: 1,
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(
+        (
+            second.total,
+            second.rows.len(),
+            second.rows[0].name.as_str()
+        ),
+        (3, 1, "Lait")
+    );
 
     let wh = setup.warehouse;
     let r1 = reserve(&mut s, meta(&setup, "reserve"), milk, wh, "4", "BC-1")?;
