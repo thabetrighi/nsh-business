@@ -391,7 +391,25 @@ test("a cash sale at the till, from opening to closing", async () => {
   await app.press("id:pos-item-1");
   await app.waitFor("id:cart-line-1");
   await app.press("id:cart-less-0");
-  await app.waitUntil(() => !app.texts().some((t) => plain(t).startsWith("2 ")));
+  await app.waitUntil(() => !app.texts().some((t) => plain(t).startsWith("2 × ")));
+  // Tap the quantity: type it, change the price and the name.
+  await app.press("id:cart-qty-0");
+  await app.waitFor("id:line-apply");
+  await app.clear("id:line-qty");
+  await app.type("id:line-qty", "3");
+  await app.clear("id:line-price");
+  await app.type("id:line-price", "100");
+  await app.clear("id:line-name");
+  await app.type("id:line-name", "Biscuits en promo");
+  await app.press("id:line-apply");
+  await app.waitFor("text:Biscuits en promo");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "3 × 100,00 DA"));
+  // An item not in the catalog.
+  await app.press("id:pos-free");
+  await app.type("id:free-name", "Sac cabas");
+  await app.type("id:free-price", "20");
+  await app.press("id:free-add");
+  await app.waitFor("text:Sac cabas");
   await app.press("id:pos-pay");
   await app.waitFor("id:pay-confirm");
   await app.clear("id:pay-given");

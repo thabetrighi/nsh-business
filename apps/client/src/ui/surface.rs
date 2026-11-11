@@ -27,7 +27,18 @@ pub fn page_header_full(
         // Phones: the line under the title on its own, the actions under it.
         let mut col = view().w_full().gap(px(10.0));
         if let Some(s) = subtitle {
-            col = col.child(label(s, ty::SM, FontWeight::NORMAL, Tone::Muted));
+            // In a row with a shrinkable cell, as card headers: the text
+            // wraps to the width (a bare child keeps its one-line width).
+            // The start inset absorbs Arabic lines measured a few points
+            // narrower than drawn (their first letter was cut off).
+            col = col.child(view().w_full().flex_row().child(
+                view().flex_1().min_w(px(0.0)).ps(px(10.0)).child(label(
+                    s,
+                    ty::SM,
+                    FontWeight::NORMAL,
+                    Tone::Muted,
+                )),
+            ));
         }
         return col.child(actions.flex_row().flex_wrap().items_center().gap(px(8.0)));
     }

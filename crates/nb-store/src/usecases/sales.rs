@@ -322,6 +322,8 @@ pub fn close_shift(
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SaleLineInput {
+    /// Empty: an item not in the catalog, sold under `name` at
+    /// `unit_price_minor` with `tax_bps` (no stock moves).
     pub product_id: String,
     /// In `unit` (decimal text).
     pub qty: String,
@@ -337,6 +339,21 @@ pub struct SaleLineInput {
     pub discount_minor: Option<i64>,
     #[serde(default)]
     pub tracked: Tracked,
+    /// The name printed on the line, if not the product's.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The VAT rate of an item not in the catalog.
+    #[serde(default)]
+    pub tax_bps: Option<i64>,
+}
+
+/// What a line sells: a product of the catalog, or a typed item.
+struct Priced {
+    product: Option<catalog::ProductRow>,
+    name: String,
+    unit: String,
+    base_qty: Quantity,
+    tax_bps: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,7 +425,12 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
             .replace(',', ".")
             .parse()
             .map_err(|_| RuleError::on("qty", "invalid_quantity"))?;
-        parsed.push((parse_id::<ProductId>(&l.product_id)?, qty));
+        let product = if l.product_id.trim().is_empty() {
+            None
+        } else {
+            Some(parse_id::<ProductId>(&l.product_id)?)
+        };
+        parsed.push((product, qty));
     }
     let mut given = Vec::with_capacity(input.payments.len());
     for p in &input.payments {
@@ -440,10 +462,42 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
             .ok_or(Error::from(RuleError::on("register", "shift.none_open")))?;
         let approval = input.approval.as_deref().map(parse_id).transpose()?;
 
-        // The cart, priced from the catalog.
-        let mut products = Vec::with_capacity(parsed.len());
+        // The cart, priced from the catalog (or as typed for items not in it).
+        let mut products: Vec<Priced> = Vec::with_capacity(parsed.len());
         let mut lines = Vec::with_capacity(parsed.len());
         for ((product_id, qty), l) in parsed.iter().zip(&input.lines) {
+            let name = l
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned);
+            let Some(product_id) = product_id else {
+                // An item not in the catalog: its name, price and rate as typed.
+                let name = name.ok_or(Error::from(RuleError::on("name", "sale.free_name")))?;
+                let price = l
+                    .unit_price_minor
+                    .ok_or(Error::from(RuleError::on("price", "sale.free_price")))?;
+                let tax_bps = l.tax_bps.unwrap_or(0);
+                if !(0..=10_000).contains(&tax_bps) {
+                    return Err(RuleError::on("tax_rate", "invalid_value").into());
+                }
+                lines.push(CartLine {
+                    qty: *qty,
+                    unit_price: Money::from_minor(money_field("price", price)?, currency),
+                    min_price: None,
+                    tax_rate: Rate::from_bps(tax_bps),
+                    discount: discount(l.discount_bps, l.discount_minor, currency),
+                });
+                products.push(Priced {
+                    product: None,
+                    name,
+                    unit: if l.unit.is_empty() { "pc".into() } else { l.unit.clone() },
+                    base_qty: *qty,
+                    tax_bps,
+                });
+                continue;
+            };
             let p = catalog::get(w.tx(), *product_id)?;
             if !p.active {
                 return Err(RuleError::on("product", "sale.product_inactive").into());
@@ -475,7 +529,13 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
                 tax_rate: Rate::from_bps(p.tax_bps),
                 discount: discount(l.discount_bps, l.discount_minor, currency),
             });
-            products.push((p, unit, base_qty));
+            products.push(Priced {
+                name: name.unwrap_or_else(|| p.name.clone()),
+                tax_bps: p.tax_bps,
+                product: Some(p),
+                unit,
+                base_qty,
+            });
         }
         let cart = Cart {
             mode: TaxMode::Inclusive,
@@ -503,13 +563,19 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
         let mut cost = Money::zero(currency);
         let mut costs = Vec::with_capacity(products.len());
         let mut movements = Vec::with_capacity(products.len());
-        for ((p, _, base_qty), l) in products.iter().zip(&input.lines) {
-            let product_id: ProductId = parse_id(&p.id)?;
-            if catalog::kind(p) == nb_domain::product::ProductKind::Service {
+        for (item, l) in products.iter().zip(&input.lines) {
+            let base_qty = &item.base_qty;
+            let Some(p) = item
+                .product
+                .as_ref()
+                .filter(|p| catalog::kind(p) != nb_domain::product::ProductKind::Service)
+            else {
+                // Services and items not in the catalog move no stock.
                 costs.push(Money::zero(currency));
                 movements.push(None);
                 continue;
-            }
+            };
+            let product_id: ProductId = parse_id(&p.id)?;
             let before = stock::balance(w.tx(), product_id, warehouse_id, currency)?;
             let after = before.apply(
                 MovementKind::Sale,
@@ -549,14 +615,15 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
                 w.now(), w.actor_text(), w.device().id.to_string()
             ],
         )?;
-        for (i, ((p, unit, base_qty), t)) in products.iter().zip(&totals.lines).enumerate() {
+        for (i, (item, t)) in products.iter().zip(&totals.lines).enumerate() {
             w.tx().execute(
                 "INSERT INTO sale_lines (sale_id, position, product_id, name, unit, qty_milli, base_qty_milli, unit_price_minor,
                         line_discount_minor, sale_discount_minor, tax_bps, net_minor, tax_minor, gross_minor, unit_cost_minor, movement_id)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
-                    id, i64::try_from(i).unwrap_or(0), p.id, p.name, unit, to_milli(cart.lines[i].qty)?, to_milli(*base_qty)?,
-                    cart.lines[i].unit_price.minor(), t.line_discount.minor(), t.sale_discount.minor(), p.tax_bps,
+                    id, i64::try_from(i).unwrap_or(0), item.product.as_ref().map(|p| p.id.clone()), item.name, item.unit,
+                    to_milli(cart.lines[i].qty)?, to_milli(item.base_qty)?,
+                    cart.lines[i].unit_price.minor(), t.line_discount.minor(), t.sale_discount.minor(), item.tax_bps,
                     t.taxed.net.minor(), t.taxed.tax.minor(), t.taxed.gross.minor(), costs[i].minor(), movements[i]
                 ],
             )?;

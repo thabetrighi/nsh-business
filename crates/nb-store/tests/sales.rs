@@ -379,3 +379,48 @@ fn serial_numbers_leave_with_the_sale() -> R {
     let _: WarehouseId = setup.warehouse;
     healthy(&s)
 }
+
+#[test]
+fn items_not_in_the_catalog_and_renamed_lines() -> R {
+    let (mut s, setup) = store();
+    let reg = register(&s);
+    let milk = stocked(&mut s, &setup, "Lait", "10", 800, 1_190)?;
+    open_shift(&mut s, meta(&setup, "shift.open"), &reg, 0)?;
+    let mut input = sale(&setup, &reg, vec![(milk, "1")], vec![("cash", 5_000)]);
+    input.lines[0].name = Some("Lait demi-écrémé".into());
+    input.lines.push(SaleLineInput {
+        product_id: String::new(),
+        qty: "2".into(),
+        name: Some("Sac cabas".into()),
+        unit_price_minor: Some(1_000),
+        tax_bps: Some(1_900),
+        ..Default::default()
+    });
+    let r = complete_sale(&mut s, meta(&setup, "sale"), input.clone())?;
+    assert_eq!(r.total_minor, 1_190 + 2_000);
+    assert_eq!(
+        r.cost_minor, 800,
+        "a typed item has no cost and moves no stock"
+    );
+    let names: Vec<(String, Option<String>)> = s
+        .connection()
+        .prepare("SELECT name, product_id FROM sale_lines ORDER BY position")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(names[0].0, "Lait demi-écrémé");
+    assert_eq!(names[1], ("Sac cabas".into(), None));
+    // A typed item needs its name and its price.
+    let mut nameless = input.clone();
+    nameless.lines[1].name = None;
+    assert_eq!(
+        err(complete_sale(&mut s, meta(&setup, "sale"), nameless)),
+        ["sale.free_name"]
+    );
+    let mut priceless = input;
+    priceless.lines[1].unit_price_minor = None;
+    assert_eq!(
+        err(complete_sale(&mut s, meta(&setup, "sale"), priceless)),
+        ["sale.free_price"]
+    );
+    healthy(&s)
+}
