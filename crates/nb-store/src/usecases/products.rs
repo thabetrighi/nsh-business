@@ -2,7 +2,6 @@
 //! units, barcodes, prices, opening stock and the price history.
 
 use nb_core::{Decimal, Money, Quantity, Rate};
-use nb_domain::ledger::{Entry, Line};
 use nb_domain::product::{ProductDraft, ProductKind, ValidProduct};
 use nb_domain::stock::MovementKind;
 use nb_domain::units::{ProductUnit, UnitSet};
@@ -10,7 +9,7 @@ use nb_domain::{ProductId, RuleError, WarehouseId};
 use serde::{Deserialize, Serialize};
 
 use crate::repo::catalog::{self, ProductPage, ProductQuery, ProductRow};
-use crate::repo::{ledger, org, parse_id, stock};
+use crate::repo::{org, parse_id, stock};
 use crate::uow::{OpMeta, Writer};
 use crate::{Error, Result, Store};
 use nb_domain::access::{Permission, Target};
@@ -399,7 +398,7 @@ pub(crate) fn write_new(
     Ok((row, value))
 }
 
-/// The opening stock entry: 30 / 101 (provisional, gate G2).
+/// The opening stock entry (stock / opening equity).
 pub(crate) fn post_opening(
     w: &mut Writer<'_>,
     branch: &org::Branch,
@@ -407,21 +406,14 @@ pub(crate) fn post_opening(
     value: Money,
     memo: &str,
 ) -> Result<()> {
-    let entry = Entry::new(vec![Line::debit("30", value), Line::credit("101", value)])?;
-    let jnumber = w.next_number(
-        nb_domain::numbering::DocKind::Journal,
-        &branch.id,
-        &branch.code,
-    )?;
-    let date = crate::time::iso_date(w.now(), offset);
-    let header = ledger::Header {
-        number: &jnumber,
-        date: &date,
+    crate::usecases::accounting::post_operations(
+        w,
+        branch,
+        offset,
+        &[nb_domain::posting::Operation::StockOpening { value }],
         memo,
-        source: "stock.opening",
-        reverses: None,
-    };
-    ledger::post(w, w.org()?, header, &entry)?;
+        "stock.opening",
+    )?;
     Ok(())
 }
 

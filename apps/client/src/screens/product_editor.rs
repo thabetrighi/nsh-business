@@ -657,11 +657,16 @@ pub fn product_editor(
     let save = {
         let close = close.clone();
         let target = target.clone();
-        let meta = st.session.get_untracked().map(|s| s.meta("product.save"));
+        // One operation for this editor, made at the first save (the
+        // session may load after the editor opens): a retry or a double tap
+        // saves once.
+        let op: std::rc::Rc<std::cell::Cell<Option<nb_store::OpMeta>>> = Default::default();
         move || {
-            let (Some(session), Some(meta)) = (st.session.get_untracked(), meta) else {
+            let Some(session) = st.session.get_untracked() else {
                 return;
             };
+            let meta = op.get().unwrap_or_else(|| session.meta("product.save"));
+            op.set(Some(meta));
             if f.saving.get_untracked() {
                 return;
             }

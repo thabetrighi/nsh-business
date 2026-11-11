@@ -185,7 +185,7 @@ fn journal_entries_are_balanced_immutable_and_reversible() -> R {
         &mut s,
         meta(&setup, "journal.post"),
         "Apport",
-        vec![line("53", 1_000, 0), line("101", 0, 900)],
+        vec![line("531", 1_000, 0), line("101", 0, 900)],
     )
     .err()
     .ok_or(Error::NotFound("error"))?;
@@ -194,16 +194,26 @@ fn journal_entries_are_balanced_immutable_and_reversible() -> R {
         &mut s,
         meta(&setup, "journal.post"),
         "Apport",
-        vec![line("53", 1_000, 0), line("999", 0, 1_000)],
+        vec![line("531", 1_000, 0), line("999", 0, 1_000)],
     )
     .err()
     .ok_or(Error::NotFound("error"))?;
     assert_eq!(codes(&e), vec!["ledger.unknown_account"]);
-    let posted = post_entry(
+    // A heading of the chart takes no entry.
+    let e = post_entry(
         &mut s,
         meta(&setup, "journal.post"),
         "Apport",
         vec![line("53", 1_000, 0), line("101", 0, 1_000)],
+    )
+    .err()
+    .ok_or(Error::NotFound("error"))?;
+    assert_eq!(codes(&e), vec!["ledger.group_account"]);
+    let posted = post_entry(
+        &mut s,
+        meta(&setup, "journal.post"),
+        "Apport",
+        vec![line("531", 1_000, 0), line("101", 0, 1_000)],
     )?;
     assert_eq!(posted.number, "OD-01-26-A00001");
     assert!(
@@ -235,7 +245,7 @@ fn journal_entries_are_balanced_immutable_and_reversible() -> R {
     let tb = s.read(|rd| ledger::trial_balance(rd.conn(), setup.org))?;
     let cash = tb
         .iter()
-        .find(|t| t.code == "53")
+        .find(|t| t.code == "531")
         .map(|t| t.debit_minor - t.credit_minor);
     assert_eq!(cash, Some(0), "the reversal cancels the entry");
     Ok(())

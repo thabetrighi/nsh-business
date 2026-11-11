@@ -3,14 +3,13 @@
 //! audit — in one transaction.
 
 use nb_core::{Money, Quantity};
-use nb_domain::ledger::{Entry, Line};
 use nb_domain::numbering::DocKind;
+use nb_domain::posting::Operation;
 use nb_domain::stock::MovementKind;
 use nb_domain::{ProductId, RuleError, WarehouseId};
 use serde::{Deserialize, Serialize};
 
-use crate::repo::{catalog, ledger, org, parse_id, stock};
-use crate::time::iso_date;
+use crate::repo::{catalog, org, parse_id, stock};
 use crate::uow::OpMeta;
 use crate::{Error, Result, Store};
 use nb_domain::access::{Permission, Target};
@@ -45,12 +44,14 @@ pub struct AdjustResult {
     pub value_minor: i64,
 }
 
-/// The accounts an adjustment moves (provisional mapping, gate G2).
-fn accounts(kind: MovementKind) -> Option<(&'static str, &'static str)> {
+/// The accounting effect of an adjustment of `value`.
+fn operation(kind: MovementKind, value: Money) -> Option<Operation> {
     match kind {
-        MovementKind::AdjustmentIn | MovementKind::CountGain => Some(("30", "758")),
+        MovementKind::AdjustmentIn | MovementKind::CountGain => {
+            Some(Operation::StockGain { value })
+        }
         MovementKind::AdjustmentOut | MovementKind::CountLoss | MovementKind::Waste => {
-            Some(("658", "30"))
+            Some(Operation::StockLoss { value })
         }
         _ => None,
     }
@@ -58,7 +59,7 @@ fn accounts(kind: MovementKind) -> Option<(&'static str, &'static str)> {
 
 pub fn adjust_stock(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Result<AdjustResult> {
     let kind = MovementKind::from_code(&input.kind)
-        .filter(|k| accounts(*k).is_some())
+        .filter(|k| operation(*k, Money::zero(nb_core::Currency::DZD)).is_some())
         .ok_or(RuleError::on("kind", "invalid_value"))?;
     if input.reason.trim().is_empty() {
         return Err(RuleError::on("reason", "required").into());
@@ -120,23 +121,15 @@ pub fn adjust_stock(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Resu
         )?;
         let value = qty.times_price(cost)?;
         if !value.is_zero() {
-            let (debit, credit) = accounts(kind).ok_or(RuleError::new("invalid_value"))?;
-            let entry = Entry::new(vec![Line::debit(debit, value), Line::credit(credit, value)])?;
-            let org = w.org()?;
-            let jnumber = w.next_number(DocKind::Journal, &branch.id, &branch.code)?;
+            let op = operation(kind, value).ok_or(RuleError::new("invalid_value"))?;
             let memo = format!("{number} {} — {}", product.name, input.reason.trim());
-            let date = iso_date(w.now(), offset);
-            ledger::post(
+            crate::usecases::accounting::post_operations(
                 w,
-                org,
-                ledger::Header {
-                    number: &jnumber,
-                    date: &date,
-                    memo: &memo,
-                    source: "stock.adjust",
-                    reverses: None,
-                },
-                &entry,
+                &branch,
+                offset,
+                &[op],
+                &memo,
+                "stock.adjust",
             )?;
         }
         let result = AdjustResult {

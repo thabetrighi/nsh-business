@@ -94,6 +94,22 @@ fn page_of(st: AppState, route: Route, compact: bool) -> AnyElement {
             .flex_1()
             .child(crate::screens::catalog::price_lists(st, compact))
             .into_element(),
+        Route::Journal => scroll()
+            .flex_1()
+            .child(crate::screens::accounting::journal_page(st, compact))
+            .into_element(),
+        Route::Accounts => scroll()
+            .flex_1()
+            .child(crate::screens::accounting::accounts_page(st, compact))
+            .into_element(),
+        Route::Ledger => scroll()
+            .flex_1()
+            .child(crate::screens::accounting::ledger_page(st, compact))
+            .into_element(),
+        Route::TrialBalance => scroll()
+            .flex_1()
+            .child(crate::screens::accounting::trial_balance_page(st, compact))
+            .into_element(),
         Route::Design => scroll().flex_1().child(design(st, compact)).into_element(),
         other => scroll()
             .flex_1()

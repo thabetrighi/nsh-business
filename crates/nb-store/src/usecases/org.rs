@@ -98,6 +98,20 @@ pub fn update_settings(store: &mut Store, meta: OpMeta, s: OrgSettings) -> Resul
     store.write(meta, |w| {
         let id = w.org()?;
         w.require(Permission::SettingsEdit, &Target::org())?;
+        // The fiscal calendar moves only while nothing is posted: its years
+        // are then made again on the new start month.
+        if s.fiscal_year_start != before.fiscal_year_start {
+            let posted: i64 = w.tx().query_row(
+                "SELECT COUNT(*) FROM journal_entries WHERE org_id = ?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )?;
+            if posted > 0 {
+                return Err(RuleError::on("fiscal_year_start", "fiscal.start_in_use").into());
+            }
+            w.tx().execute("DELETE FROM fiscal_periods WHERE org_id = ?1", [id.to_string()])?;
+            w.tx().execute("DELETE FROM fiscal_years WHERE org_id = ?1", [id.to_string()])?;
+        }
         w.tx().execute(
             "UPDATE organizations SET name = ?2, activity = ?3, language = ?4, fiscal_year_start = ?5,
                 auto_lock_min = ?6, updated_at = ?7, version = version + 1 WHERE id = ?1",

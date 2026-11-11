@@ -109,14 +109,14 @@ test("appearance settings apply at once and keep the page", async () => {
 test("sidebar sections expand to their pages, and settings tabs switch panels", async () => {
   const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
   await app.waitFor("text:Ventes brutes");
-  expect(app.texts()).not.toContain("Plan comptable");
-  await app.press("text:Comptabilité");
-  await app.waitFor("text:Plan comptable");
-  await app.press("text:Plan comptable");
+  expect(app.texts()).not.toContain("Dépenses");
+  await app.press("text:Finances");
+  await app.waitFor("text:Dépenses");
+  await app.press("text:Dépenses");
   await app.waitFor("text:Arrive dans une prochaine étape");
   // The section's other pages are tabs on the page.
-  await app.press("id:tab-ledger");
-  await app.waitUntil(() => app.texts().filter((t) => t === "Grand livre").length >= 2);
+  await app.press("id:tab-banks");
+  await app.waitUntil(() => app.texts().filter((t) => t === "Banques").length >= 2);
   await app.press("id:nav-settings");
   await app.press("id:settings-taxes");
   await app.waitFor("text:Droit de timbre sur les paiements en espèces");
@@ -322,4 +322,38 @@ test("stock levels and a stock count", async () => {
   await app.waitFor("text:Clôturé");
   await app.press("id:tab-movements");
   await app.waitUntil(() => app.texts().some((t) => t.includes("INV-01-26")));
+});
+
+test("a manual entry, its reversal, and the trial balance", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Comptabilité");
+  await app.press("id:nav-journal");
+  await app.waitFor("id:entry-new");
+  await app.press("id:entry-new");
+  await app.type("id:entry-memo", "Apport en caisse");
+  await app.press("id:entry-account-0");
+  await app.press("text:531 — Caisse principale");
+  await app.type("id:entry-debit-0", "1500");
+  await app.press("id:entry-account-1");
+  await app.press("text:101 — Capital");
+  await app.type("id:entry-credit-1", "1400");
+  await app.press("id:entry-post");
+  await app.waitFor("text:Les débits doivent égaler les crédits.");
+  await app.clear("id:entry-credit-1");
+  await app.type("id:entry-credit-1", "1500");
+  await app.waitFor("text:Équilibrée");
+  await app.press("id:entry-post");
+  await app.waitFor("text:Apport en caisse");
+  // Reversed, it cancels itself out.
+  await app.press("id:entry-reverse-0");
+  await app.type("id:reverse-reason", "doublon");
+  await app.press("id:reverse-confirm");
+  await app.waitUntil(() => app.texts().some((t) => t.startsWith("Contre-passée par")));
+  await app.press("id:tab-trial_balance");
+  await app.waitFor("text:Équilibrée");
+  await app.waitFor("id:trial-531");
+  await app.press("id:tab-accounts");
+  await app.waitFor("text:Caisses et banques");
+  await app.waitFor("id:account-531");
 });

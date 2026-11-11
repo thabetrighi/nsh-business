@@ -19,6 +19,28 @@ use nb_store::{Error, OpMeta, Store, StoreOptions};
 /// Where the database lives (set once, before the first call).
 static PATH: OnceLock<PathBuf> = OnceLock::new();
 
+/// The database of an app packaged by NSH for Windows or macOS, whose
+/// launcher is NSH's and not `main.rs`: in the user's data folder (or
+/// `NB_DATA_DIR`). Linux runs `main.rs`, which configures it, and the
+/// headless tests keep their database in memory.
+fn packaged_path() -> Option<PathBuf> {
+    if !cfg!(any(target_os = "windows", target_os = "macos")) {
+        return None;
+    }
+    let base = std::env::var_os("NB_DATA_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            if cfg!(target_os = "windows") {
+                std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("dz.nshbusiness.app"))
+            } else {
+                std::env::var_os("HOME").map(|h| {
+                    PathBuf::from(h).join("Library/Application Support/dz.nshbusiness.app")
+                })
+            }
+        })?;
+    Some(base.join("store.db"))
+}
+
 /// Uses the database file at `path` (desktop). Call before the app starts.
 pub fn configure(path: PathBuf) {
     let _ = PATH.set(path);
@@ -83,12 +105,12 @@ fn open(lang: DemoLang) -> Result<(Store, Session), Error> {
         device_name: "client".into(),
         ..StoreOptions::default()
     };
-    let mut store = match PATH.get() {
+    let mut store = match PATH.get().cloned().or_else(packaged_path) {
         Some(p) => {
             if let Some(dir) = p.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| Error::Backup(e.to_string()))?;
             }
-            Store::open(p, opts)?
+            Store::open(&p, opts)?
         }
         None => Store::open_in_memory(opts)?,
     };

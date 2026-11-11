@@ -6,8 +6,8 @@
 
 use nb_core::{Currency, Money, OrganizationId, Quantity};
 use nb_domain::access::{Permission, Target};
-use nb_domain::ledger::{Entry, Line};
 use nb_domain::numbering::DocKind;
+use nb_domain::posting::Operation;
 use nb_domain::stock::{self as rules, MovementKind};
 use nb_domain::{CategoryId, ProductId, RuleError, WarehouseId};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::repo::catalog::{self, StockState};
 use crate::repo::org::{self, Branch, Warehouse};
-use crate::repo::{from_milli, ledger, parse_id, stock, to_milli};
+use crate::repo::{from_milli, parse_id, stock, to_milli};
 use crate::time::iso_date;
-use crate::uow::{OpMeta, Writer};
+use crate::uow::OpMeta;
 use crate::{Error, Result, Store};
 
 fn the_org(conn: &Connection) -> Result<(OrganizationId, Currency)> {
@@ -38,39 +38,6 @@ fn qty(field: &'static str, s: &str) -> std::result::Result<Quantity, RuleError>
         .replace(',', ".")
         .parse::<Quantity>()
         .map_err(|_| RuleError::on(field, "invalid_quantity"))
-}
-
-/// Posts one entry from `(debit, credit, value)` legs (zero legs skipped).
-fn post_legs(
-    w: &mut Writer<'_>,
-    branch: &Branch,
-    offset: i32,
-    legs: &[(&str, &str, Money)],
-    memo: &str,
-    source: &str,
-) -> Result<()> {
-    let mut lines = Vec::new();
-    for (d, c, v) in legs {
-        if !v.is_zero() {
-            lines.push(Line::debit(d, *v));
-            lines.push(Line::credit(c, *v));
-        }
-    }
-    if lines.is_empty() {
-        return Ok(());
-    }
-    let entry = Entry::new(lines)?;
-    let number = w.next_number(DocKind::Journal, &branch.id, &branch.code)?;
-    let date = iso_date(w.now(), offset);
-    let header = ledger::Header {
-        number: &number,
-        date: &date,
-        memo,
-        source,
-        reverses: None,
-    };
-    ledger::post(w, w.org()?, header, &entry)?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -556,7 +523,7 @@ pub fn receive_transfer(
             params![id, w.now(), w.actor_text()],
         )?;
         let memo = format!("{} — {}", t.number, "transfer shortfall");
-        post_legs(w, &branch, offset, &[("658", "30", loss)], &memo, "stock.transfer")?;
+        crate::usecases::accounting::post_operations(w, &branch, offset, &[Operation::StockLoss { value: loss }], &memo, "stock.transfer")?;
         let row = transfer_of(w.tx(), id)?;
         w.event("transfer.received", "transfer", id, &row)?;
         w.audit("receive", "transfer", id, &serde_json::json!({ "transfer": row, "loss": loss.minor() }))?;
@@ -800,7 +767,7 @@ pub fn close_count(
             "UPDATE stock_counts SET status = 'closed', closed_at = ?2, closed_by = ?3 WHERE id = ?1",
             params![count, w.now(), w.actor_text()],
         )?;
-        post_legs(w, &branch, offset, &[("30", "758", gains), ("658", "30", losses)], &c.number, "stock.count")?;
+        crate::usecases::accounting::post_operations(w, &branch, offset, &[Operation::StockGain { value: gains }, Operation::StockLoss { value: losses }], &c.number, "stock.count")?;
         out.gains_minor = gains.minor();
         out.losses_minor = losses.minor();
         w.event("count.closed", "count", count, &out)?;

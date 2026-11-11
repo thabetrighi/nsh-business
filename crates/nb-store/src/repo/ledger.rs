@@ -3,6 +3,7 @@
 use nb_core::{Currency, Money, OrganizationId};
 use nb_domain::EntryId;
 use nb_domain::ledger::{Entry, Line};
+use nb_domain::posting::{AccountMap, Role};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
@@ -15,12 +16,85 @@ pub struct Account {
     pub name: String,
     pub parent_code: Option<String>,
     pub kind: String,
+    /// A heading of the chart: it totals its accounts and takes no entry.
+    #[serde(default)]
+    pub is_group: bool,
+    #[serde(default = "yes")]
+    pub active: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 pub fn insert_account(w: &Writer<'_>, org: OrganizationId, a: &Account) -> Result<()> {
     w.tx().execute(
-        "INSERT INTO accounts (org_id, code, name, parent_code, kind) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![org.to_string(), a.code, a.name, a.parent_code, a.kind],
+        "INSERT INTO accounts (org_id, code, name, parent_code, kind, is_group, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![org.to_string(), a.code, a.name, a.parent_code, a.kind, a.is_group, a.active],
+    )?;
+    Ok(())
+}
+
+/// One account of the chart.
+pub fn account(conn: &Connection, org: OrganizationId, code: &str) -> Result<Option<Account>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT code, name, parent_code, kind, is_group, active FROM accounts WHERE org_id = ?1 AND code = ?2",
+            params![org.to_string(), code],
+            |r| {
+                Ok(Account {
+                    code: r.get(0)?,
+                    name: r.get(1)?,
+                    parent_code: r.get(2)?,
+                    kind: r.get(3)?,
+                    is_group: r.get(4)?,
+                    active: r.get(5)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// The whole chart, by code.
+pub fn accounts(conn: &Connection, org: OrganizationId) -> Result<Vec<Account>> {
+    let mut s = conn.prepare(
+        "SELECT code, name, parent_code, kind, is_group, active FROM accounts WHERE org_id = ?1 ORDER BY code",
+    )?;
+    let rows = s.query_map([org.to_string()], |r| {
+        Ok(Account {
+            code: r.get(0)?,
+            name: r.get(1)?,
+            parent_code: r.get(2)?,
+            kind: r.get(3)?,
+            is_group: r.get(4)?,
+            active: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// The accounts the entry matrix posts to, by role.
+pub fn account_map(conn: &Connection, org: OrganizationId) -> Result<AccountMap> {
+    let mut s = conn.prepare("SELECT role, account_code FROM account_roles WHERE org_id = ?1")?;
+    let rows = s.query_map([org.to_string()], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut map = AccountMap::default();
+    for row in rows {
+        let (role, code) = row?;
+        if let Some(role) = Role::from_code(&role) {
+            map.set(role, &code);
+        }
+    }
+    Ok(map)
+}
+
+pub fn set_role(w: &Writer<'_>, org: OrganizationId, role: Role, code: &str) -> Result<()> {
+    w.tx().execute(
+        "INSERT INTO account_roles (org_id, role, account_code) VALUES (?1, ?2, ?3)
+         ON CONFLICT (org_id, role) DO UPDATE SET account_code = ?3",
+        params![org.to_string(), role.code(), code],
     )?;
     Ok(())
 }
@@ -56,12 +130,24 @@ pub fn post(w: &Writer<'_>, org: OrganizationId, h: Header<'_>, entry: &Entry) -
         reverses,
     } = h;
     for l in entry.lines() {
-        if !account_exists(w.tx(), org, &l.account)? {
+        let code = match account(w.tx(), org, &l.account)? {
+            None => Some("ledger.unknown_account"),
+            Some(a) if a.is_group => Some("ledger.group_account"),
+            Some(a) if !a.active => Some("ledger.inactive_account"),
+            Some(_) => None,
+        };
+        if let Some(code) = code {
             return Err(Error::Rules(vec![nb_domain::RuleError::on(
-                "account",
-                "ledger.unknown_account",
+                "account", code,
             )]));
         }
+    }
+    // The period must be open; its year is opened on first use.
+    if crate::repo::fiscal::ensure_period(w, org, date)?.closed {
+        return Err(Error::Rules(vec![nb_domain::RuleError::on(
+            "date",
+            "fiscal.period_closed",
+        )]));
     }
     let id = EntryId::new();
     w.tx().execute(

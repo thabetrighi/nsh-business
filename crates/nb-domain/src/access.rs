@@ -87,6 +87,7 @@ permissions! {
     702 AccountingPost "accounting.post" true,
     703 AccountingReverse "accounting.reverse" true,
     704 AccountingClosePeriod "accounting.close_period" true,
+    705 AccountingChart "accounting.chart" true,
     // Reports
     801 ReportsView "reports.view" false,
     802 ReportsProfit "reports.profit" true,
@@ -269,6 +270,7 @@ impl BuiltinRole {
                 AccountingPost,
                 AccountingReverse,
                 AccountingClosePeriod,
+                AccountingChart,
                 ReportsView,
                 ReportsProfit,
                 ProductsView,

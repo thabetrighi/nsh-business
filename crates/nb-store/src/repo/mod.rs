@@ -3,6 +3,7 @@
 
 pub mod access;
 pub mod catalog;
+pub mod fiscal;
 pub mod ledger;
 pub mod org;
 pub mod stock;

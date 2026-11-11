@@ -48,26 +48,204 @@ pub struct SetupResult {
 
 /// The default chart of accounts for Algeria (SCF classes), a proposal to
 /// be reviewed by an accountant before real use (gate G2).
-pub const DZ_ACCOUNTS: &[(&str, &str, &str)] = &[
-    ("101", "Capital", "equity"),
-    ("30", "Stocks de marchandises", "asset"),
-    ("401", "Fournisseurs", "liability"),
-    ("411", "Clients", "asset"),
-    ("4456", "TVA déductible", "asset"),
-    ("4457", "TVA collectée", "liability"),
-    ("447", "Autres impôts et taxes (timbre)", "liability"),
-    ("512", "Banque", "asset"),
-    ("53", "Caisse", "asset"),
-    ("58", "Virements internes", "asset"),
-    ("600", "Achats de marchandises vendues", "expense"),
-    ("603", "Variation des stocks de marchandises", "expense"),
-    ("61", "Services extérieurs", "expense"),
-    ("62", "Autres services extérieurs", "expense"),
-    ("658", "Autres charges (pertes sur stock)", "expense"),
-    ("700", "Ventes de marchandises", "income"),
-    ("709", "Rabais, remises et ristournes accordés", "income"),
-    ("758", "Autres produits (gains sur stock)", "income"),
+/// `(code, name, parent, kind, group)`; groups total their accounts and
+/// take no entry.
+pub type ChartRow = (
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    &'static str,
+    bool,
+);
+
+pub const DZ_CHART: &[ChartRow] = &[
+    ("1", "Comptes de capitaux", None, "equity", true),
+    (
+        "10",
+        "Capital, réserves et assimilés",
+        Some("1"),
+        "equity",
+        true,
+    ),
+    ("101", "Capital", Some("10"), "equity", false),
+    ("12", "Résultat de l'exercice", Some("1"), "equity", false),
+    ("3", "Comptes de stocks et en-cours", None, "asset", true),
+    ("30", "Stocks de marchandises", Some("3"), "asset", false),
+    ("4", "Comptes de tiers", None, "liability", true),
+    (
+        "40",
+        "Fournisseurs et comptes rattachés",
+        Some("4"),
+        "liability",
+        true,
+    ),
+    ("401", "Fournisseurs", Some("40"), "liability", false),
+    (
+        "41",
+        "Clients et comptes rattachés",
+        Some("4"),
+        "asset",
+        true,
+    ),
+    ("411", "Clients", Some("41"), "asset", false),
+    (
+        "44",
+        "État, collectivités publiques",
+        Some("4"),
+        "liability",
+        true,
+    ),
+    (
+        "445",
+        "État, taxes sur le chiffre d'affaires",
+        Some("44"),
+        "liability",
+        true,
+    ),
+    ("4456", "TVA déductible", Some("445"), "asset", false),
+    ("4457", "TVA collectée", Some("445"), "liability", false),
+    (
+        "447",
+        "Autres impôts et taxes (timbre)",
+        Some("44"),
+        "liability",
+        false,
+    ),
+    ("5", "Comptes financiers", None, "asset", true),
+    (
+        "51",
+        "Banques, établissements financiers",
+        Some("5"),
+        "asset",
+        true,
+    ),
+    ("512", "Banque", Some("51"), "asset", true),
+    ("5121", "Banque principale", Some("512"), "asset", false),
+    ("53", "Caisse", Some("5"), "asset", true),
+    ("531", "Caisse principale", Some("53"), "asset", false),
+    ("58", "Virements internes", Some("5"), "asset", false),
+    ("6", "Comptes de charges", None, "expense", true),
+    ("60", "Achats consommés", Some("6"), "expense", true),
+    (
+        "600",
+        "Achats de marchandises vendues",
+        Some("60"),
+        "expense",
+        false,
+    ),
+    (
+        "603",
+        "Variation des stocks de marchandises",
+        Some("60"),
+        "expense",
+        false,
+    ),
+    ("61", "Services extérieurs", Some("6"), "expense", false),
+    (
+        "62",
+        "Autres services extérieurs",
+        Some("6"),
+        "expense",
+        false,
+    ),
+    (
+        "65",
+        "Autres charges opérationnelles",
+        Some("6"),
+        "expense",
+        true,
+    ),
+    (
+        "658",
+        "Autres charges (pertes sur stock)",
+        Some("65"),
+        "expense",
+        false,
+    ),
+    ("7", "Comptes de produits", None, "income", true),
+    (
+        "70",
+        "Ventes de marchandises et produits",
+        Some("7"),
+        "income",
+        true,
+    ),
+    ("700", "Ventes de marchandises", Some("70"), "income", false),
+    (
+        "709",
+        "Rabais, remises et ristournes accordés",
+        Some("70"),
+        "income",
+        false,
+    ),
+    (
+        "75",
+        "Autres produits opérationnels",
+        Some("7"),
+        "income",
+        true,
+    ),
+    (
+        "758",
+        "Autres produits (gains sur stock)",
+        Some("75"),
+        "income",
+        false,
+    ),
 ];
+
+/// The chart's names in Arabic (SCF), for stores that work in Arabic.
+pub const DZ_CHART_AR: &[(&str, &str)] = &[
+    ("1", "حسابات رؤوس الأموال"),
+    ("10", "رأس المال والاحتياطات وما يماثلها"),
+    ("101", "رأس المال"),
+    ("12", "نتيجة السنة المالية"),
+    ("3", "حسابات المخزونات والمنتجات قيد الصنع"),
+    ("30", "مخزونات البضائع"),
+    ("4", "حسابات الغير"),
+    ("40", "الموردون والحسابات الملحقة"),
+    ("401", "الموردون"),
+    ("41", "الزبائن والحسابات الملحقة"),
+    ("411", "الزبائن"),
+    ("44", "الدولة والجماعات العمومية"),
+    ("445", "الدولة، الرسوم على رقم الأعمال"),
+    ("4456", "الرسم على القيمة المضافة القابل للاسترجاع"),
+    ("4457", "الرسم على القيمة المضافة المحصّل"),
+    ("447", "ضرائب ورسوم أخرى (الطابع)"),
+    ("5", "الحسابات المالية"),
+    ("51", "البنوك والمؤسسات المالية"),
+    ("512", "البنك"),
+    ("5121", "البنك الرئيسي"),
+    ("53", "الصندوق"),
+    ("531", "الصندوق الرئيسي"),
+    ("58", "التحويلات الداخلية"),
+    ("6", "حسابات الأعباء"),
+    ("60", "المشتريات المستهلكة"),
+    ("600", "مشتريات البضائع المبيعة"),
+    ("603", "تغيّر مخزونات البضائع"),
+    ("61", "الخدمات الخارجية"),
+    ("62", "الخدمات الخارجية الأخرى"),
+    ("65", "الأعباء العملياتية الأخرى"),
+    ("658", "أعباء أخرى (خسائر المخزون)"),
+    ("7", "حسابات المنتجات"),
+    ("70", "مبيعات البضائع والمنتجات"),
+    ("700", "مبيعات البضائع"),
+    ("709", "التخفيضات والتنزيلات الممنوحة"),
+    ("75", "المنتجات العملياتية الأخرى"),
+    ("758", "منتجات أخرى (أرباح المخزون)"),
+];
+
+/// An account's name in the store's language.
+fn chart_name(code: &str, french: &'static str, language: &str) -> String {
+    match language {
+        "ar" => DZ_CHART_AR
+            .iter()
+            .find(|(c, _)| *c == code)
+            .map_or(french, |(_, n)| n)
+            .to_owned(),
+        _ => french.to_owned(),
+    }
+}
 
 pub fn setup_organization(store: &mut Store, input: SetupInput) -> Result<SetupResult> {
     let mut errors = Vec::new();
@@ -142,22 +320,37 @@ pub fn setup_organization(store: &mut Store, input: SetupInput) -> Result<SetupR
             rusqlite::params![o.id, o.name, w.now()],
         )?;
         crate::usecases::org::first_register(w, org, &branch.to_string(), "01")?;
+        // The current fiscal year and its periods.
+        let (y, m, d) = w.date();
+        crate::repo::fiscal::ensure_period(w, org, &format!("{y:04}-{m:02}-{d:02}"))?;
         crate::usecases::catalog::seed_defaults(w, org, &o.country, &input.language)?;
         org::insert_user(w, org, owner, input.owner_name.trim(), "owner")?;
         access::insert_grant(w, org, owner, &access::GrantRow::org("owner"))?;
         access::ensure_credentials(w, org, owner)?;
         if o.country == "DZ" {
-            for (code, name, kind) in DZ_ACCOUNTS {
+            for (code, name, parent, kind, group) in DZ_CHART {
                 insert_account(
                     w,
                     org,
                     &Account {
                         code: (*code).into(),
-                        name: (*name).into(),
-                        parent_code: None,
+                        name: chart_name(code, name, &input.language),
+                        parent_code: parent.map(str::to_owned),
                         kind: (*kind).into(),
+                        is_group: *group,
+                        active: true,
                     },
                 )?;
+            }
+            for (role, code) in nb_domain::posting::AccountMap::dz().iter() {
+                crate::repo::ledger::set_role(w, org, role, code)?;
+            }
+            for (kind, name, code) in [
+                ("cash", "Caisse principale", "531"),
+                ("bank", "Banque principale", "5121"),
+            ] {
+                let name = chart_name(code, name, &input.language);
+                crate::usecases::accounting::insert_money_account(w, org, None, kind, &name, code)?;
             }
         }
         w.event("org.created", "organization", &o.id, &o)?;
