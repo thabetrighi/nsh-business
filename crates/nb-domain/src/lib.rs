@@ -8,6 +8,7 @@ pub mod catalog;
 pub mod features;
 pub mod fiscal;
 pub mod ids;
+pub mod installment;
 pub mod ledger;
 pub mod numbering;
 pub mod posting;

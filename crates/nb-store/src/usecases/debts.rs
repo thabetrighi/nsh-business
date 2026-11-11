@@ -17,7 +17,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::repo::{org, parse_id};
-use crate::uow::OpMeta;
+use crate::uow::{OpMeta, Writer};
 use crate::usecases::accounting::post_operations_for;
 use crate::usecases::sales::{the_org, till};
 use crate::{Error, Result, Store};
@@ -142,6 +142,18 @@ pub struct ReceiptResult {
 /// invoices, the entry (cash or bank against the receivable) — at once and
 /// once per operation.
 pub fn collect(store: &mut Store, meta: OpMeta, input: ReceiptInput) -> Result<ReceiptResult> {
+    let (_, currency) = store.read(|r| the_org(r.conn()))?;
+    let offset = store.read(|r| Ok(r.utc_offset_min))?;
+    store.write(meta, |w| collect_in(w, &input, currency, offset))
+}
+
+/// [`collect`] inside a transaction already open (an instalment payment).
+pub(crate) fn collect_in(
+    w: &mut Writer<'_>,
+    input: &ReceiptInput,
+    currency: nb_core::Currency,
+    offset: i32,
+) -> Result<ReceiptResult> {
     if input.amount_minor <= 0 {
         return Err(RuleError::on("amount", "receipt.amount_positive").into());
     }
@@ -150,38 +162,33 @@ pub fn collect(store: &mut Store, meta: OpMeta, input: ReceiptInput) -> Result<R
         "card" | "transfer" => true,
         _ => return Err(RuleError::on("method", "invalid_value").into()),
     };
-    let (_, currency) = store.read(|r| the_org(r.conn()))?;
-    let offset = store.read(|r| Ok(r.utc_offset_min))?;
-    store.write(meta, |w| {
+    {
         let customer = crate::usecases::customers::load(w.tx(), &input.customer_id)?;
         // Cash goes into an open till; bank money is the branch's.
-        let (branch, till_account, register, shift) = match input
-            .register_id
-            .as_deref()
-            .filter(|r| !r.is_empty())
-        {
-            Some(reg) => {
-                let register: RegisterId = parse_id(reg)?;
-                let (branch, _, account) = till(w, register)?;
-                let shift: Option<String> = w
-                    .tx()
-                    .query_row(
-                        "SELECT id FROM shifts WHERE register_id = ?1 AND status = 'open'",
-                        [reg],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                (branch, Some(account), Some(reg.to_owned()), shift)
-            }
-            None => {
-                let org_id = w.org()?;
-                let branch = org::branches(w.tx(), org_id)?
-                    .into_iter()
-                    .next()
-                    .ok_or(Error::NotFound("branch"))?;
-                (branch, None, None, None)
-            }
-        };
+        let (branch, till_account, register, shift) =
+            match input.register_id.as_deref().filter(|r| !r.is_empty()) {
+                Some(reg) => {
+                    let register: RegisterId = parse_id(reg)?;
+                    let (branch, _, account) = till(w, register)?;
+                    let shift: Option<String> = w
+                        .tx()
+                        .query_row(
+                            "SELECT id FROM shifts WHERE register_id = ?1 AND status = 'open'",
+                            [reg],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    (branch, Some(account), Some(reg.to_owned()), shift)
+                }
+                None => {
+                    let org_id = w.org()?;
+                    let branch = org::branches(w.tx(), org_id)?
+                        .into_iter()
+                        .next()
+                        .ok_or(Error::NotFound("branch"))?;
+                    (branch, None, None, None)
+                }
+            };
         if !to_bank && shift.is_none() {
             return Err(RuleError::on("register", "shift.none_open").into());
         }
@@ -259,6 +266,8 @@ pub fn collect(store: &mut Store, meta: OpMeta, input: ReceiptInput) -> Result<R
                 "INSERT INTO payment_allocations (receipt_id, sale_id, amount_minor) VALUES (?1, ?2, ?3)",
                 params![id, sale, amount],
             )?;
+            // An invoice paid in instalments: its instalments, oldest first.
+            crate::usecases::installments::settle_plan(w, &id, sale, *amount)?;
         }
         post_operations_for(
             w,
@@ -291,9 +300,9 @@ pub fn collect(store: &mut Store, meta: OpMeta, input: ReceiptInput) -> Result<R
             balance_minor: balance,
         };
         w.event("receipt.recorded", "receipt", &id, &out)?;
-        w.audit("collect", "customer", &customer.id, &input)?;
+        w.audit("collect", "customer", &customer.id, input)?;
         Ok(out)
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------

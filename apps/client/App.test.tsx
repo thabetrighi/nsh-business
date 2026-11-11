@@ -640,3 +640,49 @@ test("a cashier's large discount is approved by a supervisor's PIN", async () =>
   await app.press("id:approval-confirm");
   await seen(/^Vente FV-01-\d\d-A\d+ enregistrée/);
 });
+
+test("an invoice on account is split into instalments and the first is paid", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-customer");
+  await app.type("id:cust-search", "Restaurant");
+  await app.waitFor("id:cust-pick-0");
+  await app.press("id:cust-pick-0");
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-confirm");
+  await app.clear("id:pay-given");
+  await app.type("id:pay-given", "0");
+  await app.press("id:pay-confirm");
+  await seen(/^Vente FV-01-\d\d-A\d+ enregistrée/);
+  // The customer's card: split the invoice in three monthly instalments.
+  await app.press("text:Clients et crédit");
+  await app.press("id:nav-customers");
+  await app.type("id:customers-search", "Restaurant");
+  await app.waitFor("id:customer-0");
+  await app.press("id:customer-0");
+  await app.waitFor("text:Factures ouvertes");
+  await app.press("text:Factures ouvertes");
+  await app.waitFor("id:inv-plan-0");
+  await app.press("id:inv-plan-0");
+  await app.waitFor("id:plan-save");
+  await app.waitFor("text:Échéances égales au centime ; les centimes restants vont aux premières.");
+  await app.press("id:plan-save");
+  await seen(/^Échéancier TQ-00001 créé\.$/);
+  await app.waitFor("id:plan-pay");
+  await app.waitFor("text:En cours");
+  // The next instalment is paid in cash.
+  await app.press("id:plan-pay");
+  await app.waitFor("id:plan-pay-confirm");
+  await app.press("id:plan-pay-confirm");
+  await seen(/^Reçu RC-01-\d\d-A\d+ : .+ encaissés\.$/);
+  await app.waitFor("text:Payé");
+  await app.waitUntil(() => app.texts().filter((t) => t === "À venir").length === 2);
+});

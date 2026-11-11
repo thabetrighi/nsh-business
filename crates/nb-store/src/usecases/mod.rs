@@ -8,6 +8,7 @@ pub mod catalog;
 pub mod customers;
 pub mod debts;
 pub mod documents;
+pub mod installments;
 pub mod inventory;
 pub mod ledger;
 pub mod org;

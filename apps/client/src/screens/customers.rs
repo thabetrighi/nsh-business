@@ -12,6 +12,10 @@ use nb_store::usecases::debts::{
     Ageing, AllocationInput, CustomerStatement, OpenInvoice, ReceiptInput, ReceiptRow, ageing,
     collect, customer_statement, open_invoices, receipts_of,
 };
+use nb_store::usecases::installments::{
+    DueRow, Plan, PlanInput, RescheduleInput, create_plan, due_installments, pay_installments,
+    plans_of, reschedule,
+};
 use nsh_core::element::{AnyElement, KeyboardType, View};
 use nsh_core::prelude::*;
 
@@ -751,8 +755,24 @@ pub fn customer_card(
         Vec<ReceiptRow>,
     );
     let data = computed(move || loaded.with(|d: Option<&Card>| d.cloned()));
+    let plans_r = resource(
+        move || showing.get().map(|id| (id, st.data_rev.get())),
+        move |(id, _), _| {
+            let db = st.db();
+            async move { db.call(move |s| plans_of(s, &id)).await }
+        },
+    );
+    let plans = computed(move || {
+        plans_r
+            .with(|p: Option<&Vec<Plan>>| p.cloned())
+            .unwrap_or_default()
+    });
     let tab = signal(0usize);
     let collecting = signal(false);
+    // Instalments: a new plan for an invoice, a payment, a new schedule.
+    let (planning, planning_open) = opener::<OpenInvoice>();
+    let (paying, paying_open) = opener::<Plan>();
+    let (moving, moving_open) = opener::<Plan>();
 
     let head = dynamic(move || {
         let Some((c, _, open, _)) = data.get() else {
@@ -923,7 +943,15 @@ pub fn customer_card(
             .into_element();
         }
         let mut v = view();
-        for o in open {
+        let planned: Vec<String> = plans
+            .get()
+            .into_iter()
+            .filter(|p| p.status == "active")
+            .map(|p| p.sale_id)
+            .collect();
+        for (i, o) in open.into_iter().enumerate() {
+            let has_plan = planned.contains(&o.sale_id);
+            let inv = o.clone();
             let title = o.number.clone();
             let detail = format!(
                 "{} · {}",
@@ -964,6 +992,22 @@ pub fn customer_card(
                         badge(Status::Danger, None, st.t("customers.overdue"))
                     } else {
                         view()
+                    })
+                    .child(if has_plan {
+                        badge(
+                            Status::Info,
+                            Some(Icon::CalendarClock),
+                            st.t("plans.in_plan"),
+                        )
+                    } else {
+                        button(
+                            Variant::Ghost,
+                            Size::Sm,
+                            Some(Icon::CalendarClock),
+                            st.t("plans.split"),
+                            move || planning.set(Some(inv.clone())),
+                        )
+                        .test_id(&format!("inv-plan-{i}"))
                     })
                     .child(figure(
                         move || money(st, open_minor),
@@ -1051,13 +1095,15 @@ pub fn customer_card(
                 (0, Box::new(st.t("customers.tab.statement"))),
                 (1, Box::new(st.t("customers.tab.open"))),
                 (2, Box::new(st.t("customers.tab.receipts"))),
+                (3, Box::new(st.t("customers.tab.plans"))),
             ],
             tab,
         ))
         .child(dynamic(move || match tab.get() {
             0 => statement(),
             1 => invoices(),
-            _ => receipts(),
+            2 => receipts(),
+            _ => plans_view(st, plans.get(), paying, moving).into_element(),
         }));
     let footer = {
         let close = close.clone();
@@ -1112,6 +1158,28 @@ pub fn customer_card(
             footer,
             close,
         ))
+        .child(modal(planning_open, false, move || {
+            match planning.get_untracked() {
+                Some(inv) => plan_dialog(st, inv, move || {
+                    planning_open.set(false);
+                    tab.set(3);
+                })
+                .into_element(),
+                None => view().into_element(),
+            }
+        }))
+        .child(modal(paying_open, false, move || {
+            match paying.get_untracked() {
+                Some(p) => plan_pay_dialog(st, p, move || paying_open.set(false)).into_element(),
+                None => view().into_element(),
+            }
+        }))
+        .child(modal(moving_open, false, move || {
+            match moving.get_untracked() {
+                Some(p) => reschedule_dialog(st, p, move || moving_open.set(false)).into_element(),
+                None => view().into_element(),
+            }
+        }))
         .child(modal(collecting, false, move || {
             match data.get_untracked() {
                 Some((c, _, open, _)) => {
@@ -1597,6 +1665,877 @@ pub fn debts_page(st: AppState, compact: bool) -> View {
             st,
             Route::Debts,
             "debts.subtitle",
+            view(),
+            body,
+            compact,
+        ))
+        .child(modal(showing_open, compact, move || {
+            customer_card(st, showing, editing, move || showing_open.set(false)).into_element()
+        }))
+        .child(modal(editing_open, compact, move || {
+            match editing.get_untracked() {
+                Some(c) => customer_dialog(st, c, move || editing_open.set(false)).into_element(),
+                None => view().into_element(),
+            }
+        }))
+}
+
+// ------------------------------------------------------------ instalments
+
+/// A dialog's subject and its open flag, kept in step.
+fn opener<T: Clone + PartialEq + 'static>() -> (Signal<Option<T>>, Signal<bool>) {
+    let subject: Signal<Option<T>> = signal(None);
+    let open = signal(false);
+    effect(move || {
+        let o = subject.with(Option::is_some);
+        if open.get_untracked() != o {
+            open.set(o);
+        }
+    });
+    effect(move || {
+        if !open.get() && subject.with_untracked(Option::is_some) {
+            subject.set(None);
+        }
+    });
+    (subject, open)
+}
+
+fn state_badge(st: AppState, state: &str) -> View {
+    let s = match state {
+        "paid" => Status::Success,
+        "late" => Status::Danger,
+        "due" | "partial" => Status::Warning,
+        "rescheduled" => Status::Neutral,
+        _ => Status::Info,
+    };
+    let key = format!("plans.state.{state}");
+    badge(s, None, move || st.tn(&key))
+}
+
+/// A customer's plans with their instalments.
+fn plans_view(
+    st: AppState,
+    plans: Vec<Plan>,
+    paying: Signal<Option<Plan>>,
+    moving: Signal<Option<Plan>>,
+) -> View {
+    if plans.is_empty() {
+        return view().child(label(
+            st.t("plans.none"),
+            ty::SM,
+            FontWeight::NORMAL,
+            Tone::Muted,
+        ));
+    }
+    let mut v = view().gap(px(14.0));
+    for (pi, p) in plans.into_iter().enumerate() {
+        let active = p.status == "active";
+        let title = tr_args(
+            st.lang(),
+            "plans.title_row",
+            &[
+                ("number", &p.number),
+                ("version", &st.fmt().integer(i64::from(p.version))),
+                ("sale", &p.sale_number),
+            ],
+        );
+        let (open, late) = (p.open_minor(), p.late_minor());
+        let mut head = view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.0))
+            .child(view().flex_1().min_w(px(160.0)).child(label_line(
+                move || title.clone(),
+                ty::SM,
+                FontWeight::SEMIBOLD,
+                Tone::Ink,
+            )))
+            .child(badge(
+                if active {
+                    Status::Info
+                } else {
+                    Status::Neutral
+                },
+                None,
+                {
+                    let key = format!("plans.status.{}", p.status);
+                    move || st.tn(&key)
+                },
+            ));
+        if late > 0 {
+            head = head.child(badge(Status::Danger, None, move || {
+                tr_args(st.lang(), "plans.late", &[("amount", &money(st, late))])
+            }));
+        }
+        head = head.child(figure(
+            move || money(st, open),
+            ty::SM,
+            FontWeight::BOLD,
+            || Tone::Ink,
+        ));
+        let mut rows = view();
+        for i in &p.installments {
+            let due = i.due_date.clone();
+            let seq = format!("{}/{}", i.seq, p.count);
+            let (amount, paid) = (i.amount_minor, i.paid_minor);
+            rows = rows.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .py(px(6.0))
+                    .border_t_1()
+                    .border_color(Tone::Border.color())
+                    .child(view().w(px(48.0)).child(figure(
+                        move || seq.clone(),
+                        ty::XS,
+                        FontWeight::MEDIUM,
+                        || Tone::Muted,
+                    )))
+                    .child(view().flex_1().child(figure(
+                        move || due.clone(),
+                        ty::SM,
+                        FontWeight::NORMAL,
+                        || Tone::Body,
+                    )))
+                    .child(state_badge(st, &i.state))
+                    .child(view().w(px(110.0)).items_end().child(figure(
+                        move || {
+                            if paid > 0 && paid < amount {
+                                format!("{} / {}", money(st, paid), money(st, amount))
+                            } else {
+                                money(st, amount)
+                            }
+                        },
+                        ty::SM,
+                        FontWeight::SEMIBOLD,
+                        || Tone::Ink,
+                    ))),
+            );
+        }
+        let mut card_v = view()
+            .test_id(&format!("plan-{pi}"))
+            .gap(px(8.0))
+            .p(px(12.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(Tone::Border.color())
+            .child(head)
+            .child(rows);
+        if active {
+            let (p1, p2) = (p.clone(), p.clone());
+            card_v = card_v.child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .child(when(
+                        move || st.can("installments.reschedule") || st.can("debts.collect"),
+                        move || {
+                            let p2 = p2.clone();
+                            button(
+                                Variant::Ghost,
+                                Size::Sm,
+                                Some(Icon::CalendarClock),
+                                st.t("plans.reschedule"),
+                                move || moving.set(Some(p2.clone())),
+                            )
+                            .test_id("plan-reschedule")
+                            .into_element()
+                        },
+                    ))
+                    .child(when(
+                        move || st.can("debts.collect"),
+                        move || {
+                            let p1 = p1.clone();
+                            button(
+                                Variant::Primary,
+                                Size::Sm,
+                                Some(Icon::Coins),
+                                st.t("plans.pay"),
+                                move || paying.set(Some(p1.clone())),
+                            )
+                            .test_id("plan-pay")
+                            .into_element()
+                        },
+                    )),
+            );
+        }
+        v = v.child(card_v);
+    }
+    v
+}
+
+fn in_days(n: i64) -> String {
+    let ms = crate::state::now_ms() + n * 86_400_000;
+    nb_store::time::iso_date(ms, 60)
+}
+
+const FREQUENCIES: [&str; 3] = ["weekly", "monthly", "quarterly"];
+
+/// The schedule's fields, with its instalments shown as they will be.
+fn schedule_form(
+    st: AppState,
+    financed: i64,
+    count: Signal<String>,
+    frequency: Signal<usize>,
+    first: Signal<String>,
+) -> View {
+    let cur = currency(st);
+    let preview = computed(move || {
+        let n: u32 = count.get().trim().parse().ok()?;
+        let f = nb_domain::installment::Frequency::from_code(FREQUENCIES[frequency.get()])?;
+        let d = nb_domain::fiscal::Date::parse(&first.get()).ok()?;
+        nb_domain::installment::schedule(Money::from_minor(financed, cur), n, f, d).ok()
+    });
+    view()
+        .gap(px(12.0))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(12.0))
+                .child(view().w(px(110.0)).child(field(
+                    st.t("plans.count"),
+                    count,
+                    String::new,
+                    String::new,
+                    KeyboardType::Number,
+                    "plan-count",
+                )))
+                .child(view().flex_1().min_w(px(200.0)).child(labelled(
+                    st.t("plans.frequency"),
+                    segmented(
+                        vec![
+                            (0, Box::new(st.t("plans.frequency.weekly"))),
+                            (1, Box::new(st.t("plans.frequency.monthly"))),
+                            (2, Box::new(st.t("plans.frequency.quarterly"))),
+                        ],
+                        frequency,
+                    ),
+                    None,
+                )))
+                .child(view().w(px(150.0)).child(field(
+                    st.t("plans.first_due"),
+                    first,
+                    st.t("doc.date_hint"),
+                    String::new,
+                    KeyboardType::Default,
+                    "plan-first",
+                ))),
+        )
+        .child(dynamic(move || {
+            let Some(dues) = preview.get() else {
+                return label(
+                    st.t("plans.preview.invalid"),
+                    ty::SM,
+                    FontWeight::NORMAL,
+                    Tone::Muted,
+                )
+                .into_element();
+            };
+            let mut v = view()
+                .gap(px(4.0))
+                .p(px(10.0))
+                .rounded(px(8.0))
+                .bg(Tone::Subtle.color());
+            let n = dues.len();
+            for (i, d) in dues.into_iter().enumerate() {
+                if n > 8 && i == 4 {
+                    v = v.child(label_line(
+                        || "…".to_owned(),
+                        ty::SM,
+                        FontWeight::NORMAL,
+                        Tone::Muted,
+                    ));
+                }
+                if n > 8 && (4..n - 3).contains(&i) {
+                    continue;
+                }
+                let (date, amount) = (d.date.iso(), d.amount.minor());
+                let seq = format!("{}/{n}", i + 1);
+                v = v.child(
+                    view()
+                        .flex_row()
+                        .gap(px(10.0))
+                        .child(view().w(px(48.0)).child(figure(
+                            move || seq.clone(),
+                            ty::XS,
+                            FontWeight::MEDIUM,
+                            || Tone::Muted,
+                        )))
+                        .child(view().flex_1().child(figure(
+                            move || date.clone(),
+                            ty::SM,
+                            FontWeight::NORMAL,
+                            || Tone::Body,
+                        )))
+                        .child(figure(
+                            move || money(st, amount),
+                            ty::SM,
+                            FontWeight::SEMIBOLD,
+                            || Tone::Ink,
+                        )),
+                );
+            }
+            v.into_element()
+        }))
+        .child(label(
+            st.t("plans.rounding"),
+            ty::XS,
+            FontWeight::NORMAL,
+            Tone::Muted,
+        ))
+}
+
+/// Splits what an invoice still owes into instalments.
+fn plan_dialog(st: AppState, inv: OpenInvoice, close: impl Fn() + Clone + 'static) -> View {
+    let Some(session) = st.session.get_untracked() else {
+        return view();
+    };
+    let meta = session.meta("plan.create");
+    let count = signal("3".to_owned());
+    let frequency = signal(1usize);
+    let first = signal(in_days(30));
+    let error = signal(String::new());
+    let busy = signal(false);
+    let sale = inv.sale_id.clone();
+    let save = {
+        let close = close.clone();
+        move || {
+            if busy.get_untracked() {
+                return;
+            }
+            let Ok(n) = count.get_untracked().trim().parse::<u32>() else {
+                error.set(error_text(st, "plan.count"));
+                return;
+            };
+            let input = PlanInput {
+                sale_id: sale.clone(),
+                count: n,
+                frequency: FREQUENCIES[frequency.get_untracked()].into(),
+                first_due: first.get_untracked().trim().to_owned(),
+            };
+            busy.set(true);
+            let close = close.clone();
+            let db = st.db();
+            let task = spawn(async move {
+                match db.call(move |s| create_plan(s, meta, input)).await {
+                    Ok(p) => {
+                        st.changed();
+                        close();
+                        show_toast(
+                            st,
+                            tr_args(st.lang(), "plans.created", &[("number", &p.number)]),
+                        );
+                    }
+                    Err(e) => {
+                        busy.set(false);
+                        error.set(first_error(st, &e));
+                    }
+                }
+            });
+            drop(task); // runs to completion: tasks end with their owner, not their handle
+        }
+    };
+    let financed = inv.open_minor;
+    let body = view()
+        .gap(px(14.0))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .child(view().flex_1().child(label_line(
+                    st.t("plans.financed"),
+                    ty::SM,
+                    FontWeight::MEDIUM,
+                    Tone::Muted,
+                )))
+                .child(figure(
+                    move || money(st, financed),
+                    ty::LG,
+                    FontWeight::BOLD,
+                    || Tone::Ink,
+                )),
+        )
+        .child(schedule_form(st, financed, count, frequency, first))
+        .child(error_line(error));
+    let footer = view()
+        .child(button(
+            Variant::Secondary,
+            Size::Md,
+            None,
+            st.t("form.cancel"),
+            close.clone(),
+        ))
+        .child(
+            button(
+                Variant::Primary,
+                Size::Md,
+                Some(Icon::Check),
+                st.t("plans.create"),
+                save,
+            )
+            .test_id("plan-save"),
+        );
+    let number = inv.number.clone();
+    dialog_frame(
+        st,
+        move || tr_args(st.lang(), "plans.new", &[("number", &number)]),
+        st.t("plans.new.help"),
+        body,
+        footer,
+        close,
+    )
+}
+
+/// Pays instalments of a plan (the next one by default).
+fn plan_pay_dialog(st: AppState, plan: Plan, close: impl Fn() + Clone + 'static) -> View {
+    let Some(session) = st.session.get_untracked() else {
+        return view();
+    };
+    let cur = session.currency;
+    let meta = session.meta("plan.pay");
+    let till = branch_till(st);
+    let next = plan.next().map_or(0, |i| i.open_minor());
+    let amount = signal(Money::from_minor(next, cur).to_plain_string());
+    let method = signal(Method::Cash);
+    let error = signal(String::new());
+    let busy = signal(false);
+    let id = plan.id.clone();
+    let save = {
+        let close = close.clone();
+        move || {
+            if busy.get_untracked() {
+                return;
+            }
+            let Ok(a) = parse_price(&amount.get_untracked(), cur) else {
+                error.set(error_text(st, "invalid_amount"));
+                return;
+            };
+            let m = match method.get_untracked() {
+                Method::Cash => "cash",
+                Method::Card => "card",
+                Method::Transfer => "transfer",
+            };
+            let (id, reg) = (id.clone(), till.get_untracked());
+            busy.set(true);
+            let close = close.clone();
+            let db = st.db();
+            let task = spawn(async move {
+                match db
+                    .call(move |s| pay_installments(s, meta, &id, a.minor(), m, reg))
+                    .await
+                {
+                    Ok(r) => {
+                        st.changed();
+                        close();
+                        show_toast(
+                            st,
+                            tr_args(
+                                st.lang(),
+                                "customers.collected",
+                                &[
+                                    ("number", &r.number),
+                                    ("amount", &money(st, r.amount_minor)),
+                                ],
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        busy.set(false);
+                        error.set(first_error(st, &e));
+                    }
+                }
+            });
+            drop(task); // runs to completion: tasks end with their owner, not their handle
+        }
+    };
+    let (left, late) = (plan.open_minor(), plan.late_minor());
+    let mut quick = view().flex_row().flex_wrap().gap(px(8.0));
+    for (key, v, id) in [
+        ("plans.pay.next", next, "pay-next"),
+        ("plans.pay.late", late, "pay-late"),
+        ("plans.pay.all", left, "pay-all"),
+    ] {
+        if v > 0 {
+            quick = quick.child(
+                button(
+                    Variant::Secondary,
+                    Size::Sm,
+                    None,
+                    move || format!("{} · {}", st.tn(key), money(st, v)),
+                    move || amount.set(Money::from_minor(v, cur).to_plain_string()),
+                )
+                .test_id(id),
+            );
+        }
+    }
+    let body = view()
+        .gap(px(14.0))
+        .child(field(
+            st.t("customers.receipt.amount"),
+            amount,
+            String::new,
+            String::new,
+            KeyboardType::Decimal,
+            "plan-amount",
+        ))
+        .child(quick)
+        .child(labelled(
+            st.t("pos.method"),
+            segmented(
+                vec![
+                    (Method::Cash, Box::new(st.t("pos.method.cash"))),
+                    (Method::Card, Box::new(st.t("pos.method.card"))),
+                    (Method::Transfer, Box::new(st.t("pos.method.transfer"))),
+                ],
+                method,
+            ),
+            None,
+        ))
+        .child(error_line(error));
+    let footer = view()
+        .child(button(
+            Variant::Secondary,
+            Size::Md,
+            None,
+            st.t("form.cancel"),
+            close.clone(),
+        ))
+        .child(
+            button(
+                Variant::Primary,
+                Size::Md,
+                Some(Icon::Check),
+                st.t("customers.receipt.confirm"),
+                save,
+            )
+            .test_id("plan-pay-confirm"),
+        );
+    let number = plan.number.clone();
+    dialog_frame(
+        st,
+        move || tr_args(st.lang(), "plans.pay.title", &[("number", &number)]),
+        st.t("plans.pay.help"),
+        body,
+        footer,
+        close,
+    )
+}
+
+/// A new schedule for what is left; the old one is kept. Needs a
+/// supervisor when the user may not reschedule.
+fn reschedule_dialog(st: AppState, plan: Plan, close: impl Fn() + Clone + 'static) -> View {
+    let Some(session) = st.session.get_untracked() else {
+        return view();
+    };
+    let meta = session.meta("plan.reschedule");
+    let owner = nsh_core::element::Owner::current();
+    let count = signal(
+        plan.installments
+            .iter()
+            .filter(|i| i.open_minor() > 0)
+            .count()
+            .max(1)
+            .to_string(),
+    );
+    let frequency = signal(
+        FREQUENCIES
+            .iter()
+            .position(|f| *f == plan.frequency)
+            .unwrap_or(1),
+    );
+    let first = signal(in_days(30));
+    let reason = signal(String::new());
+    let error = signal(String::new());
+    let busy = signal(false);
+    let approval: Signal<Option<String>> = signal(None);
+    let (asking, asking_open) = opener::<crate::screens::approval::Ask>();
+    let id = plan.id.clone();
+    let save = {
+        let close = close.clone();
+        move || {
+            if busy.get_untracked() {
+                return;
+            }
+            let Ok(n) = count.get_untracked().trim().parse::<u32>() else {
+                error.set(error_text(st, "plan.count"));
+                return;
+            };
+            let input = RescheduleInput {
+                count: n,
+                frequency: FREQUENCIES[frequency.get_untracked()].into(),
+                first_due: first.get_untracked().trim().to_owned(),
+                reason: reason.get_untracked(),
+                approval: approval.get_untracked(),
+            };
+            busy.set(true);
+            error.set(String::new());
+            let (id, close) = (id.clone(), close.clone());
+            let db = st.db();
+            let task = spawn(async move {
+                match db.call(move |s| reschedule(s, meta, &id, input)).await {
+                    Ok(p) => {
+                        st.changed();
+                        close();
+                        show_toast(
+                            st,
+                            tr_args(st.lang(), "plans.rescheduled", &[("number", &p.number)]),
+                        );
+                    }
+                    Err(e) => {
+                        busy.set(false);
+                        if let Some(p) = crate::screens::approval::needs_approval(&e) {
+                            asking.set(Some(crate::screens::approval::Ask {
+                                permission: p,
+                                branch_id: None,
+                                register_id: None,
+                            }));
+                        }
+                        error.set(first_error(st, &e));
+                    }
+                }
+            });
+            drop(task); // runs to completion: tasks end with their owner, not their handle
+        }
+    };
+    let retry = save.clone();
+    let left = plan.open_minor();
+    let body = view()
+        .gap(px(14.0))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .child(view().flex_1().child(label_line(
+                    st.t("plans.left"),
+                    ty::SM,
+                    FontWeight::MEDIUM,
+                    Tone::Muted,
+                )))
+                .child(figure(
+                    move || money(st, left),
+                    ty::LG,
+                    FontWeight::BOLD,
+                    || Tone::Ink,
+                )),
+        )
+        .child(schedule_form(st, left, count, frequency, first))
+        .child(field(
+            st.t("plans.reason"),
+            reason,
+            String::new,
+            String::new,
+            KeyboardType::Default,
+            "plan-reason",
+        ))
+        .child(error_line(error));
+    let footer = view()
+        .child(button(
+            Variant::Secondary,
+            Size::Md,
+            None,
+            st.t("form.cancel"),
+            close.clone(),
+        ))
+        .child(
+            button(
+                Variant::Primary,
+                Size::Md,
+                Some(Icon::Check),
+                st.t("plans.reschedule"),
+                save,
+            )
+            .test_id("plan-reschedule-confirm"),
+        );
+    let number = plan.number.clone();
+    view()
+        .flex_shrink(1.0)
+        .min_h(px(0.0))
+        .child(dialog_frame(
+            st,
+            move || tr_args(st.lang(), "plans.reschedule.title", &[("number", &number)]),
+            st.t("plans.reschedule.help"),
+            body,
+            footer,
+            close,
+        ))
+        .child(modal(asking_open, false, move || {
+            match asking.get_untracked() {
+                Some(ask) => {
+                    let retry = retry.clone();
+                    crate::screens::approval::approval_dialog(
+                        st,
+                        ask,
+                        move |id| {
+                            approval.set(Some(id));
+                            owner.run(&retry);
+                        },
+                        move || asking_open.set(false),
+                    )
+                    .into_element()
+                }
+                None => view().into_element(),
+            }
+        }))
+}
+
+/// Instalments due within a month, late ones first (their date is past).
+pub fn installments_page(st: AppState, compact: bool) -> View {
+    let data = resource(
+        move || st.session.get().map(|_| st.data_rev.get()),
+        move |_, _| {
+            let db = st.db();
+            async move { db.call(|s| due_installments(s, 30)).await }
+        },
+    );
+    let rows = computed(move || {
+        data.with(|d: Option<&Vec<DueRow>>| d.cloned())
+            .unwrap_or_default()
+    });
+    let (showing, showing_open) = opener::<String>();
+    let (editing, editing_open) = opener::<Option<CustomerRow>>();
+    let tiles = dynamic(move || {
+        let r = rows.get();
+        let late: i64 = r
+            .iter()
+            .filter(|d| d.state == "late")
+            .map(|d| d.open_minor)
+            .sum();
+        let soon: i64 = r
+            .iter()
+            .filter(|d| d.state != "late")
+            .map(|d| d.open_minor)
+            .sum();
+        let tile = |key: &'static str, v: i64, tone: Tone| {
+            view()
+                .flex_1()
+                .min_w(px(160.0))
+                .gap(px(4.0))
+                .p(px(14.0))
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(Tone::Border.color())
+                .bg(Tone::Surface.color())
+                .child(label_line(
+                    st.t(key),
+                    ty::XS,
+                    FontWeight::MEDIUM,
+                    Tone::Muted,
+                ))
+                .child(figure(
+                    move || money(st, v),
+                    ty::XL,
+                    FontWeight::BOLD,
+                    move || tone,
+                ))
+        };
+        view()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(10.0))
+            .child(tile(
+                "plans.page.late",
+                late,
+                if late > 0 { Tone::Danger } else { Tone::Ink },
+            ))
+            .child(tile("plans.page.soon", soon, Tone::Ink))
+            .into_element()
+    });
+    let list = dynamic(move || {
+        let r = rows.get();
+        if r.is_empty() {
+            return empty_state(
+                Icon::CalendarClock,
+                st.t("plans.page.empty"),
+                st.t("plans.page.empty.body"),
+                None,
+            )
+            .into_element();
+        }
+        let mut v = view();
+        for (i, d) in r.into_iter().enumerate() {
+            let id = d.customer_id.clone();
+            let name = d.customer_name.clone();
+            let detail = [
+                format!("{} · {}/{}", d.plan_number, d.seq, d.count),
+                d.phone.clone(),
+            ]
+            .into_iter()
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+            let when_text = if d.days_late > 0 {
+                tr_args(
+                    st.lang(),
+                    "plans.days_late",
+                    &[("days", &st.fmt().integer(d.days_late))],
+                )
+            } else {
+                d.due_date.clone()
+            };
+            let open = d.open_minor;
+            let mut tail = view().flex_row().items_center().gap(px(10.0));
+            if !compact {
+                tail = tail.child(label_line(
+                    move || when_text.clone(),
+                    ty::XS,
+                    FontWeight::MEDIUM,
+                    Tone::Muted,
+                ));
+            }
+            tail =
+                tail.child(state_badge(st, &d.state))
+                    .child(view().w(px(110.0)).items_end().child(figure(
+                        move || money(st, open),
+                        ty::SM,
+                        FontWeight::BOLD,
+                        || Tone::Ink,
+                    )));
+            v = v.child(
+                view()
+                    .test_id(&format!("due-{i}"))
+                    .flex_row()
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(16.0))
+                    .py(px(11.0))
+                    .border_t_1()
+                    .border_color(Tone::Border.color())
+                    .cursor_pointer()
+                    .hover(|s| s.bg(Tone::Hover.color()))
+                    .on_press(move || showing.set(Some(id.clone())))
+                    .child(icon(Icon::CalendarClock, 18.0, || Tone::Faint))
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(label_line(
+                                move || name.clone(),
+                                ty::SM,
+                                FontWeight::SEMIBOLD,
+                                Tone::Ink,
+                            ))
+                            .child(label_line(
+                                move || detail.clone(),
+                                ty::XS,
+                                FontWeight::NORMAL,
+                                Tone::Muted,
+                            )),
+                    )
+                    .child(tail),
+            );
+        }
+        v.into_element()
+    });
+    let body = view().gap(px(16.0)).child(tiles).child(card().child(list));
+    view()
+        .child(page(
+            st,
+            Route::Installments,
+            "plans.page.subtitle",
             view(),
             body,
             compact,
