@@ -296,3 +296,29 @@ test("tax classes and scale labels are the store's settings", async () => {
   await app.press("id:scale-save");
   await app.waitFor("text:Paramètres enregistrés");
 });
+
+test("stock levels and a stock count", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Stock");
+  await app.press("id:nav-inventory");
+  await app.waitFor("text:Valeur du stock");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 000 résultats"));
+  await app.press("text:Stock faible");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "129 résultats"));
+  // A count: 5 units of the first product found, then closed.
+  await app.press("id:tab-stock_counts");
+  await app.press("id:count-open");
+  await app.press("id:count-start");
+  await app.waitFor("text:Comptage");
+  await app.clear("id:count-qty");
+  await app.type("id:count-qty", "5");
+  await app.type("id:count-search", "P-01000");
+  await app.press("id:count-search-result-0");
+  await app.waitFor("id:count-line-0");
+  await app.press("id:count-close");
+  await app.waitUntil(() => app.texts().some((t) => plain(t).startsWith("Inventaire clôturé : 1")));
+  await app.waitFor("text:Clôturé");
+  await app.press("id:tab-movements");
+  await app.waitUntil(() => app.texts().some((t) => t.includes("INV-01-26")));
+});

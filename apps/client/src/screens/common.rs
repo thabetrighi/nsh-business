@@ -99,3 +99,35 @@ pub fn coming_soon(st: AppState, route: Route, compact: bool) -> View {
             None,
         )))
 }
+
+/// A page of a section: header with its actions, the section's tabs, then
+/// the body.
+pub fn page(
+    st: AppState,
+    route: Route,
+    subtitle: &'static str,
+    actions: View,
+    body: View,
+    compact: bool,
+) -> View {
+    view()
+        .w_full()
+        .p(px(page_pad(compact)))
+        .gap(px(if compact { 16.0 } else { 20.0 }))
+        .child(page_head(st, route, Some(subtitle), actions, compact))
+        .child(section_tabs(st, route))
+        .child(body)
+}
+
+/// A date and time from milliseconds, in the store's time zone (UTC+1).
+pub fn date_time(st: AppState, ms: i64) -> String {
+    let offset = 60;
+    let (y, m, d) = nb_store::time::civil_date(ms, offset);
+    let mins = (ms.div_euclid(60_000) + i64::from(offset)).rem_euclid(24 * 60);
+    let f = st.fmt();
+    format!(
+        "{} {}",
+        f.date(y, m, d),
+        f.time((mins / 60) as u32, (mins % 60) as u32)
+    )
+}

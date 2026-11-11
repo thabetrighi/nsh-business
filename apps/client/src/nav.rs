@@ -270,8 +270,17 @@ mod key_tests {
             if p.extension().is_none_or(|x| x != "rs") {
                 continue;
             }
+            // Formatting may break a call over lines: read it as one line.
             let text = std::fs::read_to_string(&p).unwrap_or_default();
-            for pat in ["st.t(\"", "st.tn(\"", "tr_args(st.lang(), \""] {
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            for pat in [
+                "st.t(\"",
+                "st.t( \"",
+                "st.tn(\"",
+                "st.tn( \"",
+                "tr_args(st.lang(), \"",
+                "tr_args( st.lang(), \"",
+            ] {
                 for (i, _) in text.match_indices(pat) {
                     let rest = &text[i + pat.len()..];
                     let Some(end) = rest.find('"') else { continue };

@@ -12,7 +12,7 @@ use nsh_core::element::{KeyboardType, View, input};
 use nsh_core::prelude::*;
 
 use crate::nav::Route;
-use crate::screens::common::{page_head, section_tabs};
+use crate::screens::common::page;
 use crate::screens::forms::error_text;
 use crate::state::AppState;
 use crate::ui::form::field;
@@ -20,25 +20,8 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{Size, Variant, badge, button, label, label_line};
 use crate::ui::overlay::{dialog_frame, modal, show_toast};
 use crate::ui::popup::{Action, dropdown, row_menu};
-use crate::ui::surface::{card, card_header_icon, empty_state, page_pad};
+use crate::ui::surface::{card, card_header_icon, empty_state};
 use crate::ui::tokens::{Status, Tone, fs, radius, ty};
-
-fn page(
-    st: AppState,
-    route: Route,
-    subtitle: &'static str,
-    actions: View,
-    body: View,
-    compact: bool,
-) -> View {
-    view()
-        .w_full()
-        .p(px(page_pad(compact)))
-        .gap(px(if compact { 16.0 } else { 20.0 }))
-        .child(page_head(st, route, Some(subtitle), actions, compact))
-        .child(section_tabs(st, route))
-        .child(body)
-}
 
 /// Shows the first rule broken by a failed call.
 fn toast_error(st: AppState, e: &crate::db::DbError) {

@@ -57,6 +57,22 @@ fn content(st: AppState, compact: bool) -> impl IntoElement {
         Route::Home => scroll().flex_1().child(home(st, compact)).into_element(),
         Route::Products => products(st, compact).into_element(),
         Route::Settings => settings(st, compact).into_element(),
+        Route::Inventory => scroll()
+            .flex_1()
+            .child(crate::screens::inventory::stock_page(st, compact))
+            .into_element(),
+        Route::Movements => scroll()
+            .flex_1()
+            .child(crate::screens::inventory::movements_page(st, compact))
+            .into_element(),
+        Route::Transfers => scroll()
+            .flex_1()
+            .child(crate::screens::inventory::transfers_page(st, compact))
+            .into_element(),
+        Route::StockCounts => scroll()
+            .flex_1()
+            .child(crate::screens::inventory::counts_page(st, compact))
+            .into_element(),
         Route::Categories => scroll()
             .flex_1()
             .child(crate::screens::catalog::categories(st, compact))
