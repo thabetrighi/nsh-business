@@ -376,3 +376,34 @@ test("the products table pages through the catalog", async () => {
   await app.press("text:100");
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–100 sur 129"));
 });
+
+test("a cash sale at the till, from opening to closing", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "100");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-search");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-item-1");
+  await app.waitFor("id:cart-line-1");
+  await app.press("id:cart-less-0");
+  await app.waitUntil(() => !app.texts().some((t) => plain(t).startsWith("2 ")));
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-confirm");
+  await app.clear("id:pay-given");
+  await app.type("id:pay-given", "5000");
+  await app.press("id:pay-confirm");
+  await app.waitUntil(() => app.texts().some((t) => /^Vente FV-01-\d\d-A\d+ enregistrée — rendre /.test(plain(t))));
+  await app.waitFor("text:Scannez ou touchez un produit pour commencer la vente.");
+  // Closing: the drawer is counted right.
+  await app.press("id:till-close");
+  await app.waitFor("text:Attendu dans le tiroir");
+  await app.type("id:till-counted", "0");
+  await app.waitUntil(() => app.texts().some((t) => plain(t).startsWith("Manquant de ")));
+  await app.press("id:till-close-confirm");
+  await app.waitFor("id:till-open");
+});

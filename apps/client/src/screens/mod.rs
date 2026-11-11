@@ -9,6 +9,7 @@ pub mod home;
 pub mod inventory;
 pub mod lock;
 pub mod picker;
+pub mod pos;
 pub mod product_editor;
 pub mod products;
 pub mod sample;

@@ -2,6 +2,7 @@
 //! buttons, badges, avatars, segmented controls, switches, checkboxes.
 //! Screens compose these; they do not style raw views for these roles.
 
+use nsh_core::LineHeight;
 use nsh_core::element::{SharedString, Text, View};
 use nsh_core::prelude::*;
 
@@ -20,6 +21,9 @@ pub fn label(
 ) -> Text {
     text(content)
         .text_size(px(fs(size)))
+        // Wrapped lines keep their marks apart (Tajawal's own spacing
+        // lets Arabic lines touch).
+        .line_height(LineHeight::Multiple(1.5))
         .font_weight(weight)
         .text_color(tone.color())
 }

@@ -40,8 +40,25 @@ pub(crate) fn post_operations(
     memo: &str,
     source: &str,
 ) -> Result<Option<String>> {
+    post_operations_at(w, branch, offset, ops, memo, source, None)
+}
+
+/// Like [`post_operations`], with the money of the till in `till` (a
+/// till's own account) instead of the cash role's.
+pub(crate) fn post_operations_at(
+    w: &mut Writer<'_>,
+    branch: &Branch,
+    offset: i32,
+    ops: &[Operation],
+    memo: &str,
+    source: &str,
+    till: Option<&str>,
+) -> Result<Option<String>> {
     let org = w.org()?;
-    let map = ledger::account_map(w.tx(), org)?;
+    let mut map = ledger::account_map(w.tx(), org)?;
+    if let Some(code) = till {
+        map.set(Role::Cash, code);
+    }
     let Some(entry) = posting::combined(ops, &map)? else {
         return Ok(None);
     };

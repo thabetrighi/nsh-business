@@ -56,21 +56,6 @@ fn money(st: AppState, minor: i64) -> String {
     st.fmt().money(Money::from_minor(minor, currency(st)))
 }
 
-/// A balance as an amount and its side (debit or credit).
-fn balance(st: AppState, minor: i64) -> String {
-    if minor == 0 {
-        return "—".into();
-    }
-    // The amount is isolated left-to-right: in Arabic its digit groups
-    // would otherwise follow the direction of the word after them.
-    format!(
-        "\u{2066}{}\u{2069}\u{00A0}{}",
-        st.fmt()
-            .amount(Money::from_minor(minor.abs(), currency(st))),
-        st.tn(if minor > 0 { "acc.dr" } else { "acc.cr" })
-    )
-}
-
 /// `YYYY-MM-DD` as the reader writes dates.
 fn date(st: AppState, iso: &str) -> String {
     match nb_domain::fiscal::Date::parse(iso) {
@@ -235,6 +220,37 @@ fn span_bar(st: AppState, span: Span, compact: bool) -> View {
         .gap(px(10.0))
         .child(chips)
         .child(dates)
+}
+
+/// A balance in a column: the amount, then its side (debit or credit) as
+/// a word of its own — one text would mix the number with the word and
+/// let Arabic reorder the digit groups.
+fn balance_cell(st: AppState, minor: i64, w: f32, weight: FontWeight, tone: Tone) -> View {
+    let mut row = view()
+        .w(px(w))
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .justify_end()
+        .gap(px(4.0));
+    if minor == 0 {
+        return row.child(figure(|| "—".to_owned(), ty::SM, weight, move || tone));
+    }
+    row = row.child(figure(
+        move || {
+            st.fmt()
+                .amount(Money::from_minor(minor.abs(), currency(st)))
+        },
+        ty::SM,
+        weight,
+        move || tone,
+    ));
+    row.child(label_line(
+        st.t(if minor > 0 { "acc.dr" } else { "acc.cr" }),
+        ty::XS,
+        FontWeight::MEDIUM,
+        Tone::Muted,
+    ))
 }
 
 /// A row of figures: a text cell then fixed amount columns.
@@ -962,8 +978,9 @@ fn chart_row(
     if !a.active {
         row = row.child(badge(Status::Neutral, None, st.t("acc.inactive")));
     }
-    row = row.child(amount_cell(
-        move || balance(st, bal),
+    row = row.child(balance_cell(
+        st,
+        bal,
         130.0,
         if group {
             FontWeight::SEMIBOLD
@@ -1848,11 +1865,29 @@ pub fn ledger_page(st: AppState, compact: bool) -> View {
         let w = if compact { 92.0 } else { 130.0 };
         let kpis = {
             let k = move |name: &'static str, v: i64, bal: bool| {
+                // A balance shows its side under the amount (not in the
+                // same text: see `balance_cell`).
+                let side = if bal && v != 0 {
+                    view().child(label_line(
+                        st.t(if v > 0 { "acc.dr" } else { "acc.cr" }),
+                        ty::XS,
+                        FontWeight::MEDIUM,
+                        Tone::Muted,
+                    ))
+                } else {
+                    view()
+                };
                 let cell = kpi(
                     st.t(name),
-                    move || if bal { balance(st, v) } else { money(st, v) },
+                    move || {
+                        if bal && v == 0 {
+                            "—".to_owned()
+                        } else {
+                            money(st, v.abs())
+                        }
+                    },
                     None,
-                    view(),
+                    side,
                     compact,
                 );
                 if compact {
@@ -1907,12 +1942,7 @@ pub fn ledger_page(st: AppState, compact: bool) -> View {
                 )))
                 .child(amount_cell(String::new, w, FontWeight::NORMAL, Tone::Ink))
                 .child(amount_cell(String::new, w, FontWeight::NORMAL, Tone::Ink))
-                .child(amount_cell(
-                    move || balance(st, opening),
-                    w,
-                    FontWeight::MEDIUM,
-                    Tone::Ink,
-                )),
+                .child(balance_cell(st, opening, w, FontWeight::MEDIUM, Tone::Ink)),
         );
         for (i, l) in s.lines.into_iter().enumerate() {
             let top = format!("{} · {}", date(st, &l.date), l.number);
@@ -1961,12 +1991,7 @@ pub fn ledger_page(st: AppState, compact: bool) -> View {
                         FontWeight::NORMAL,
                         Tone::Ink,
                     ))
-                    .child(amount_cell(
-                        move || balance(st, b),
-                        w,
-                        FontWeight::MEDIUM,
-                        Tone::Ink,
-                    )),
+                    .child(balance_cell(st, b, w, FontWeight::MEDIUM, Tone::Ink)),
             );
         }
         let title = format!("{} — {}", s.code, s.name);
@@ -2118,12 +2143,12 @@ pub fn trial_balance_page(st: AppState, compact: bool) -> View {
                         .child(label_line(move || text.clone(), ty::SM, weight, Tone::Ink)),
                 );
             if !compact {
-                row = row.child(amount_cell(move || balance(st, o), w, weight, Tone::Ink));
+                row = row.child(balance_cell(st, o, w, weight, Tone::Ink));
             }
             row = row
                 .child(amount_cell(move || amount(st, d), w, weight, Tone::Ink))
                 .child(amount_cell(move || amount(st, c), w, weight, Tone::Ink))
-                .child(amount_cell(move || balance(st, b), w, weight, Tone::Ink));
+                .child(balance_cell(st, b, w, weight, Tone::Ink));
             v = v.child(row);
         }
         let (td, tc) = (t.debit_minor, t.credit_minor);

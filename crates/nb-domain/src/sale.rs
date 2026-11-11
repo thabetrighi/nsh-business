@@ -1,0 +1,410 @@
+//! A sale in progress (M8.1–M8.3): lines with their quantity, unit price,
+//! tax rate and discount; a discount on the whole sale shared across its
+//! lines; totals that always add up; and how it is paid (cash with change,
+//! card, transfer, on the customer's account, or a mix).
+
+use nb_core::{Money, Quantity, Rate};
+
+use crate::RuleError;
+use crate::tax::{RateTotal, TaxMode, Taxed, split, summary};
+
+/// A reduction: a share of the amount (basis points) or a fixed amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Discount {
+    #[default]
+    None,
+    /// 1000 = 10 %.
+    Percent(i64),
+    Amount(Money),
+}
+
+impl Discount {
+    /// The reduction of `amount` (never more than it).
+    fn of(self, amount: Money) -> Result<Money, RuleError> {
+        let d = match self {
+            Discount::None => Money::zero(amount.currency()),
+            Discount::Percent(bps) => {
+                if !(0..=10_000).contains(&bps) {
+                    return Err(RuleError::on("discount", "sale.discount_invalid"));
+                }
+                amount.mul_ratio(bps, 10_000)?
+            }
+            Discount::Amount(m) => {
+                if m.is_negative() {
+                    return Err(RuleError::on("discount", "sale.discount_invalid"));
+                }
+                m
+            }
+        };
+        if d.minor() > amount.minor() {
+            return Err(RuleError::on("discount", "sale.discount_too_big"));
+        }
+        Ok(d)
+    }
+}
+
+/// One line of a sale. Prices are per sale unit, typed in the cart's tax
+/// mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CartLine {
+    /// Quantity in the sale unit.
+    pub qty: Quantity,
+    pub unit_price: Money,
+    /// The lowest price per sale unit allowed without permission.
+    pub min_price: Option<Money>,
+    pub tax_rate: Rate,
+    pub discount: Discount,
+}
+
+/// A sale: its lines, a discount on the whole, and how prices are typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cart {
+    pub mode: TaxMode,
+    pub lines: Vec<CartLine>,
+    pub discount: Discount,
+}
+
+/// The figures of one line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineTotal {
+    /// Quantity × price.
+    pub base: Money,
+    pub line_discount: Money,
+    /// Its share of the sale's discount.
+    pub sale_discount: Money,
+    /// What the line comes to, split into net, tax and gross.
+    pub taxed: Taxed,
+    /// Sold below its floor price (needs permission).
+    pub below_min: bool,
+    /// Its discount (line and share of the sale's) in basis points of its
+    /// base: checked against what the seller may give.
+    pub discount_bps: i64,
+}
+
+/// Every figure of the sale; `net + tax = total` and the lines add up to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Totals {
+    pub lines: Vec<LineTotal>,
+    /// Before any discount.
+    pub gross_before: Money,
+    pub discounts: Money,
+    pub net: Money,
+    pub tax: Money,
+    pub total: Money,
+    pub by_rate: Vec<RateTotal>,
+}
+
+impl Cart {
+    pub fn totals(&self) -> Result<Totals, RuleError> {
+        let Some(first) = self.lines.first() else {
+            return Err(RuleError::on("lines", "sale.empty"));
+        };
+        let currency = first.unit_price.currency();
+        let zero = Money::zero(currency);
+        let mut after_line = Vec::with_capacity(self.lines.len());
+        let mut lines = Vec::with_capacity(self.lines.len());
+        for l in &self.lines {
+            if l.qty.is_zero() || l.qty.is_negative() {
+                return Err(RuleError::on("qty", "sale.qty_positive"));
+            }
+            if l.unit_price.is_negative() {
+                return Err(RuleError::on("price", "ledger.negative"));
+            }
+            let base = l.qty.times_price(l.unit_price)?;
+            let line_discount = l.discount.of(base)?;
+            after_line.push(base.checked_sub(line_discount)?);
+            lines.push((base, line_discount));
+        }
+        let subtotal = Money::sum(currency, &after_line)?;
+        let sale_discount = self.discount.of(subtotal)?;
+        // The sale's discount, shared in proportion to what each line comes
+        // to (to the cent: the shares add up to it).
+        let shares = if sale_discount.is_zero() || subtotal.is_zero() {
+            vec![zero; self.lines.len()]
+        } else {
+            let weights: Vec<u64> = after_line
+                .iter()
+                .map(|m| u64::try_from(m.minor()).unwrap_or(0))
+                .collect();
+            sale_discount.allocate(&weights)?
+        };
+        let mut out = Vec::with_capacity(self.lines.len());
+        let mut taxed_all = Vec::with_capacity(self.lines.len());
+        for (i, l) in self.lines.iter().enumerate() {
+            let (base, line_discount) = lines[i];
+            let amount = after_line[i].checked_sub(shares[i])?;
+            let taxed = split(amount, l.tax_rate, self.mode)?;
+            let below_min = match l.min_price {
+                Some(min) => amount.minor() < l.qty.times_price(min)?.minor(),
+                None => false,
+            };
+            let off = line_discount.checked_add(shares[i])?;
+            let discount_bps = if base.is_zero() {
+                0
+            } else {
+                i64::try_from(i128::from(off.minor()) * 10_000 / i128::from(base.minor()))
+                    .unwrap_or(i64::MAX)
+            };
+            taxed_all.push((l.tax_rate, taxed));
+            out.push(LineTotal {
+                base,
+                line_discount,
+                sale_discount: shares[i],
+                taxed,
+                below_min,
+                discount_bps,
+            });
+        }
+        let sum = |f: fn(&LineTotal) -> Money| -> Result<Money, RuleError> {
+            let v: Vec<Money> = out.iter().map(f).collect();
+            Ok(Money::sum(currency, &v)?)
+        };
+        let gross_before = sum(|l| l.base)?;
+        let line_discounts = sum(|l| l.line_discount)?;
+        Ok(Totals {
+            gross_before,
+            discounts: line_discounts.checked_add(sale_discount)?,
+            net: sum(|l| l.taxed.net)?,
+            tax: sum(|l| l.taxed.tax)?,
+            total: sum(|l| l.taxed.gross)?,
+            by_rate: summary(&taxed_all)?,
+            lines: out,
+        })
+    }
+}
+
+/// How money is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Cash,
+    Card,
+    Transfer,
+    /// On the customer's account (paid later).
+    Credit,
+}
+
+impl Method {
+    pub fn code(self) -> &'static str {
+        match self {
+            Method::Cash => "cash",
+            Method::Card => "card",
+            Method::Transfer => "transfer",
+            Method::Credit => "credit",
+        }
+    }
+    pub fn from_code(s: &str) -> Option<Self> {
+        [Method::Cash, Method::Card, Method::Transfer, Method::Credit]
+            .into_iter()
+            .find(|m| m.code() == s)
+    }
+}
+
+/// What a sale of `due` was paid with: cash kept (after change), card,
+/// transfer, and what remains on the customer's account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settlement {
+    pub cash: Money,
+    pub card: Money,
+    pub transfer: Money,
+    pub credit: Money,
+    /// Cash given back.
+    pub change: Money,
+}
+
+/// Settles `due` with the `given` amounts: card and transfer cannot exceed
+/// it; cash covers the rest and gives change; what is still missing goes on
+/// the customer's account when `credit_allowed`, else the sale is
+/// underpaid. An explicit `Credit` amount is taken as asked.
+pub fn settle(
+    due: Money,
+    given: &[(Method, Money)],
+    credit_allowed: bool,
+) -> Result<Settlement, RuleError> {
+    let zero = Money::zero(due.currency());
+    let by = |m: Method| -> Result<Money, RuleError> {
+        let mut total = zero;
+        for (method, amount) in given {
+            if amount.is_negative() {
+                return Err(RuleError::on("payments", "ledger.negative"));
+            }
+            if *method == m {
+                total = total.checked_add(*amount)?;
+            }
+        }
+        Ok(total)
+    };
+    let (cash_given, card, transfer, credit_asked) = (
+        by(Method::Cash)?,
+        by(Method::Card)?,
+        by(Method::Transfer)?,
+        by(Method::Credit)?,
+    );
+    let non_cash = card.checked_add(transfer)?.checked_add(credit_asked)?;
+    if non_cash.minor() > due.minor() {
+        return Err(RuleError::on("payments", "sale.overpaid"));
+    }
+    let rest = due.checked_sub(non_cash)?;
+    let cash = Money::from_minor(cash_given.minor().min(rest.minor()), due.currency());
+    let change = cash_given.checked_sub(cash)?;
+    let missing = rest.checked_sub(cash)?;
+    if !missing.is_zero() && !credit_allowed {
+        return Err(RuleError::on("payments", "sale.underpaid"));
+    }
+    if (!credit_asked.is_zero() || !missing.is_zero()) && !credit_allowed {
+        return Err(RuleError::on("payments", "sale.credit_needs_customer"));
+    }
+    Ok(Settlement {
+        cash,
+        card,
+        transfer,
+        credit: credit_asked.checked_add(missing)?,
+        change,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nb_core::Currency;
+
+    fn da(minor: i64) -> Money {
+        Money::from_minor(minor, Currency::DZD)
+    }
+    fn q(s: &str) -> Quantity {
+        Quantity::new(s.parse().unwrap_or_default())
+    }
+    fn line(qty: &str, price: i64, bps: i64) -> CartLine {
+        CartLine {
+            qty: q(qty),
+            unit_price: da(price),
+            min_price: None,
+            tax_rate: Rate::from_bps(bps),
+            discount: Discount::None,
+        }
+    }
+    fn cart(lines: Vec<CartLine>, discount: Discount) -> Cart {
+        Cart {
+            mode: TaxMode::Inclusive,
+            lines,
+            discount,
+        }
+    }
+
+    #[test]
+    fn totals_add_up() -> Result<(), RuleError> {
+        // 2 × 119.00 at 19 % and 1.5 kg × 100.00 at 9 %, prices with tax.
+        let t = cart(
+            vec![line("2", 11_900, 1_900), line("1.5", 10_000, 900)],
+            Discount::None,
+        )
+        .totals()?;
+        assert_eq!(t.total, da(23_800 + 15_000));
+        assert_eq!(t.tax, da(3_800 + 1_239));
+        assert_eq!(t.net.checked_add(t.tax)?, t.total);
+        assert_eq!(t.by_rate.len(), 2);
+        // Prices without tax: the tax comes on top.
+        let mut c = cart(vec![line("2", 10_000, 1_900)], Discount::None);
+        c.mode = TaxMode::Exclusive;
+        let t = c.totals()?;
+        assert_eq!((t.net, t.tax, t.total), (da(20_000), da(3_800), da(23_800)));
+        Ok(())
+    }
+
+    #[test]
+    fn discounts_on_lines_and_on_the_sale() -> Result<(), RuleError> {
+        let mut a = line("1", 10_000, 1_900);
+        a.discount = Discount::Percent(1_000);
+        let mut b = line("3", 3_333, 1_900);
+        b.discount = Discount::Amount(da(1));
+        // Lines: 90.00 and 99.98; then 10.00 off the sale, shared.
+        let t = cart(vec![a, b], Discount::Amount(da(1_000))).totals()?;
+        assert_eq!(t.gross_before, da(19_999));
+        assert_eq!(t.discounts, da(1_000 + 1 + 1_000));
+        assert_eq!(t.total, da(17_998));
+        let shares: i64 = t.lines.iter().map(|l| l.sale_discount.minor()).sum();
+        assert_eq!(shares, 1_000, "the shares make the whole discount");
+        assert_eq!(
+            t.lines[0].discount_bps, 1_474,
+            "10 % + its 4.74 share of the 10.00"
+        );
+        // 15 % off the sale.
+        let t = cart(vec![line("1", 10_000, 0)], Discount::Percent(1_500)).totals()?;
+        assert_eq!(t.total, da(8_500));
+        Ok(())
+    }
+
+    #[test]
+    fn wrong_carts_are_refused() {
+        let code = |c: Cart| c.totals().err().map(|e| e.code);
+        assert_eq!(code(cart(vec![], Discount::None)), Some("sale.empty"));
+        assert_eq!(
+            code(cart(vec![line("0", 100, 0)], Discount::None)),
+            Some("sale.qty_positive")
+        );
+        let mut l = line("1", 100, 0);
+        l.discount = Discount::Amount(da(101));
+        assert_eq!(
+            code(cart(vec![l], Discount::None)),
+            Some("sale.discount_too_big")
+        );
+        assert_eq!(
+            code(cart(vec![line("1", 100, 0)], Discount::Percent(10_001))),
+            Some("sale.discount_invalid")
+        );
+    }
+
+    #[test]
+    fn floor_prices_are_flagged() -> Result<(), RuleError> {
+        let mut l = line("2", 10_000, 0);
+        l.min_price = Some(da(9_500));
+        l.discount = Discount::Percent(600);
+        let t = cart(vec![l.clone()], Discount::None).totals()?;
+        assert!(t.lines[0].below_min, "188.00 < 2 × 95.00");
+        l.discount = Discount::Percent(500);
+        assert!(!cart(vec![l], Discount::None).totals()?.lines[0].below_min);
+        Ok(())
+    }
+
+    #[test]
+    fn settling_cash_card_and_credit() -> Result<(), RuleError> {
+        let due = da(17_998);
+        // Cash with change.
+        let s = settle(due, &[(Method::Cash, da(20_000))], false)?;
+        assert_eq!((s.cash, s.change, s.credit), (due, da(2_002), da(0)));
+        // Card for part, cash for the rest.
+        let s = settle(
+            due,
+            &[(Method::Card, da(10_000)), (Method::Cash, da(8_000))],
+            false,
+        )?;
+        assert_eq!((s.card, s.cash, s.change), (da(10_000), da(7_998), da(2)));
+        // Short: on the customer's account, or refused without one.
+        let s = settle(due, &[(Method::Cash, da(5_000))], true)?;
+        assert_eq!((s.cash, s.credit), (da(5_000), da(12_998)));
+        let code = |r: Result<Settlement, RuleError>| r.err().map(|e| e.code);
+        assert_eq!(
+            code(settle(due, &[(Method::Cash, da(5_000))], false)),
+            Some("sale.underpaid")
+        );
+        assert_eq!(
+            code(settle(due, &[(Method::Card, da(20_000))], false)),
+            Some("sale.overpaid")
+        );
+        assert_eq!(
+            code(settle(due, &[(Method::Credit, da(17_998))], false)),
+            Some("sale.credit_needs_customer")
+        );
+        // Every settlement adds up to what was due.
+        for given in [
+            vec![(Method::Transfer, due)],
+            vec![(Method::Cash, da(1)), (Method::Credit, da(17_000))],
+        ] {
+            let s = settle(due, &given, true)?;
+            assert_eq!(
+                s.cash.minor() + s.card.minor() + s.transfer.minor() + s.credit.minor(),
+                due.minor()
+            );
+        }
+        Ok(())
+    }
+}

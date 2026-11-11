@@ -63,6 +63,7 @@ roles! {
     StockLoss "stock_loss" "658",
     CashShort "cash_short" "658",
     CashOver "cash_over" "758",
+    InternalTransfer "internal_transfer" "58",
 }
 
 /// The accounts an organization uses for each role.
@@ -174,6 +175,9 @@ pub enum Operation {
     StockLoss { value: Money },
     /// The till counted less (short) or more (over) than expected.
     CashDifference { short: Money, over: Money },
+    /// Money put in the till (`into_till`) or taken out of it, through
+    /// internal transfers (to or from the bank, the safe, another till).
+    TillTransfer { amount: Money, into_till: bool },
 }
 
 impl Operation {
@@ -191,6 +195,7 @@ impl Operation {
             Operation::StockGain { .. } => "stock.gain",
             Operation::StockLoss { .. } => "stock.loss",
             Operation::CashDifference { .. } => "cash.difference",
+            Operation::TillTransfer { .. } => "cash.transfer",
         }
     }
 }
@@ -328,6 +333,18 @@ fn lines(op: &Operation, map: &AccountMap) -> Result<Vec<Line>, RuleError> {
                 Line::credit(a(Role::Cash)?, short),
                 Line::debit(a(Role::Cash)?, over),
                 Line::credit(a(Role::CashOver)?, over),
+            ]
+        }
+        Operation::TillTransfer { amount, into_till } => {
+            check_positive(&[amount])?;
+            let (debit, credit) = if into_till {
+                (Role::Cash, Role::InternalTransfer)
+            } else {
+                (Role::InternalTransfer, Role::Cash)
+            };
+            vec![
+                Line::debit(a(debit)?, amount),
+                Line::credit(a(credit)?, amount),
             ]
         }
     };
@@ -482,6 +499,24 @@ mod tests {
                 over: da(50)
             }),
             [l("531", 50, 0), l("758", 0, 50)]
+        );
+    }
+
+    #[test]
+    fn till_transfers() {
+        assert_eq!(
+            lines(Operation::TillTransfer {
+                amount: da(5_000),
+                into_till: true
+            }),
+            [l("531", 5_000, 0), l("58", 0, 5_000)]
+        );
+        assert_eq!(
+            lines(Operation::TillTransfer {
+                amount: da(5_000),
+                into_till: false
+            }),
+            [l("58", 5_000, 0), l("531", 0, 5_000)]
         );
     }
 

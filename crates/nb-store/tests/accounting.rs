@@ -562,7 +562,7 @@ fn an_older_database_gains_groups_roles_and_tills() -> R {
     )?;
     assert_eq!(groups, 2);
     let roles: i64 = conn.query_row("SELECT COUNT(*) FROM account_roles", [], |r| r.get(0))?;
-    assert_eq!(roles, 16);
+    assert_eq!(roles, 17, "16 roles of M7 and the internal transfers of M8");
     let tills: Vec<String> = conn
         .prepare("SELECT id FROM money_accounts ORDER BY kind")?
         .query_map([], |r| r.get(0))?

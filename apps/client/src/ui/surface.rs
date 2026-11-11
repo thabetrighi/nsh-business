@@ -24,17 +24,12 @@ pub fn page_header_full(
     compact: bool,
 ) -> View {
     if compact {
-        let mut row = view().flex_row().items_center().gap(px(12.0));
-        row = row.child(match subtitle {
-            Some(s) => view().flex_1().min_w(px(0.0)).child(label(
-                s,
-                ty::SM,
-                FontWeight::NORMAL,
-                Tone::Muted,
-            )),
-            None => view().flex_1(),
-        });
-        return row.child(actions.flex_row().items_center().gap(px(8.0)));
+        // Phones: the line under the title on its own, the actions under it.
+        let mut col = view().w_full().gap(px(10.0));
+        if let Some(s) = subtitle {
+            col = col.child(label(s, ty::SM, FontWeight::NORMAL, Tone::Muted));
+        }
+        return col.child(actions.flex_row().flex_wrap().items_center().gap(px(8.0)));
     }
     // Tajawal sets lines tight: the header's lines keep some air.
     let mut heading = view().flex_1().min_w(px(0.0)).gap(px(5.0));

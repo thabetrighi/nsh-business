@@ -9,6 +9,7 @@ pub mod inventory;
 pub mod ledger;
 pub mod org;
 pub mod products;
+pub mod sales;
 pub mod setup;
 pub mod stock;
 pub mod tracked;
