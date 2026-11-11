@@ -688,3 +688,25 @@ scale.decimals = Decimals
 scale.add = Add a layout
 scale.example_weight = Example: {code} → article {article}, weight {value} kg
 scale.example_price = Example: {code} → article {article}, price {value}
+
+# M6 — inventory
+error.transfer.same_warehouse = Choose another destination warehouse.
+error.transfer.empty = Add at least one item.
+error.transfer.duplicate_line = This item is listed twice.
+error.transfer.received_more = Cannot receive more than was sent.
+error.transfer.already_received = This transfer was already received.
+error.count.already_open = A count is already open for this warehouse.
+error.count.closed = This count is closed.
+error.stock.cost_required = A cost is required for this receipt.
+movement.opening = Opening
+movement.purchase = Purchase
+movement.sale = Sale
+movement.sale_return = Customer return
+movement.purchase_return = Supplier return
+movement.adjust_in = Adjustment +
+movement.adjust_out = Adjustment −
+movement.transfer_out = Transfer out
+movement.transfer_in = Transfer in
+movement.count_gain = Count gain
+movement.count_loss = Count loss
+movement.waste = Waste

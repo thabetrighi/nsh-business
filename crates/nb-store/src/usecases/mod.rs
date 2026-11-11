@@ -4,6 +4,7 @@
 
 pub mod access;
 pub mod catalog;
+pub mod inventory;
 pub mod ledger;
 pub mod org;
 pub mod products;

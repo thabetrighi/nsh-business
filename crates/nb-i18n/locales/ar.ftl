@@ -688,3 +688,25 @@ scale.decimals = منازل عشرية
 scale.add = إضافة صيغة
 scale.example_weight = مثال: {code} ← الصنف {article}، الوزن {value} كغ
 scale.example_price = مثال: {code} ← الصنف {article}، السعر {value}
+
+# M6 — inventory
+error.transfer.same_warehouse = اختر مستودعاً آخر للوجهة.
+error.transfer.empty = أضف صنفاً واحداً على الأقل.
+error.transfer.duplicate_line = الصنف مذكور مرتين.
+error.transfer.received_more = لا يمكن استلام أكثر مما أُرسل.
+error.transfer.already_received = هذا التحويل استُلم.
+error.count.already_open = يوجد جرد مفتوح لهذا المستودع.
+error.count.closed = هذا الجرد مغلق.
+error.stock.cost_required = التكلفة مطلوبة لهذا الإدخال.
+movement.opening = رصيد افتتاحي
+movement.purchase = شراء
+movement.sale = بيع
+movement.sale_return = مرتجع زبون
+movement.purchase_return = مرتجع لمورد
+movement.adjust_in = تسوية بالزيادة
+movement.adjust_out = تسوية بالنقص
+movement.transfer_out = تحويل صادر
+movement.transfer_in = تحويل وارد
+movement.count_gain = فائض جرد
+movement.count_loss = عجز جرد
+movement.waste = إتلاف

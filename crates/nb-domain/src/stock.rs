@@ -81,9 +81,13 @@ impl MovementKind {
         }
     }
 
-    /// Receipts at a known cost change the average cost.
+    /// Receipts at a known cost change the average cost (a transfer brings
+    /// the sending warehouse's cost into the receiving one).
     pub fn carries_cost(self) -> bool {
-        matches!(self, MovementKind::Opening | MovementKind::Purchase)
+        matches!(
+            self,
+            MovementKind::Opening | MovementKind::Purchase | MovementKind::TransferIn
+        )
     }
 }
 
@@ -197,9 +201,72 @@ pub fn replay(
         })
 }
 
+/// What a counted quantity means against the book: the movement that
+/// brings the book to the count, or `None` when they agree (M6.7).
+pub fn count_difference(
+    on_hand: Quantity,
+    counted: Quantity,
+) -> Result<Option<(MovementKind, Quantity)>, RuleError> {
+    if counted.is_negative() {
+        return Err(RuleError::on("counted", "stock.quantity_positive"));
+    }
+    let diff = counted.decimal() - on_hand.decimal();
+    Ok(if diff.is_zero() {
+        None
+    } else if diff.is_sign_positive() {
+        Some((MovementKind::CountGain, Quantity::new(diff)))
+    } else {
+        Some((MovementKind::CountLoss, Quantity::new(-diff)))
+    })
+}
+
+/// What went missing between a transfer's sending and its receiving
+/// (M6.5). Receiving more than was sent is refused: it is a new transfer.
+pub fn transfer_shortfall(sent: Quantity, received: Quantity) -> Result<Quantity, RuleError> {
+    if received.is_negative() {
+        return Err(RuleError::on("received", "stock.quantity_positive"));
+    }
+    if received.decimal() > sent.decimal() {
+        return Err(RuleError::on("received", "transfer.received_more"));
+    }
+    Ok(Quantity::new(sent.decimal() - received.decimal()))
+}
+
+/// Quantity free to sell or send: on hand less what is reserved (M6.4).
+pub fn available(on_hand: Quantity, reserved: Quantity) -> Quantity {
+    Quantity::new(on_hand.decimal() - reserved.decimal())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_and_transfers() -> Result<(), RuleError> {
+        let q = Quantity::whole;
+        assert_eq!(
+            count_difference(q(10), q(12))?,
+            Some((MovementKind::CountGain, q(2)))
+        );
+        assert_eq!(
+            count_difference(q(10), q(7))?,
+            Some((MovementKind::CountLoss, q(3)))
+        );
+        assert_eq!(
+            count_difference(q(-2), q(0))?,
+            Some((MovementKind::CountGain, q(2)))
+        );
+        assert_eq!(count_difference(q(5), q(5))?, None);
+        assert!(count_difference(q(5), q(-1)).is_err());
+        assert_eq!(transfer_shortfall(q(10), q(9))?, q(1));
+        assert_eq!(transfer_shortfall(q(10), q(10))?, q(0));
+        assert_eq!(
+            transfer_shortfall(q(10), q(11)),
+            Err(RuleError::on("received", "transfer.received_more"))
+        );
+        assert_eq!(available(q(10), q(4)), q(6));
+        Ok(())
+    }
     use nb_core::Currency;
 
     fn da(minor: i64) -> Money {

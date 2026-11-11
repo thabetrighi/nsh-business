@@ -688,3 +688,25 @@ scale.decimals = Décimales
 scale.add = Ajouter un format
 scale.example_weight = Exemple : {code} → article {article}, poids {value} kg
 scale.example_price = Exemple : {code} → article {article}, prix {value}
+
+# M6 — inventory
+error.transfer.same_warehouse = Choisissez un autre dépôt de destination.
+error.transfer.empty = Ajoutez au moins un article.
+error.transfer.duplicate_line = Cet article figure deux fois.
+error.transfer.received_more = On ne peut pas recevoir plus que l'envoi.
+error.transfer.already_received = Ce transfert a déjà été reçu.
+error.count.already_open = Un inventaire est déjà ouvert pour ce dépôt.
+error.count.closed = Cet inventaire est clos.
+error.stock.cost_required = Le coût est requis pour cette entrée.
+movement.opening = Stock initial
+movement.purchase = Achat
+movement.sale = Vente
+movement.sale_return = Retour client
+movement.purchase_return = Retour fournisseur
+movement.adjust_in = Ajustement +
+movement.adjust_out = Ajustement −
+movement.transfer_out = Transfert sortant
+movement.transfer_in = Transfert entrant
+movement.count_gain = Écart d'inventaire +
+movement.count_loss = Écart d'inventaire −
+movement.waste = Perte / casse
