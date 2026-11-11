@@ -604,3 +604,154 @@ fn carts_put_aside_come_back_once() -> R {
     assert_eq!(s.verify_audit_chain()?, None);
     Ok(())
 }
+
+#[test]
+fn an_exchange_is_a_return_and_a_sale_at_once() -> R {
+    let (mut s, setup) = store();
+    let reg = register(&s);
+    let milk = stocked(&mut s, &setup, "Lait", "10", 800, 1_190)?;
+    let oil = stocked(&mut s, &setup, "Huile", "5", 2_500, 3_570)?;
+    let shift = open_shift(&mut s, meta(&setup, "shift.open"), &reg, 3_000)?;
+    // Two oils paid by card; one comes back for three milks and the rest
+    // (35.70 − 35.70 = 0)…
+    let sold = complete_sale(
+        &mut s,
+        meta(&setup, "sale"),
+        sale(&setup, &reg, vec![(oil, "2")], vec![("card", 7_140)]),
+    )?;
+    let tap = meta(&setup, "exchange");
+    let input = ExchangeInput {
+        back: back(&sold.number, &reg, vec![(0, "1", true)], ""),
+        sale: sale(&setup, &reg, vec![(milk, "3")], vec![]),
+    };
+    let x = exchange(&mut s, tap, input.clone())?;
+    assert_eq!(
+        exchange(&mut s, tap, input)?,
+        x,
+        "a double tap exchanges once"
+    );
+    assert_eq!(
+        (
+            x.back.total_minor,
+            x.sale.total_minor,
+            x.used_minor,
+            x.given_back_minor
+        ),
+        (3_570, 3_570, 3_570, 0)
+    );
+    assert_eq!(available(&s, oil, setup.warehouse)?.to_string(), "4");
+    assert_eq!(available(&s, milk, setup.warehouse)?.to_string(), "7");
+    // The drawer never saw it: no cash sale, no cash refund, same cash.
+    let sum = shift_summary(&s, &shift.id)?;
+    assert_eq!(
+        (
+            sum.cash_sales_minor,
+            sum.refunds_minor,
+            sum.exchanges_minor,
+            sum.expected_minor
+        ),
+        (0, 0, 3_570, 3_000)
+    );
+    assert_eq!(balance(&s, "531"), 0, "the till account nets out");
+
+    // …then the other oil for one milk: 23.80 back, out of the drawer.
+    let x = exchange(
+        &mut s,
+        meta(&setup, "exchange"),
+        ExchangeInput {
+            back: back(&sold.number, &reg, vec![(0, "1", true)], ""),
+            sale: sale(&setup, &reg, vec![(milk, "1")], vec![]),
+        },
+    )?;
+    assert_eq!((x.used_minor, x.given_back_minor), (1_190, 2_380));
+    let sum = shift_summary(&s, &shift.id)?;
+    assert_eq!(
+        (sum.refunds_minor, sum.exchanges_minor, sum.expected_minor),
+        (2_380, 4_760, 3_000 - 2_380)
+    );
+    healthy(&s)?;
+    Ok(())
+}
+
+#[test]
+fn an_exchange_is_paid_up_and_never_empties_the_drawer() -> R {
+    let (mut s, setup) = store();
+    let reg = register(&s);
+    let milk = stocked(&mut s, &setup, "Lait", "10", 800, 1_190)?;
+    let oil = stocked(&mut s, &setup, "Huile", "5", 2_500, 3_570)?;
+    let shift = open_shift(&mut s, meta(&setup, "shift.open"), &reg, 500)?;
+    let sold = complete_sale(
+        &mut s,
+        meta(&setup, "sale"),
+        sale(
+            &setup,
+            &reg,
+            vec![(milk, "2"), (oil, "1")],
+            vec![("card", 5_950)],
+        ),
+    )?;
+    // One milk back for an oil: 23.80 more to pay, not paid.
+    let underpaid = ExchangeInput {
+        back: back(&sold.number, &reg, vec![(0, "1", true)], ""),
+        sale: sale(&setup, &reg, vec![(oil, "1")], vec![]),
+    };
+    assert_eq!(
+        err(exchange(&mut s, meta(&setup, "x"), underpaid.clone())),
+        ["sale.underpaid"]
+    );
+    // Nothing of it stayed: the return was undone with the sale.
+    assert_eq!(sale_for_return(&s, &sold.number)?.returned_minor, 0);
+    let mut paid = underpaid;
+    paid.sale.payments = vec![PaymentInput {
+        method: "cash".into(),
+        amount_minor: 3_000,
+    }];
+    let x = exchange(&mut s, meta(&setup, "x"), paid)?;
+    assert_eq!((x.used_minor, x.given_back_minor), (1_190, 620));
+    let sum = shift_summary(&s, &shift.id)?;
+    assert_eq!(
+        (sum.cash_sales_minor, sum.refunds_minor, sum.expected_minor),
+        (2_380, 0, 500 + 2_380)
+    );
+    // The oil back for a milk: 23.80 back, more than the drawer holds?
+    // It holds 28.80: fine. Then the second milk for nothing more than 5.00
+    // left: refused.
+    assert_eq!(
+        err(exchange(
+            &mut s,
+            meta(&setup, "x"),
+            ExchangeInput {
+                back: back(&sold.number, &reg, vec![(1, "1", true)], ""),
+                sale: sale(&setup, &reg, vec![], vec![]),
+            }
+        )),
+        ["sale.empty"]
+    );
+    exchange(
+        &mut s,
+        meta(&setup, "x"),
+        ExchangeInput {
+            back: back(&sold.number, &reg, vec![(1, "1", true)], ""),
+            sale: sale(&setup, &reg, vec![(milk, "1")], vec![]),
+        },
+    )?;
+    assert_eq!(shift_summary(&s, &shift.id)?.expected_minor, 500);
+    let big = complete_sale(
+        &mut s,
+        meta(&setup, "sale"),
+        sale(&setup, &reg, vec![(oil, "2")], vec![("card", 7_140)]),
+    )?;
+    assert_eq!(
+        err(exchange(
+            &mut s,
+            meta(&setup, "x"),
+            ExchangeInput {
+                back: back(&big.number, &reg, vec![(0, "2", true)], ""),
+                sale: sale(&setup, &reg, vec![(milk, "1")], vec![]),
+            }
+        )),
+        ["shift.not_enough_cash"]
+    );
+    healthy(&s)?;
+    Ok(())
+}

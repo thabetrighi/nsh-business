@@ -1516,3 +1516,13 @@ error.purchase.order_mismatch = Cette commande est pour un autre fournisseur ou 
 error.purchase.not_ordered = Cette ligne n'est pas sur la commande.
 error.purchase.over_ordered = Plus que ce qui reste à recevoir sur la commande.
 error.purchase.order_unknown = Cette commande n'existe plus.
+
+# Échanges (M8.8)
+pos.method.exchange = Échange
+pos.exchange.started = La marchandise sera reprise au paiement de ce panier : ajoutez ce que le client prend à la place.
+pos.exchange.from = Repris de {number}
+pos.exchange.remove = Annuler l'échange
+pos.exchange.paid_by = La marchandise reprise ({number}) paie {amount}
+pos.exchanged = Échange fait : retour {back}, vente {number}. À rendre : {change}.
+pos.refunds = Remboursements en espèces
+pos.exchanges = Échanges (sans mouvement d'espèces)

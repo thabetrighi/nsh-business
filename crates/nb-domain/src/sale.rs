@@ -262,6 +262,17 @@ pub fn settle(
     })
 }
 
+/// In an exchange, the part of what came back that pays the new sale;
+/// the rest is given back, or the customer pays what the new sale needs
+/// beyond it.
+pub fn exchange_used(returned: Money, new_sale: Money) -> Money {
+    if returned.minor() <= new_sale.minor() {
+        returned
+    } else {
+        new_sale
+    }
+}
+
 /// What a sold line came to (amounts of the whole line).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sold {
@@ -335,6 +346,13 @@ mod tests {
 
     fn da(minor: i64) -> Money {
         Money::from_minor(minor, Currency::DZD)
+    }
+
+    #[test]
+    fn an_exchange_uses_what_came_back_up_to_the_new_sale() {
+        assert_eq!(exchange_used(da(1_000), da(2_500)), da(1_000));
+        assert_eq!(exchange_used(da(3_000), da(2_500)), da(2_500));
+        assert_eq!(exchange_used(da(0), da(2_500)), da(0));
     }
     fn q(s: &str) -> Quantity {
         Quantity::new(s.parse().unwrap_or_default())

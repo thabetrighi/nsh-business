@@ -806,3 +806,46 @@ test("a purchase order is approved, then received in part", async () => {
   await app.waitFor("id:order-0");
   await app.waitFor("text:Reçu en partie");
 });
+
+test("goods brought back pay for others in one exchange", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "1000");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-confirm");
+  await app.press("id:pay-confirm");
+  let number = "";
+  await app.waitUntil(() =>
+    app.texts().some((t) => {
+      const m = /^Vente (FV-01-\d\d-A\d+) enregistrée/.exec(plain(t));
+      if (m) number = m[1];
+      return !!m;
+    }),
+  );
+  // One comes back, toward another product.
+  await app.press("id:pos-return");
+  await app.waitFor("id:ret-sale");
+  await app.type("id:ret-sale", number);
+  await app.press("id:ret-find");
+  await app.waitFor("id:ret-qty-0");
+  await app.type("id:ret-qty-0", "1");
+  await app.press("text:Échange");
+  await app.type("id:ret-reason", "Mauvais parfum");
+  await app.press("id:ret-confirm");
+  await seen(/^La marchandise sera reprise au paiement de ce panier/);
+  await app.waitFor("id:pos-exchange");
+  await seen(new RegExp(`^Repris de ${number}$`));
+  await app.press("id:pos-item-1");
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-exchange");
+  await app.press("id:pay-confirm");
+  await seen(/^Échange fait : retour AV-01-\d\d-A\d+, vente FV-01-\d\d-A\d+\. À rendre : .+\.$/);
+  await app.waitUntil(() => !app.texts().some((t) => plain(t).startsWith("Repris de ")));
+});

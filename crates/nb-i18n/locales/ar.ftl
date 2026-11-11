@@ -1516,3 +1516,13 @@ error.purchase.order_mismatch = هذا الأمر لمورّد أو مستودع
 error.purchase.not_ordered = هذا السطر ليس في الأمر.
 error.purchase.over_ordered = أكثر من الباقي للاستلام في الأمر.
 error.purchase.order_unknown = هذا الأمر لم يعد موجوداً.
+
+# الاستبدال (M8.8)
+pos.method.exchange = استبدال
+pos.exchange.started = تُسترجع البضاعة عند دفع هذه السلة: أضف ما يأخذه الزبون بدلاً منها.
+pos.exchange.from = مسترجع من {number}
+pos.exchange.remove = إلغاء الاستبدال
+pos.exchange.paid_by = البضاعة المسترجعة ({number}) تدفع {amount}
+pos.exchanged = تم الاستبدال: المرتجع {back}، البيع {number}. يُرَدّ للزبون {change}.
+pos.refunds = المردود نقداً
+pos.exchanges = الاستبدالات (دون حركة نقد)

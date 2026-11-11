@@ -18,7 +18,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::repo::{org, parse_id, stock};
-use crate::uow::OpMeta;
+use crate::uow::{OpMeta, Writer};
 use crate::usecases::sales::{the_org, till};
 use crate::{Error, Result, Store};
 
@@ -55,11 +55,15 @@ pub struct SaleDetail {
 
 /// The sale with this number (or id), with what is left to return.
 pub fn sale_for_return(store: &Store, number: &str) -> Result<SaleDetail> {
-    store.read(|r| {
-        let (org, _) = the_org(r.conn())?;
+    store.read(|r| sale_detail(r.conn(), number))
+}
+
+pub(crate) fn sale_detail(conn: &Connection, number: &str) -> Result<SaleDetail> {
+    {
+        let r = conn;
+        let (org, _) = the_org(r)?;
         let key = number.trim().to_uppercase();
         let row: Option<(String, String, i64, i64, Option<String>)> = r
-            .conn()
             .query_row(
                 "SELECT id, number, created_at, total_minor, customer_id FROM sales
                  WHERE org_id = ?1 AND (upper(number) = ?2 OR id = ?3)",
@@ -69,12 +73,12 @@ pub fn sale_for_return(store: &Store, number: &str) -> Result<SaleDetail> {
             .optional()?;
         let (id, number, created_at, total_minor, customer_id) =
             row.ok_or(Error::from(RuleError::on("sale", "return.sale_unknown")))?;
-        let returned_minor: i64 = r.conn().query_row(
+        let returned_minor: i64 = r.query_row(
             "SELECT COALESCE(SUM(total_minor), 0) FROM sale_returns WHERE sale_id = ?1",
             [&id],
             |r| r.get(0),
         )?;
-        let mut s = r.conn().prepare(
+        let mut s = r.prepare(
             "SELECT l.position, l.product_id, l.name, l.unit, l.qty_milli,
                     COALESCE((SELECT SUM(x.qty_milli) FROM sale_return_lines x
                               WHERE x.sale_id = l.sale_id AND x.position = l.position), 0),
@@ -104,7 +108,7 @@ pub fn sale_for_return(store: &Store, number: &str) -> Result<SaleDetail> {
             customer_id,
             lines,
         })
-    })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +191,19 @@ fn line_facts(conn: &Connection, sale: &str, position: u32) -> Result<LineFacts>
 /// Returns goods of a sale: the refund, the stock, the entry, the event and
 /// the audit, at once and once per operation.
 pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Result<ReturnResult> {
+    let offset = store.read(|r| Ok(r.utc_offset_min))?;
+    store.write(meta, |w| return_in(w, &input, offset, false))
+}
+
+/// A return in the caller's transaction. In an exchange the refund goes,
+/// in cash, to the new sale of the same transaction: the drawer is checked
+/// once both are done.
+pub(crate) fn return_in(
+    w: &mut Writer<'_>,
+    input: &ReturnInput,
+    offset: i32,
+    exchange: bool,
+) -> Result<ReturnResult> {
     let register: RegisterId = parse_id(&input.register_id)?;
     if input.reason.trim().is_empty() {
         return Err(RuleError::on("reason", "required").into());
@@ -194,14 +211,14 @@ pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Resul
     if input.lines.is_empty() {
         return Err(RuleError::on("lines", "return.empty").into());
     }
-    let method = match input.refund.as_str() {
-        m @ ("cash" | "card" | "transfer" | "credit") => m.to_owned(),
+    let method = match (exchange, input.refund.as_str()) {
+        (true, _) => "cash".to_owned(),
+        (false, m @ ("cash" | "card" | "transfer" | "credit")) => m.to_owned(),
         _ => return Err(RuleError::on("refund", "invalid_value").into()),
     };
-    let sale = sale_for_return(store, &input.sale)?;
-    let (_, currency) = store.read(|r| the_org(r.conn()))?;
-    let offset = store.read(|r| Ok(r.utc_offset_min))?;
-    store.write(meta, |w| {
+    let sale = sale_detail(w.tx(), &input.sale)?;
+    let (_, currency) = the_org(w.tx())?;
+    {
         let (branch, _, till_account) = till(w, register)?;
         let branch_id = parse_id(&branch.id)?;
         let at_till = Target::register(branch_id, register);
@@ -227,7 +244,13 @@ pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Resul
         let mut lines = Vec::with_capacity(input.lines.len());
         let (mut net, mut tax, mut cost_back) = (0i64, 0i64, 0i64);
         for l in &input.lines {
-            if input.lines.iter().filter(|x| x.position == l.position).count() > 1 {
+            if input
+                .lines
+                .iter()
+                .filter(|x| x.position == l.position)
+                .count()
+                > 1
+            {
                 return Err(RuleError::on("lines", "return.line_twice").into());
             }
             let (sold, before, product, movement, wh) = line_facts(w.tx(), &sale.id, l.position)?;
@@ -248,8 +271,10 @@ pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Resul
             let base_milli = if line_qty == 0 {
                 0
             } else {
-                i64::try_from(i128::from(qty_milli) * i128::from(sold.qty_milli) / i128::from(line_qty))
-                    .unwrap_or(i64::MAX)
+                i64::try_from(
+                    i128::from(qty_milli) * i128::from(sold.qty_milli) / i128::from(line_qty),
+                )
+                .unwrap_or(i64::MAX)
             };
             let back = refund(sold, before, base_milli)?;
             net += back.net;
@@ -262,8 +287,24 @@ pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Resul
                 let qty = Quantity::from_milli(back.qty_milli);
                 let unit_cost = Money::from_minor(sold.unit_cost, currency);
                 let before = stock::balance(w.tx(), product_id, wh_id, currency)?;
-                let after = before.apply(MovementKind::SaleReturn, qty, Some(unit_cost), warehouse.policy(), true)?;
-                let m = stock::append(w, product_id, wh_id, MovementKind::SaleReturn, qty, Some(unit_cost), Some(&number), None, after)?;
+                let after = before.apply(
+                    MovementKind::SaleReturn,
+                    qty,
+                    Some(unit_cost),
+                    warehouse.policy(),
+                    true,
+                )?;
+                let m = stock::append(
+                    w,
+                    product_id,
+                    wh_id,
+                    MovementKind::SaleReturn,
+                    qty,
+                    Some(unit_cost),
+                    Some(&number),
+                    None,
+                    after,
+                )?;
                 // The lots or serial numbers that left with the sale come back.
                 if let Some(out) = movement.as_deref() {
                     crate::usecases::tracked::mirror(w, out, m, product_id, wh_id, qty)?;
@@ -271,10 +312,16 @@ pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Resul
                 cost_back += back.cost;
                 movement_id = Some(m.to_string());
             }
-            lines.push((l.position, back, l.restock && product.is_some(), movement_id));
+            lines.push((
+                l.position,
+                back,
+                l.restock && product.is_some(),
+                movement_id,
+            ));
         }
         let total = net + tax;
         if method == "cash"
+            && !exchange
             && let Some(shift) = shift.as_deref()
             && total > crate::usecases::sales::shift_of(w.tx(), shift)?.expected_minor
         {
@@ -300,16 +347,32 @@ pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Resul
         let m = |v: i64| Money::from_minor(v, currency);
         let zero = m(0);
         let refund = match method.as_str() {
-            "cash" => Settlement { cash: m(total), bank: zero, credit: zero },
-            "credit" => Settlement { cash: zero, bank: zero, credit: m(total) },
-            _ => Settlement { cash: zero, bank: m(total), credit: zero },
+            "cash" => Settlement {
+                cash: m(total),
+                bank: zero,
+                credit: zero,
+            },
+            "credit" => Settlement {
+                cash: zero,
+                bank: zero,
+                credit: m(total),
+            },
+            _ => Settlement {
+                cash: zero,
+                bank: m(total),
+                credit: zero,
+            },
         };
         crate::usecases::accounting::post_operations_for(
             w,
             &branch,
             offset,
             &[
-                Operation::SaleReturn { net: m(net), vat: m(tax), refund },
+                Operation::SaleReturn {
+                    net: m(net),
+                    vat: m(tax),
+                    refund,
+                },
                 Operation::ReturnToStock { cost: m(cost_back) },
             ],
             &format!("{number} — {}", sale.number),
@@ -326,7 +389,81 @@ pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Resul
             cost_minor: cost_back,
         };
         w.event("sale.returned", "sale_return", &id, &out)?;
-        w.audit("return", "sale", &sale.id, &input)?;
+        w.audit("return", "sale", &sale.id, input)?;
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExchangeInput {
+    /// What comes back (its refund method is ignored: it pays the sale).
+    pub back: ReturnInput,
+    /// What the customer takes instead, and what they pay beyond the
+    /// value of what came back.
+    pub sale: crate::usecases::sales::SaleInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExchangeResult {
+    pub back: ReturnResult,
+    pub sale: crate::usecases::sales::SaleResult,
+    /// The part of what came back that paid the new sale.
+    pub used_minor: i64,
+    /// Given back in cash: what came back beyond the new sale, and any
+    /// change.
+    pub given_back_minor: i64,
+}
+
+/// Exchanges goods (M8.8): the return and the new sale in one transaction,
+/// at the same till; the value of what came back pays the new sale, the
+/// customer pays the difference or gets it back in cash (out of the
+/// drawer, never more than it holds).
+pub fn exchange(store: &mut Store, meta: OpMeta, input: ExchangeInput) -> Result<ExchangeResult> {
+    if input.back.register_id != input.sale.register_id {
+        return Err(RuleError::on("register", "invalid_value").into());
+    }
+    let offset = store.read(|r| Ok(r.utc_offset_min))?;
+    store.write(meta, |w| {
+        let back = return_in(w, &input.back, offset, true)?;
+        let sale = crate::usecases::sales::sale_in(w, &input.sale, offset, back.total_minor)?;
+        let (_, currency) = the_org(w.tx())?;
+        let m = |v: i64| Money::from_minor(v, currency);
+        let used =
+            nb_domain::sale::exchange_used(m(back.total_minor), m(sale.total_minor)).minor();
+        let shift: String = w.tx().query_row(
+            "SELECT shift_id FROM sales WHERE id = ?1",
+            [&sale.id],
+            |r| r.get(0),
+        )?;
+        // The drawer pays what is given back.
+        if crate::usecases::sales::shift_of(w.tx(), &shift)?.expected_minor < 0 {
+            return Err(RuleError::on("refund", "shift.not_enough_cash").into());
+        }
+        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        w.tx().execute(
+            "INSERT INTO sale_exchanges (id, org_id, return_id, sale_id, shift_id, returned_minor, used_minor,
+                    operation_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                id,
+                w.org()?.to_string(),
+                back.id,
+                sale.id,
+                shift,
+                back.total_minor,
+                used,
+                w.meta().id.to_string(),
+                w.now()
+            ],
+        )?;
+        let out = ExchangeResult {
+            // What came back beyond the new sale leaves as change.
+            given_back_minor: sale.change_minor,
+            used_minor: used,
+            back,
+            sale,
+        };
+        w.event("sale.exchanged", "sale_exchange", &id, &out)?;
         Ok(out)
     })
 }

@@ -17,8 +17,8 @@ use nb_store::usecases::documents::get_document;
 use nb_store::usecases::org::{Register, registers};
 use nb_store::usecases::products::list_products;
 use nb_store::usecases::returns::{
-    HeldCart, ReturnInput, ReturnLineInput, SaleDetail, held_carts, hold_cart, return_sale,
-    sale_for_return, take_held,
+    ExchangeInput, HeldCart, ReturnInput, ReturnLineInput, SaleDetail, exchange, held_carts,
+    hold_cart, return_sale, sale_for_return, take_held,
 };
 use nb_store::usecases::sales::{
     PaymentInput, SaleInput, SaleLineInput, ShiftRow, close_shift, complete_sale, current_shift,
@@ -189,6 +189,18 @@ struct Till {
     held_rev: Signal<u32>,
     recalling: Signal<bool>,
     returning: Signal<bool>,
+    /// Goods brought back to pay this cart (M8.8): the return, the sale it
+    /// comes from, and the value it should come to.
+    exchange: Signal<Option<Exchange>>,
+}
+
+/// Goods brought back toward the cart: returned when the cart is paid, in
+/// the same operation.
+#[derive(Debug, Clone, PartialEq)]
+struct Exchange {
+    back: ReturnInput,
+    sale_number: String,
+    value_minor: i64,
 }
 
 impl Till {
@@ -243,6 +255,7 @@ impl Till {
         self.discount.set(SaleDiscount::default());
         self.document.set(None);
         self.customer.set(None);
+        self.exchange.set(None);
         self.selected.set(None);
     }
     /// The cart's figures as the domain prices them.
@@ -337,6 +350,7 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         held_rev,
         recalling: signal(false),
         returning: signal(false),
+        exchange: signal(None),
         cart: signal(Vec::new()),
         selected: signal(None),
         editing: signal(None),
@@ -1248,6 +1262,7 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
             )),
         ))
         .child(customer_chip(st, t, in_sheet))
+        .child(exchange_chip(st, t))
         .child(dynamic(move || match t.document.get() {
             Some((_, number)) => view()
                 .flex_row()
@@ -1844,23 +1859,34 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
     };
     // One operation for this payment screen: a second tap returns the sale
     // already made.
-    let meta = session.meta("sale.complete");
+    let swap = t.exchange.get_untracked();
+    let meta = session.meta(if swap.is_some() {
+        "sale.exchange"
+    } else {
+        "sale.complete"
+    });
     let c = session.currency;
     let items = t.cart.get_untracked();
     let sale_discount = t.discount.get_untracked();
+    // Goods brought back pay part of it (or all, and some comes back).
+    let brought = swap.as_ref().map_or(0, |x| x.value_minor);
     let due = cart_of(&items, sale_discount, c)
         .totals()
-        .map_or(0, |x| x.total.minor());
+        .map_or(0, |x| x.total.minor())
+        - brought;
     let customer = t.customer.get_untracked();
     let has_customer = customer.is_some();
     let way = signal(Way::Cash);
-    let given = signal(Money::from_minor(due, c).to_plain_string());
+    let given = signal(Money::from_minor(due.max(0), c).to_plain_string());
     let error = signal(String::new());
     let busy = signal(false);
     // A supervisor's approval, when the sale needs one (a large discount,
     // credit past the limit…): asked on the spot, then the sale is sent again.
     let owner = Owner::current();
     let approval: Signal<Option<String>> = signal(None);
+    // The return in an exchange has its own approval.
+    let approval_back: Signal<Option<String>> = signal(None);
+    let asked_for: Signal<&'static str> = signal("");
     let asking: Signal<Option<Ask>> = signal(None);
     let asking_open = signal(false);
     effect(move || {
@@ -1900,7 +1926,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                         return;
                     }
                 },
-                _ => due,
+                _ => due.max(0),
             };
             let method = match way.get_untracked() {
                 Way::Cash => "cash",
@@ -1927,10 +1953,14 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                         ..Default::default()
                     })
                     .collect(),
-                payments: vec![PaymentInput {
-                    method: method.into(),
-                    amount_minor: amount,
-                }],
+                payments: if amount > 0 {
+                    vec![PaymentInput {
+                        method: method.into(),
+                        amount_minor: amount,
+                    }]
+                } else {
+                    vec![]
+                },
                 discount_bps: (sale_discount.bps > 0).then_some(sale_discount.bps),
                 discount_minor: (sale_discount.minor > 0).then_some(sale_discount.minor),
                 document_id: t.document.get_untracked().map(|d| d.0),
@@ -1941,16 +1971,37 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
             busy.set(true);
             let close = close.clone();
             let ask_at = (branch_id.clone(), register.clone());
+            let swap = t.exchange.get_untracked().map(|x| {
+                let mut back = x.back;
+                back.approval = approval_back.get_untracked();
+                back
+            });
             let db = st.db();
             let task = spawn(async move {
-                let r = db.call(move |s| complete_sale(s, meta, input)).await;
+                let r = db
+                    .call(move |s| match swap {
+                        Some(back) => exchange(s, meta, ExchangeInput { back, sale: input })
+                            .map(|x| (x.sale, Some(x.back.number))),
+                        None => complete_sale(s, meta, input).map(|r| (r, None)),
+                    })
+                    .await;
                 busy.set(false);
                 match r {
-                    Ok(r) => {
+                    Ok((r, back)) => {
                         t.clear();
                         st.changed();
                         close();
-                        let text = if r.change_minor > 0 {
+                        let text = if let Some(back) = back {
+                            tr_args(
+                                st.lang(),
+                                "pos.exchanged",
+                                &[
+                                    ("back", &back),
+                                    ("number", &r.number),
+                                    ("change", &money(st, r.change_minor)),
+                                ],
+                            )
+                        } else if r.change_minor > 0 {
                             tr_args(
                                 st.lang(),
                                 "pos.sold_change",
@@ -1967,6 +2018,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                     }
                     Err(e) => {
                         if let Some(p) = needs_approval(&e) {
+                            asked_for.set(p);
                             asking.set(Some(Ask {
                                 permission: p,
                                 branch_id: Some(ask_at.0),
@@ -1981,6 +2033,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
         }
     };
     let retry = save.clone();
+    let swap_open = swap.is_some();
     // While a supervisor is asked, the keys are theirs.
     on_key("f9", {
         let save = save.clone();
@@ -2000,7 +2053,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
     });
     let quick = {
         let mut v = view().flex_row().flex_wrap().gap(px(8.0));
-        let mut amounts = vec![due];
+        let mut amounts = vec![due.max(0)];
         for step in [10_000, 50_000, 100_000, 200_000, 500_000] {
             let up = (due + step - 1) / step * step;
             if up > due && !amounts.contains(&up) {
@@ -2107,11 +2160,31 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                     Tone::Muted,
                 ))
                 .child(figure(
-                    move || money(st, due),
+                    move || money(st, due.max(0)),
                     ty::H1,
                     FontWeight::BOLD,
                     || Tone::Ink,
                 ))
+                .child(match &swap {
+                    Some(x) => {
+                        let number = x.sale_number.clone();
+                        label_line(
+                            move || {
+                                tr_args(
+                                    st.lang(),
+                                    "pos.exchange.paid_by",
+                                    &[("number", &number), ("amount", &money(st, brought))],
+                                )
+                            },
+                            ty::SM,
+                            FontWeight::MEDIUM,
+                            Tone::Success,
+                        )
+                        .test_id("pay-exchange")
+                        .into_element()
+                    }
+                    None => view().into_element(),
+                })
                 .child(label_line(
                     move || {
                         tr_args(
@@ -2173,7 +2246,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                     .child(figure(
                         move || {
                             let more = match way.get() {
-                                Way::Credit => due,
+                                Way::Credit => due.max(0),
                                 Way::Cash => short.get(),
                                 _ => 0,
                             };
@@ -2183,7 +2256,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                         FontWeight::BOLD,
                         move || {
                             let more = match way.get() {
-                                Way::Credit => due,
+                                Way::Credit => due.max(0),
                                 Way::Cash => short.get(),
                                 _ => 0,
                             };
@@ -2237,7 +2310,11 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                         st,
                         ask,
                         move |id| {
-                            approval.set(Some(id));
+                            if asked_for.get_untracked() == "sales.return" && swap_open {
+                                approval_back.set(Some(id));
+                            } else {
+                                approval.set(Some(id));
+                            }
                             // Under this dialog: the approval's own closes now.
                             owner.run(&retry);
                         },
@@ -2404,10 +2481,16 @@ fn close_dialog(st: AppState, shift: ShiftRow, close: impl Fn() + Clone + 'stati
         ("pos.expenses", -shift.expenses_minor),
         ("pos.suppliers", -shift.suppliers_minor),
         ("pos.cash_out", -shift.cash_out_minor),
+        ("pos.refunds", -shift.refunds_minor),
+        // Shown, but the drawer never saw it.
+        ("pos.exchanges", shift.exchanges_minor),
         ("pos.expected", shift.expected_minor),
     ];
     let mut summary = view().gap(px(6.0));
     for (key, v) in figures {
+        if v == 0 && matches!(key, "pos.refunds" | "pos.exchanges") {
+            continue;
+        }
         let strong = key == "pos.expected";
         summary = summary.child(
             view()
@@ -2790,6 +2873,26 @@ fn return_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> V
                 reason: reason.get_untracked(),
                 approval: approval.get_untracked(),
             };
+            // An exchange: the goods pay the cart, returned with it.
+            if input.refund == "exchange" {
+                if input.lines.is_empty() {
+                    error.set(error_text(st, "return.empty"));
+                    return;
+                }
+                if input.reason.trim().is_empty() {
+                    error.set(error_text(st, "required"));
+                    return;
+                }
+                t.exchange.set(Some(Exchange {
+                    back: input,
+                    sale_number: d.number.clone(),
+                    value_minor: total.get_untracked(),
+                }));
+                close();
+                show_toast(st, st.tn("pos.exchange.started"));
+                t.search.focus();
+                return;
+            }
             let ask_at = (branch_id.clone(), input.register_id.clone());
             busy.set(true);
             let close = close.clone();
@@ -2973,6 +3076,7 @@ fn return_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> V
             if credit_ok.get() {
                 options.push(("credit", Box::new(st.t("pos.method.credit"))));
             }
+            options.push(("exchange", Box::new(st.t("pos.method.exchange"))));
             labelled(st.t("pos.return.refund"), segmented(options, method), None).into_element()
         })
     };
@@ -3339,6 +3443,50 @@ fn customer_chip(st: AppState, t: Till, in_sheet: bool) -> View {
                 .into_element()
             },
         ))
+}
+
+/// The goods brought back toward this cart, if any.
+fn exchange_chip(st: AppState, t: Till) -> AnyElement {
+    dynamic(move || {
+        let Some(x) = t.exchange.get() else {
+            return view().into_element();
+        };
+        let (number, value) = (x.sale_number.clone(), x.value_minor);
+        view()
+            .test_id("pos-exchange")
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(16.0))
+            .py(px(8.0))
+            .border_t_1()
+            .border_color(Tone::Border.color())
+            .bg(Tone::Subtle.color())
+            .child(icon(Icon::Undo, 18.0, || Tone::Primary))
+            .child(view().flex_1().min_w(px(0.0)).child(label_line(
+                move || tr_args(st.lang(), "pos.exchange.from", &[("number", &number)]),
+                ty::SM,
+                FontWeight::SEMIBOLD,
+                Tone::Ink,
+            )))
+            .child(figure(
+                move || format!("−{}", money(st, value)),
+                ty::SM,
+                FontWeight::BOLD,
+                || Tone::Success,
+            ))
+            .child(
+                icon_button(
+                    || Icon::Close,
+                    st.t("pos.exchange.remove"),
+                    Variant::Ghost,
+                    move || t.exchange.set(None),
+                )
+                .test_id("pos-exchange-remove"),
+            )
+            .into_element()
+    })
+    .into_element()
 }
 
 /// Finds the customer by name, code, phone or city.

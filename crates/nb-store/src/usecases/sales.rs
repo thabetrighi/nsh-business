@@ -69,6 +69,10 @@ pub struct ShiftRow {
     /// cash they gave back for returns.
     #[serde(default)]
     pub suppliers_minor: i64,
+    /// Goods exchanged: the value that came back and paid new sales (left
+    /// out of cash sales and cash refunds alike).
+    #[serde(default)]
+    pub exchanges_minor: i64,
     pub sales: u32,
     /// What the till should hold: opening + cash sales + collections + in
     /// − out − refunds.
@@ -107,6 +111,7 @@ pub(crate) fn shift_of(conn: &Connection, id: &str) -> Result<ShiftRow> {
                     expenses_minor: 0,
                     other_income_minor: 0,
                     suppliers_minor: 0,
+                    exchanges_minor: 0,
                     sales: 0,
                     expected_minor: 0,
                 })
@@ -164,6 +169,15 @@ pub(crate) fn shift_of(conn: &Connection, id: &str) -> Result<ShiftRow> {
         [id],
         |r| r.get(0),
     )?;
+    // An exchange went through the drawer on paper only: what came back
+    // paid the new sale. It is shown apart, out of both.
+    row.exchanges_minor = conn.query_row(
+        "SELECT COALESCE(SUM(used_minor), 0) FROM sale_exchanges WHERE shift_id = ?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    row.cash_sales_minor -= row.exchanges_minor;
+    row.refunds_minor -= row.exchanges_minor;
     row.expected_minor = row.opening_minor
         + row.cash_sales_minor
         + row.collections_minor
@@ -579,10 +593,21 @@ pub(crate) fn discount(bps: Option<i64>, minor: Option<i64>, c: nb_core::Currenc
 /// entry (sale and its cost), the event and the audit. The same operation
 /// sent again returns the same sale.
 pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Result<SaleResult> {
+    let offset = store.read(|r| Ok(r.utc_offset_min))?;
+    store.write(meta, |w| sale_in(w, &input, offset, 0))
+}
+
+/// A sale in the caller's transaction; `credit_minor` is the value of
+/// goods brought back in the same exchange, taken as cash given.
+pub(crate) fn sale_in(
+    w: &mut Writer<'_>,
+    input: &SaleInput,
+    offset: i32,
+    credit_minor: i64,
+) -> Result<SaleResult> {
     let register: RegisterId = parse_id(&input.register_id)?;
     let warehouse_id: WarehouseId = parse_id(&input.warehouse_id)?;
-    let (_, currency) = store.read(|r| the_org(r.conn()))?;
-    let offset = store.read(|r| Ok(r.utc_offset_min))?;
+    let (_, currency) = the_org(w.tx())?;
     let parsed = parse_lines(&input.lines)?;
     let mut given = Vec::with_capacity(input.payments.len());
     for p in &input.payments {
@@ -593,7 +618,10 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
             Money::from_minor(money_field("payments", p.amount_minor)?, currency),
         ));
     }
-    store.write(meta, |w| {
+    if credit_minor > 0 {
+        given.push((Method::Cash, Money::from_minor(credit_minor, currency)));
+    }
+    {
         let (branch, _, till_account) = till(w, register)?;
         let warehouse = org::warehouse(w.tx(), warehouse_id)?;
         if warehouse.branch_id != branch.id {
@@ -615,7 +643,8 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
         let approval = input.approval.as_deref().map(parse_id).transpose()?;
 
         // The cart, priced from the catalog (or as typed for items not in it).
-        let (products, lines) = price_lines(w, &parsed, &input.lines, currency, &at_till, approval)?;
+        let (products, lines) =
+            price_lines(w, &parsed, &input.lines, currency, &at_till, approval)?;
         let cart = Cart {
             mode: TaxMode::Inclusive,
             lines,
@@ -626,7 +655,11 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
         if totals.discounts.minor() > 0 {
             w.require(Permission::SalesDiscountLine, &at_till)?;
         }
-        if totals.lines.iter().any(|l| l.discount_bps > ORDINARY_DISCOUNT_BPS) {
+        if totals
+            .lines
+            .iter()
+            .any(|l| l.discount_bps > ORDINARY_DISCOUNT_BPS)
+        {
             w.require_approved(Permission::SalesDiscountExceptional, &at_till, approval)?;
         }
         if totals.lines.iter().any(|l| l.below_min) {
@@ -636,7 +669,13 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
         let paid = settle(totals.total, &given, customer.is_some())?;
         // The customer must exist; credit past its limit needs a supervisor.
         if let Some(c) = customer {
-            crate::usecases::customers::check_credit(w, c, paid.credit.minor(), &at_till, approval)?;
+            crate::usecases::customers::check_credit(
+                w,
+                c,
+                paid.credit.minor(),
+                &at_till,
+                approval,
+            )?;
         }
 
         let number = w.next_number(DocKind::Invoice, &branch.id, &branch.code)?;
@@ -679,7 +718,16 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
                 None,
                 after,
             )?;
-            tracked::record(w, movement, product_id, warehouse_id, MovementKind::Sale, *base_qty, &l.tracked, false)?;
+            tracked::record(
+                w,
+                movement,
+                product_id,
+                warehouse_id,
+                MovementKind::Sale,
+                *base_qty,
+                &l.tracked,
+                false,
+            )?;
             let line_cost = base_qty.times_price(before.avg_cost)?;
             cost = cost.checked_add(line_cost)?;
             costs.push(before.avg_cost);
@@ -766,9 +814,9 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
             cost_minor: cost.minor(),
         };
         w.event("sale.completed", "sale", &id, &out)?;
-        w.audit("complete", "sale", &id, &input)?;
+        w.audit("complete", "sale", &id, input)?;
         Ok(out)
-    })
+    }
 }
 
 /// A sale in a list.

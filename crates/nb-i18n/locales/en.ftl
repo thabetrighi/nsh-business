@@ -1516,3 +1516,13 @@ error.purchase.order_mismatch = This order is for another supplier or warehouse.
 error.purchase.not_ordered = This line is not on the order.
 error.purchase.over_ordered = More than what is left to receive on the order.
 error.purchase.order_unknown = This order no longer exists.
+
+# Exchanges (M8.8)
+pos.method.exchange = Exchange
+pos.exchange.started = The goods will be returned when this cart is paid: add what the customer takes instead.
+pos.exchange.from = Brought back from {number}
+pos.exchange.remove = Cancel the exchange
+pos.exchange.paid_by = Goods brought back ({number}) pay {amount}
+pos.exchanged = Exchange done: return {back}, sale {number}. Give back {change}.
+pos.refunds = Cash refunds
+pos.exchanges = Exchanges (no cash moved)
