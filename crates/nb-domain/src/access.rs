@@ -84,6 +84,7 @@ permissions! {
     602 PurchasesOrder "purchases.order" false,
     603 PurchasesApprove "purchases.approve" true,
     604 PurchasesReceive "purchases.receive" false,
+    605 SuppliersPay "suppliers.pay" false,
     // Accounting
     701 AccountingView "accounting.view" false,
     702 AccountingPost "accounting.post" true,
@@ -263,6 +264,7 @@ impl BuiltinRole {
                 DebtsCollect,
                 CreditExceed,
                 CashExpense,
+                SuppliersPay,
                 PurchasesOrder,
                 PurchasesReceive,
                 ReportsView,
@@ -270,6 +272,7 @@ impl BuiltinRole {
             ]),
             BuiltinRole::Accountant => PermissionSet::of(&[
                 CashExpense,
+                SuppliersPay,
                 DebtsAdjust,
                 AccountingView,
                 AccountingPost,

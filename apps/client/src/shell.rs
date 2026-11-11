@@ -110,6 +110,14 @@ fn page_of(st: AppState, route: Route, compact: bool) -> AnyElement {
             .flex_1()
             .child(crate::screens::expenses::expenses_page(st, compact))
             .into_element(),
+        Route::Suppliers => scroll()
+            .flex_1()
+            .child(crate::screens::purchases::suppliers_page(st, compact))
+            .into_element(),
+        Route::Purchases => scroll()
+            .flex_1()
+            .child(crate::screens::purchases::purchases_page(st, compact))
+            .into_element(),
         Route::Sales => scroll()
             .flex_1()
             .child(crate::screens::sales::sales_page(st, compact))

@@ -15,6 +15,7 @@ pub mod picker;
 pub mod pos;
 pub mod product_editor;
 pub mod products;
+pub mod purchases;
 pub mod sales;
 pub mod sample;
 pub mod settings;

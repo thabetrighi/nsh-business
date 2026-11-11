@@ -65,6 +65,10 @@ pub struct ShiftRow {
     pub expenses_minor: i64,
     #[serde(default)]
     pub other_income_minor: i64,
+    /// Cash paid to suppliers (purchases paid in cash and payments), less
+    /// cash they gave back for returns.
+    #[serde(default)]
+    pub suppliers_minor: i64,
     pub sales: u32,
     /// What the till should hold: opening + cash sales + collections + in
     /// − out − refunds.
@@ -102,6 +106,7 @@ pub(crate) fn shift_of(conn: &Connection, id: &str) -> Result<ShiftRow> {
                     collections_minor: 0,
                     expenses_minor: 0,
                     other_income_minor: 0,
+                    suppliers_minor: 0,
                     sales: 0,
                     expected_minor: 0,
                 })
@@ -152,6 +157,13 @@ pub(crate) fn shift_of(conn: &Connection, id: &str) -> Result<ShiftRow> {
         [id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    row.suppliers_minor = conn.query_row(
+        "SELECT COALESCE((SELECT SUM(cash_minor) FROM purchases WHERE shift_id = ?1), 0)
+              + COALESCE((SELECT SUM(amount_minor) FROM supplier_payments WHERE shift_id = ?1), 0)
+              - COALESCE((SELECT SUM(total_minor) FROM purchase_returns WHERE shift_id = ?1), 0)",
+        [id],
+        |r| r.get(0),
+    )?;
     row.expected_minor = row.opening_minor
         + row.cash_sales_minor
         + row.collections_minor
@@ -159,7 +171,8 @@ pub(crate) fn shift_of(conn: &Connection, id: &str) -> Result<ShiftRow> {
         + cash_in
         - cash_out
         - row.refunds_minor
-        - row.expenses_minor;
+        - row.expenses_minor
+        - row.suppliers_minor;
     Ok(row)
 }
 

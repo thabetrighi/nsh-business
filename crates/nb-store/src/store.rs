@@ -54,6 +54,9 @@ pub struct Health {
     /// Customers whose balance differs from their receivable lines.
     #[serde(default)]
     pub customer_drift: usize,
+    /// Suppliers whose balance differs from their payable lines.
+    #[serde(default)]
+    pub supplier_drift: usize,
 }
 
 impl Health {
@@ -64,6 +67,7 @@ impl Health {
             && self.stock_drift == 0
             && self.audit_broken_at.is_none()
             && self.customer_drift == 0
+            && self.supplier_drift == 0
     }
 }
 
@@ -189,6 +193,7 @@ impl Store {
         };
         let audit_broken_at = self.verify_audit_chain()?;
         let customer_drift = crate::usecases::customers::customer_drift(&self.conn)?.len();
+        let supplier_drift = crate::usecases::purchasing::supplier_drift(&self.conn)?.len();
         Ok(Health {
             integrity,
             foreign_keys: usize::try_from(foreign_keys).unwrap_or(usize::MAX),
@@ -196,6 +201,7 @@ impl Store {
             stock_drift,
             audit_broken_at,
             customer_drift,
+            supplier_drift,
         })
     }
 

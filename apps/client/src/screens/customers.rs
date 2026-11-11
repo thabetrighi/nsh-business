@@ -1213,7 +1213,7 @@ pub fn customer_card(
 
 /// The till money is collected into: this branch's first till with an
 /// open session (or its first till: card and transfer need none).
-fn branch_till(st: AppState) -> Memo<Option<String>> {
+pub(crate) fn branch_till(st: AppState) -> Memo<Option<String>> {
     let r = resource(
         move || {
             st.session
@@ -1704,7 +1704,7 @@ pub fn debts_page(st: AppState, compact: bool) -> View {
 // ------------------------------------------------------------ instalments
 
 /// A dialog's subject and its open flag, kept in step.
-fn opener<T: Clone + PartialEq + 'static>() -> (Signal<Option<T>>, Signal<bool>) {
+pub(crate) fn opener<T: Clone + PartialEq + 'static>() -> (Signal<Option<T>>, Signal<bool>) {
     let subject: Signal<Option<T>> = signal(None);
     let open = signal(false);
     effect(move || {

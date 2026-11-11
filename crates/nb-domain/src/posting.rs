@@ -186,6 +186,18 @@ pub enum Operation {
     /// What a customer owed (`owed`) or was owed (`owing`) before the
     /// books started here.
     CustomerOpening { owed: Money, owing: Money },
+    /// Goods sent back to a supplier (M10.6): the supplier refunds `net` +
+    /// `vat` (`refund`: cash, bank, or off what is owed to it); the stock
+    /// leaves at its value (`stock_value`, the average cost), the rest is a
+    /// price difference on the cost of sales.
+    PurchaseReturn {
+        net: Money,
+        vat: Money,
+        refund: Settlement,
+        stock_value: Money,
+    },
+    /// What a supplier was owed before the books started here.
+    SupplierOpening { owed: Money },
 }
 
 impl Operation {
@@ -207,6 +219,8 @@ impl Operation {
             Operation::WriteOff { .. } => "debt.write_off",
             Operation::Allowance { .. } => "debt.allowance",
             Operation::CustomerOpening { .. } => "debt.opening",
+            Operation::PurchaseReturn { .. } => "purchase.return",
+            Operation::SupplierOpening { .. } => "supplier.opening",
         }
     }
 }
@@ -370,6 +384,48 @@ fn lines(op: &Operation, map: &AccountMap) -> Result<Vec<Line>, RuleError> {
             vec![
                 Line::debit(a(Role::SalesReturns)?, amount),
                 Line::credit(a(Role::Receivable)?, amount),
+            ]
+        }
+        Operation::PurchaseReturn {
+            net,
+            vat,
+            refund,
+            stock_value,
+        } => {
+            check_positive(&[
+                net,
+                vat,
+                refund.cash,
+                refund.bank,
+                refund.credit,
+                stock_value,
+            ])?;
+            if refund.total()? != net.checked_add(vat)? {
+                return Err(RuleError::on("refund", "posting.settlement_mismatch"));
+            }
+            // The price got back above (or below) the stock's value.
+            let gain = net.checked_sub(stock_value)?;
+            let zero = Money::zero(net.currency());
+            let (diff_debit, diff_credit) = if gain.is_negative() {
+                (zero.checked_sub(gain)?, zero)
+            } else {
+                (zero, gain)
+            };
+            vec![
+                Line::debit(a(Role::Cash)?, refund.cash),
+                Line::debit(a(Role::Bank)?, refund.bank),
+                Line::debit(a(Role::Payable)?, refund.credit),
+                Line::credit(a(Role::VatIn)?, vat),
+                Line::credit(a(Role::Stock)?, stock_value),
+                Line::debit(a(Role::CostOfSales)?, diff_debit),
+                Line::credit(a(Role::CostOfSales)?, diff_credit),
+            ]
+        }
+        Operation::SupplierOpening { owed } => {
+            check_positive(&[owed])?;
+            vec![
+                Line::debit(a(Role::OpeningEquity)?, owed),
+                Line::credit(a(Role::Payable)?, owed),
             ]
         }
         Operation::CustomerOpening { owed, owing } => {
@@ -548,6 +604,29 @@ mod tests {
                 owing: da(0)
             }),
             [l("411", 400, 0), l("101", 0, 400)]
+        );
+        // Bought at 10.00 + VAT, worth 9.00 in stock: 1.00 back on the cost.
+        assert_eq!(
+            lines(Operation::PurchaseReturn {
+                net: da(1_000),
+                vat: da(190),
+                refund: Settlement {
+                    cash: da(0),
+                    bank: da(0),
+                    credit: da(1_190)
+                },
+                stock_value: da(900),
+            }),
+            [
+                l("401", 1_190, 0),
+                l("4456", 0, 190),
+                l("30", 0, 900),
+                l("600", 0, 100)
+            ]
+        );
+        assert_eq!(
+            lines(Operation::SupplierOpening { owed: da(50) }),
+            [l("101", 50, 0), l("401", 0, 50)]
         );
     }
 

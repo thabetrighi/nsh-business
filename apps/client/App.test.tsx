@@ -720,3 +720,43 @@ test("an expense from the bank, and a customer's opening balance", async () => {
   await seen(/^Enregistré\. Le client doit maintenant 200,00 DA\.$/);
   await app.waitFor("text:Solde d'ouverture");
 });
+
+test("a supplier's invoice comes into stock, and the supplier is paid", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Achats");
+  await app.press("id:nav-suppliers");
+  await app.waitFor("text:Aucun fournisseur");
+  await app.waitFor("id:supplier-new");
+  await app.press("id:supplier-new");
+  await app.waitFor("id:supplier-save");
+  await app.type("id:supplier-name", "Cevital");
+  await app.press("id:supplier-save");
+  await app.waitFor("id:supplier-0");
+  // Ten at 100.00 before tax, nothing paid now: all of it is owed.
+  await app.press("id:nav-purchases");
+  await app.waitFor("id:purchase-new");
+  await app.press("id:purchase-new");
+  await app.waitFor("id:buy-save");
+  await app.type("id:buy-search", "Biscuits");
+  await app.press("id:buy-search-result-0");
+  await app.waitFor("id:buy-cost-0");
+  await app.clear("id:buy-qty-0");
+  await app.type("id:buy-qty-0", "10");
+  await app.type("id:buy-cost-0", "100");
+  await app.type("id:buy-ref", "FC-118");
+  await app.press("id:buy-save");
+  await seen(/^Achat FA-.+ enregistré : 1 190,00 DA\.$/);
+  await app.waitFor("id:purchase-0");
+  await seen(/^1 190,00 DA à payer$/);
+  // The supplier is paid in full by bank.
+  await app.press("id:nav-suppliers");
+  await app.waitFor("id:supplier-0");
+  await app.press("id:supplier-0");
+  await app.waitFor("id:supplier-pay");
+  await app.press("id:supplier-pay");
+  await app.waitFor("id:sp-confirm");
+  await app.press("id:sp-confirm");
+  await seen(/^Paiement .+ : 1 190,00 DA payé\.$/);
+});

@@ -171,19 +171,29 @@ pub fn post(w: &Writer<'_>, org: OrganizationId, h: Header<'_>, entry: &Entry) -
             w.device().id.to_string()
         ],
     )?;
-    // The receivable lines are the customer's: its sub-ledger.
-    let receivable = match party {
-        Some(_) => account_map(w.tx(), org)?
-            .get(Role::Receivable)
-            .ok()
-            .map(str::to_owned),
-        None => None,
+    // The receivable lines are the customer's, the payable lines the
+    // supplier's: their sub-ledgers.
+    let (receivable, payable) = match party {
+        Some(_) => {
+            let map = account_map(w.tx(), org)?;
+            (
+                map.get(Role::Receivable).ok().map(str::to_owned),
+                map.get(Role::Payable).ok().map(str::to_owned),
+            )
+        }
+        None => (None, None),
     };
     let mut owed = 0i64;
+    let mut owing = 0i64;
     for (i, l) in entry.lines().iter().enumerate() {
-        let tagged = receivable.as_deref() == Some(l.account.as_str());
-        if tagged {
+        let on_receivable = receivable.as_deref() == Some(l.account.as_str());
+        let on_payable = payable.as_deref() == Some(l.account.as_str());
+        let tagged = on_receivable || on_payable;
+        if on_receivable {
             owed += l.debit.minor() - l.credit.minor();
+        }
+        if on_payable {
+            owing += l.credit.minor() - l.debit.minor();
         }
         w.tx().execute(
             "INSERT INTO journal_lines (entry_id, position, account_code, debit_minor, credit_minor, memo, party_id)
@@ -206,6 +216,15 @@ pub fn post(w: &Writer<'_>, org: OrganizationId, h: Header<'_>, entry: &Entry) -
         )?;
         if n == 0 {
             return Err(Error::NotFound("customer"));
+        }
+    }
+    if let (Some(p), true) = (party, owing != 0) {
+        let n = w.tx().execute(
+            "UPDATE suppliers SET balance_minor = balance_minor + ?2 WHERE id = ?1",
+            params![p, owing],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound("supplier"));
         }
     }
     Ok(id)
