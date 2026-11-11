@@ -112,7 +112,7 @@ test("sidebar sections expand to their pages, and settings tabs switch panels", 
   expect(app.texts()).not.toContain("Dépenses");
   await app.press("text:Finances");
   await app.waitFor("text:Dépenses");
-  await app.press("text:Dépenses");
+  await app.press("text:Caisses");
   await app.waitFor("text:Arrive dans une prochaine étape");
   // The section's other pages are tabs on the page.
   await app.press("id:tab-banks");
@@ -685,4 +685,38 @@ test("an invoice on account is split into instalments and the first is paid", as
   await seen(/^Reçu RC-01-\d\d-A\d+ : .+ encaissés\.$/);
   await app.waitFor("text:Payé");
   await app.waitUntil(() => app.texts().filter((t) => t === "À venir").length === 2);
+});
+
+test("an expense from the bank, and a customer's opening balance", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Finances");
+  await app.press("id:nav-expenses");
+  await app.waitFor("id:expense-new");
+  await app.waitFor("text:Rien d'enregistré");
+  await app.press("id:expense-new");
+  await app.waitFor("id:exp-save");
+  // No till open: the bank pays.
+  await app.waitFor("text:Aucune caisse ouverte : banque seulement.");
+  await app.type("id:exp-total-input", "1500");
+  await app.type("id:exp-payee", "Sonelgaz");
+  await app.press("id:exp-save");
+  await seen(/^DP-01-\d\d-A\d+ enregistré : 1 500,00 DA\.$/);
+  await app.waitFor("id:expense-0");
+  await seen(/^Divers · Sonelgaz$/);
+  // A customer's debt from the old credit book.
+  await app.press("text:Clients et crédit");
+  await app.press("id:nav-customers");
+  await app.waitFor("id:customer-0");
+  await app.press("id:customer-0");
+  await app.waitFor("id:card-adjust");
+  await app.press("id:card-adjust");
+  await app.waitFor("id:adj-confirm");
+  await app.waitFor("text:Ce que le client devait avant cette application (cahier de crédit).");
+  await app.type("id:adj-amount", "200");
+  await app.type("id:adj-reason", "Cahier de crédit");
+  await app.press("id:adj-confirm");
+  await seen(/^Enregistré\. Le client doit maintenant 200,00 DA\.$/);
+  await app.waitFor("text:Solde d'ouverture");
 });

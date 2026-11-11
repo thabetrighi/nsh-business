@@ -9,8 +9,8 @@ use nb_store::usecases::customers::{
     get_customer, list_customers, save_customer,
 };
 use nb_store::usecases::debts::{
-    Ageing, AllocationInput, CustomerStatement, OpenInvoice, ReceiptInput, ReceiptRow, ageing,
-    collect, customer_statement, open_invoices, receipts_of,
+    AdjustInput, Ageing, AllocationInput, CustomerStatement, OpenInvoice, ReceiptInput, ReceiptRow,
+    adjust_debt, ageing, collect, customer_statement, open_invoices, receipts_of,
 };
 use nb_store::usecases::installments::{
     DueRow, Plan, PlanInput, RescheduleInput, create_plan, due_installments, pay_installments,
@@ -773,6 +773,7 @@ pub fn customer_card(
     let (planning, planning_open) = opener::<OpenInvoice>();
     let (paying, paying_open) = opener::<Plan>();
     let (moving, moving_open) = opener::<Plan>();
+    let adjusting = signal(false);
 
     let head = dynamic(move || {
         let Some((c, _, open, _)) = data.get() else {
@@ -1132,6 +1133,20 @@ pub fn customer_card(
                 },
             ))
             .child(when(
+                move || st.can("debts.adjust") || st.can("debts.collect"),
+                move || {
+                    button(
+                        Variant::Ghost,
+                        Size::Md,
+                        Some(Icon::Sliders),
+                        st.t("adjust.open"),
+                        move || adjusting.set(true),
+                    )
+                    .test_id("card-adjust")
+                    .into_element()
+                },
+            ))
+            .child(when(
                 move || st.can("debts.collect"),
                 move || {
                     button(
@@ -1158,6 +1173,12 @@ pub fn customer_card(
             footer,
             close,
         ))
+        .child(modal(adjusting, false, move || {
+            match data.get_untracked() {
+                Some((c, ..)) => adjust_dialog(st, c, move || adjusting.set(false)).into_element(),
+                None => view().into_element(),
+            }
+        }))
         .child(modal(planning_open, false, move || {
             match planning.get_untracked() {
                 Some(inv) => plan_dialog(st, inv, move || {
@@ -2546,6 +2567,205 @@ pub fn installments_page(st: AppState, compact: bool) -> View {
         .child(modal(editing_open, compact, move || {
             match editing.get_untracked() {
                 Some(c) => customer_dialog(st, c, move || editing_open.set(false)).into_element(),
+                None => view().into_element(),
+            }
+        }))
+}
+
+// ------------------------------------------------------------ adjustments
+
+const ADJUST_KINDS: [&str; 3] = ["allowance", "write_off", "opening"];
+
+/// An allowance, a debt given up, or what the customer owed before the
+/// books started here (M9.9); a supervisor approves when needed.
+fn adjust_dialog(st: AppState, c: CustomerRow, close: impl Fn() + Clone + 'static) -> View {
+    let Some(session) = st.session.get_untracked() else {
+        return view();
+    };
+    let cur = session.currency;
+    let meta = session.meta("debt.adjust");
+    let owner = nsh_core::element::Owner::current();
+    let kind = signal(if c.balance_minor > 0 { 0usize } else { 2 });
+    let amount = signal(String::new());
+    // Opening: the shop owed the customer (an advance it had paid).
+    let we_owe = signal(false);
+    let reason = signal(String::new());
+    let error = signal(String::new());
+    let busy = signal(false);
+    let approval: Signal<Option<String>> = signal(None);
+    let (asking, asking_open) = opener::<crate::screens::approval::Ask>();
+    let id = c.id.clone();
+    let save = {
+        let close = close.clone();
+        move || {
+            if busy.get_untracked() {
+                return;
+            }
+            let Ok(a) = parse_price(&amount.get_untracked(), cur) else {
+                error.set(error_text(st, "invalid_amount"));
+                return;
+            };
+            let k = ADJUST_KINDS[kind.get_untracked()];
+            let signed = if k == "opening" && we_owe.get_untracked() {
+                -a.minor()
+            } else {
+                a.minor()
+            };
+            let input = AdjustInput {
+                customer_id: id.clone(),
+                kind: k.into(),
+                amount_minor: signed,
+                reason: reason.get_untracked(),
+                approval: approval.get_untracked(),
+            };
+            busy.set(true);
+            error.set(String::new());
+            let close = close.clone();
+            let db = st.db();
+            let task = spawn(async move {
+                match db.call(move |s| adjust_debt(s, meta, input)).await {
+                    Ok(r) => {
+                        st.changed();
+                        close();
+                        show_toast(
+                            st,
+                            tr_args(
+                                st.lang(),
+                                "adjust.done",
+                                &[("balance", &money(st, r.balance_minor))],
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        busy.set(false);
+                        if let Some(p) = crate::screens::approval::needs_approval(&e) {
+                            asking.set(Some(crate::screens::approval::Ask {
+                                permission: p,
+                                branch_id: None,
+                                register_id: None,
+                            }));
+                        }
+                        error.set(first_error(st, &e));
+                    }
+                }
+            });
+            drop(task); // runs to completion: tasks end with their owner, not their handle
+        }
+    };
+    let retry = save.clone();
+    let owes = c.balance_minor;
+    let body = view()
+        .gap(px(14.0))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .child(view().flex_1().child(label_line(
+                    st.t("customers.owes"),
+                    ty::SM,
+                    FontWeight::MEDIUM,
+                    Tone::Muted,
+                )))
+                .child(figure(
+                    move || money(st, owes),
+                    ty::LG,
+                    FontWeight::BOLD,
+                    || Tone::Ink,
+                )),
+        )
+        .child(segmented(
+            vec![
+                (0, Box::new(st.t("adjust.kind.allowance"))),
+                (1, Box::new(st.t("adjust.kind.write_off"))),
+                (2, Box::new(st.t("adjust.kind.opening"))),
+            ],
+            kind,
+        ))
+        .child(label(
+            move || st.tn(&format!("adjust.help.{}", ADJUST_KINDS[kind.get()])),
+            ty::XS,
+            FontWeight::NORMAL,
+            Tone::Muted,
+        ))
+        .child(field(
+            st.t("adjust.amount"),
+            amount,
+            String::new,
+            String::new,
+            KeyboardType::Decimal,
+            "adj-amount",
+        ))
+        .child(when(
+            move || kind.get() == 2,
+            move || {
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(switch(we_owe, st.t("adjust.we_owe")).test_id("adj-we-owe"))
+                    .child(label_line(
+                        st.t("adjust.we_owe"),
+                        ty::SM,
+                        FontWeight::MEDIUM,
+                        Tone::Body,
+                    ))
+                    .into_element()
+            },
+        ))
+        .child(field(
+            st.t("plans.reason"),
+            reason,
+            String::new,
+            String::new,
+            KeyboardType::Default,
+            "adj-reason",
+        ))
+        .child(error_line(error));
+    let footer = view()
+        .child(button(
+            Variant::Secondary,
+            Size::Md,
+            None,
+            st.t("form.cancel"),
+            close.clone(),
+        ))
+        .child(
+            button(
+                Variant::Primary,
+                Size::Md,
+                Some(Icon::Check),
+                st.t("adjust.confirm"),
+                save,
+            )
+            .test_id("adj-confirm"),
+        );
+    let name = c.name.clone();
+    view()
+        .flex_shrink(1.0)
+        .min_h(px(0.0))
+        .child(dialog_frame(
+            st,
+            move || tr_args(st.lang(), "adjust.title", &[("name", &name)]),
+            st.t("adjust.dialog.help"),
+            body,
+            footer,
+            close,
+        ))
+        .child(modal(asking_open, false, move || {
+            match asking.get_untracked() {
+                Some(ask) => {
+                    let retry = retry.clone();
+                    crate::screens::approval::approval_dialog(
+                        st,
+                        ask,
+                        move |id| {
+                            approval.set(Some(id));
+                            owner.run(&retry);
+                        },
+                        move || asking_open.set(false),
+                    )
+                    .into_element()
+                }
                 None => view().into_element(),
             }
         }))

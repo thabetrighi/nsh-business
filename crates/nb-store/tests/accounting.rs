@@ -123,7 +123,7 @@ fn accounts_are_added_under_their_group() -> R {
         err(create_account(
             &mut s,
             meta(&setup, "account"),
-            input("6201", "62")
+            input("62701", "627")
         )),
         ["account.parent_not_group"]
     );
@@ -417,14 +417,14 @@ fn journal_trial_balance_and_statement_agree() -> R {
         &mut s,
         &setup,
         "Frais bancaires",
-        vec![line("62", 2_500, 0), line("531", 0, 2_500)],
+        vec![line("627", 2_500, 0), line("531", 0, 2_500)],
     )?;
     reverse_entry(&mut s, meta(&setup, "journal.reverse"), &fee, "doublon")?;
     post(
         &mut s,
         &setup,
         "Frais bancaires",
-        vec![line("62", 1_500, 0), line("5121", 0, 1_500)],
+        vec![line("627", 1_500, 0), line("5121", 0, 1_500)],
     )?;
 
     let page = journal(
@@ -485,8 +485,14 @@ fn journal_trial_balance_and_statement_agree() -> R {
             .map(|r| r.closing_minor)
     };
     assert_eq!(
-        (row("531"), row("53"), row("5"), row("62")),
-        (Some(100_000), Some(100_000), Some(98_500), Some(1_500))
+        (row("531"), row("53"), row("5"), row("627"), row("62")),
+        (
+            Some(100_000),
+            Some(100_000),
+            Some(98_500),
+            Some(1_500),
+            Some(1_500)
+        )
     );
     // Next year brings this year's balances forward.
     let next = trial_balance(&s, Some("2027-01-01"), None)?;
@@ -562,7 +568,10 @@ fn an_older_database_gains_groups_roles_and_tills() -> R {
     )?;
     assert_eq!(groups, 2);
     let roles: i64 = conn.query_row("SELECT COUNT(*) FROM account_roles", [], |r| r.get(0))?;
-    assert_eq!(roles, 17, "16 roles of M7 and the internal transfers of M8");
+    assert_eq!(
+        roles, 18,
+        "16 roles of M7, the internal transfers of M8, bad debts of M9"
+    );
     let tills: Vec<String> = conn
         .prepare("SELECT id FROM money_accounts ORDER BY kind")?
         .query_map([], |r| r.get(0))?

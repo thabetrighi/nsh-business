@@ -2400,6 +2400,8 @@ fn close_dialog(st: AppState, shift: ShiftRow, close: impl Fn() + Clone + 'stati
         ("pos.cash_sales", shift.cash_sales_minor),
         ("pos.cash_in", shift.cash_in_minor),
         ("pos.collections", shift.collections_minor),
+        ("pos.other_income", shift.other_income_minor),
+        ("pos.expenses", -shift.expenses_minor),
         ("pos.cash_out", -shift.cash_out_minor),
         ("pos.expected", shift.expected_minor),
     ];

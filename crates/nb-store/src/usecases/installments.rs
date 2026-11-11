@@ -137,6 +137,8 @@ fn load(conn: &Connection, id: &str, today: Date) -> Result<Plan> {
         "SELECT i.seq, i.due_date, i.amount_minor,
                 COALESCE((SELECT SUM(p.amount_minor) FROM installment_payments p
                           WHERE p.plan_id = i.plan_id AND p.seq = i.seq), 0)
+                + COALESCE((SELECT SUM(a.amount_minor) FROM installment_adjustments a
+                            WHERE a.plan_id = i.plan_id AND a.seq = i.seq), 0)
          FROM installments i WHERE i.plan_id = ?1 ORDER BY i.seq",
     )?;
     let rows = s
@@ -220,6 +222,8 @@ pub fn due_installments(store: &Store, days: i64) -> Result<Vec<DueRow>> {
             "SELECT p.id, p.number, p.customer_id, c.name, c.phone, i.seq, p.count, i.due_date,
                     i.amount_minor - COALESCE((SELECT SUM(x.amount_minor) FROM installment_payments x
                                                WHERE x.plan_id = i.plan_id AND x.seq = i.seq), 0)
+                    - COALESCE((SELECT SUM(a.amount_minor) FROM installment_adjustments a
+                                WHERE a.plan_id = i.plan_id AND a.seq = i.seq), 0)
              FROM installments i JOIN installment_plans p ON p.id = i.plan_id JOIN customers c ON c.id = p.customer_id
              WHERE p.org_id = ?1 AND p.status = 'active' AND i.due_date <= ?2
              ORDER BY i.due_date, c.name",
@@ -475,6 +479,17 @@ pub(crate) fn settle_plan(
     sale: &str,
     amount: i64,
 ) -> Result<()> {
+    settle_plan_by(w, Some(receipt), None, sale, amount)
+}
+
+/// [`settle_plan`] for a receipt or for an adjustment (write-off, allowance).
+pub(crate) fn settle_plan_by(
+    w: &mut Writer<'_>,
+    receipt: Option<&str>,
+    adjustment: Option<&str>,
+    sale: &str,
+    amount: i64,
+) -> Result<()> {
     let plan: Option<String> = w
         .tx()
         .query_row(
@@ -495,10 +510,19 @@ pub(crate) fn settle_plan(
         .collect();
     let (parts, _) = installment::settle(&open, amount);
     for (i, take) in parts {
-        w.tx().execute(
-            "INSERT INTO installment_payments (receipt_id, plan_id, seq, amount_minor) VALUES (?1, ?2, ?3, ?4)",
-            params![receipt, plan, p.installments[i].seq, take],
-        )?;
+        let seq = p.installments[i].seq;
+        match (receipt, adjustment) {
+            (Some(r), _) => w.tx().execute(
+                "INSERT INTO installment_payments (receipt_id, plan_id, seq, amount_minor) VALUES (?1, ?2, ?3, ?4)",
+                params![r, plan, seq, take],
+            )?,
+            (None, Some(a)) => w.tx().execute(
+                "INSERT INTO installment_adjustments (adjustment_id, plan_id, seq, amount_minor)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![a, plan, seq, take],
+            )?,
+            (None, None) => 0,
+        };
     }
     if load(w.tx(), &plan, t)?.open_minor() == 0 {
         w.tx().execute(

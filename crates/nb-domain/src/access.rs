@@ -56,6 +56,7 @@ permissions! {
     202 CashCloseShift "cash.close_shift" false,
     203 CashMovement "cash.movement" false,
     204 CashOpenDrawer "cash.open_drawer" true,
+    205 CashExpense "cash.expense" false,
     // Catalog
     301 ProductsView "products.view" false,
     302 ProductsEdit "products.edit" false,
@@ -77,6 +78,7 @@ permissions! {
     504 CreditExceed "credit.exceed" true,
     505 CreditLimits "credit.limits" true,
     506 InstallmentsReschedule "installments.reschedule" true,
+    507 DebtsAdjust "debts.adjust" true,
     // Purchasing
     601 SuppliersEdit "suppliers.edit" false,
     602 PurchasesOrder "purchases.order" false,
@@ -260,12 +262,15 @@ impl BuiltinRole {
                 CustomersEdit,
                 DebtsCollect,
                 CreditExceed,
+                CashExpense,
                 PurchasesOrder,
                 PurchasesReceive,
                 ReportsView,
                 ReportsProfit,
             ]),
             BuiltinRole::Accountant => PermissionSet::of(&[
+                CashExpense,
+                DebtsAdjust,
                 AccountingView,
                 AccountingPost,
                 AccountingReverse,
@@ -329,6 +334,7 @@ impl BuiltinRole {
                 CreditLimits,
                 CreditExceed,
                 InstallmentsReschedule,
+                DebtsAdjust,
                 ReportsView,
             ]),
             BuiltinRole::SalesRep => PermissionSet::of(&[

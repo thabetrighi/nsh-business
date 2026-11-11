@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod common;
 pub mod customers;
 pub mod design;
+pub mod expenses;
 pub mod forms;
 pub mod home;
 pub mod inventory;

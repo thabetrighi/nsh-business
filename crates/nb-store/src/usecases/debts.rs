@@ -61,6 +61,7 @@ pub(crate) fn open_invoices_of(
         "SELECT s.id, s.number, s.created_at, s.credit_minor,
                 s.credit_minor
                   - COALESCE((SELECT SUM(a.amount_minor) FROM payment_allocations a WHERE a.sale_id = s.id), 0)
+                  - COALESCE((SELECT SUM(j.amount_minor) FROM adjustment_allocations j WHERE j.sale_id = s.id), 0)
                   - COALESCE((SELECT SUM(x.total_minor) FROM sale_returns x
                               WHERE x.sale_id = s.id AND x.refund_method = 'credit'), 0)
          FROM sales s WHERE s.customer_id = ?1 AND s.credit_minor > 0
@@ -303,6 +304,138 @@ pub(crate) fn collect_in(
         w.audit("collect", "customer", &customer.id, input)?;
         Ok(out)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Adjustments (M9.9)
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AdjustInput {
+    pub customer_id: String,
+    /// `write_off` (a debt given up), `allowance` (a reduction granted) or
+    /// `opening` (owed before the books started here).
+    pub kind: String,
+    /// write-off, allowance: what is taken off the debt (positive);
+    /// opening: what it owed (positive) or was owed (negative).
+    pub amount_minor: i64,
+    pub reason: String,
+    #[serde(default)]
+    pub approval: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdjustResult {
+    pub id: String,
+    pub entry_number: Option<String>,
+    /// (invoice number, amount) settled by a write-off or an allowance.
+    pub settled: Vec<(String, i64)>,
+    pub balance_minor: i64,
+}
+
+/// Gives up part of a customer's debt, grants an allowance on it, or
+/// records what it owed before: with a supervisor's right
+/// (`debts.adjust`), a reason, and its entry, once per operation.
+pub fn adjust_debt(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Result<AdjustResult> {
+    if input.reason.trim().is_empty() {
+        return Err(RuleError::on("reason", "required").into());
+    }
+    let opening = match input.kind.as_str() {
+        "write_off" | "allowance" => false,
+        "opening" => true,
+        _ => return Err(RuleError::on("kind", "invalid_value").into()),
+    };
+    if (opening && input.amount_minor == 0) || (!opening && input.amount_minor <= 0) {
+        return Err(RuleError::on("amount", "receipt.amount_positive").into());
+    }
+    let (_, currency) = store.read(|r| the_org(r.conn()))?;
+    let offset = store.read(|r| Ok(r.utc_offset_min))?;
+    store.write(meta, |w| {
+        let approval = input.approval.as_deref().map(parse_id).transpose()?;
+        w.require_approved(Permission::DebtsAdjust, &Target::org(), approval)?;
+        let customer = crate::usecases::customers::load(w.tx(), &input.customer_id)?;
+        if !opening && input.amount_minor > customer.balance_minor {
+            return Err(RuleError::on("amount", "adjust.more_than_owed").into());
+        }
+        let branch = org::branches(w.tx(), w.org()?)?
+            .into_iter()
+            .next()
+            .ok_or(Error::NotFound("branch"))?;
+        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let m = |v: i64| Money::from_minor(v, currency);
+        let op = match input.kind.as_str() {
+            "write_off" => Operation::WriteOff {
+                amount: m(input.amount_minor),
+            },
+            "allowance" => Operation::Allowance {
+                amount: m(input.amount_minor),
+            },
+            _ => Operation::CustomerOpening {
+                owed: m(input.amount_minor.max(0)),
+                owing: m((-input.amount_minor).max(0)),
+            },
+        };
+        let entry_number = post_operations_for(
+            w,
+            &branch,
+            offset,
+            &[op],
+            &format!("{} — {}", customer.name, input.reason.trim()),
+            op.code(),
+            None,
+            Some(&customer.id),
+        )?;
+        w.tx().execute(
+            "INSERT INTO customer_adjustments (id, org_id, customer_id, kind, amount_minor, reason, approval_id,
+                    entry_number, operation_id, created_at, created_by, device_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                id,
+                w.org()?.to_string(),
+                customer.id,
+                input.kind,
+                input.amount_minor,
+                input.reason.trim(),
+                input.approval,
+                entry_number,
+                w.meta().id.to_string(),
+                w.now(),
+                w.actor_text(),
+                w.device().id.to_string()
+            ],
+        )?;
+        // What it takes off settles the invoices, oldest first.
+        let mut settled = Vec::new();
+        if !opening {
+            let mut left = input.amount_minor;
+            for inv in open_invoices_of(w.tx(), &customer.id, w.now())? {
+                if left == 0 {
+                    break;
+                }
+                let take = inv.open_minor.min(left);
+                left -= take;
+                w.tx().execute(
+                    "INSERT INTO adjustment_allocations (adjustment_id, sale_id, amount_minor) VALUES (?1, ?2, ?3)",
+                    params![id, inv.sale_id, take],
+                )?;
+                crate::usecases::installments::settle_plan_by(w, None, Some(&id), &inv.sale_id, take)?;
+                settled.push((inv.number, take));
+            }
+        }
+        let balance: i64 = w.tx().query_row(
+            "SELECT balance_minor FROM customers WHERE id = ?1",
+            [&customer.id],
+            |r| r.get(0),
+        )?;
+        let out = AdjustResult {
+            id: id.clone(),
+            entry_number,
+            settled,
+            balance_minor: balance,
+        };
+        w.event("customer.adjusted", "customer_adjustment", &id, &out)?;
+        w.audit(&input.kind, "customer", &customer.id, &input)?;
+        Ok(out)
+    })
 }
 
 // ---------------------------------------------------------------------------

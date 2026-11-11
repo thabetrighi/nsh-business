@@ -140,11 +140,58 @@ pub const DZ_CHART: &[ChartRow] = &[
         "expense",
         false,
     ),
-    ("61", "Services extérieurs", Some("6"), "expense", false),
+    ("61", "Services extérieurs", Some("6"), "expense", true),
     (
         "62",
         "Autres services extérieurs",
         Some("6"),
+        "expense",
+        true,
+    ),
+    (
+        "607",
+        "Achats non stockés (eau, énergie)",
+        Some("60"),
+        "expense",
+        false,
+    ),
+    ("613", "Locations", Some("61"), "expense", false),
+    (
+        "615",
+        "Entretien et réparations",
+        Some("61"),
+        "expense",
+        false,
+    ),
+    ("616", "Primes d'assurance", Some("61"), "expense", false),
+    ("624", "Transports", Some("62"), "expense", false),
+    (
+        "626",
+        "Frais postaux et de télécommunications",
+        Some("62"),
+        "expense",
+        false,
+    ),
+    ("627", "Services bancaires", Some("62"), "expense", false),
+    ("63", "Charges de personnel", Some("6"), "expense", true),
+    (
+        "631",
+        "Rémunérations du personnel",
+        Some("63"),
+        "expense",
+        false,
+    ),
+    (
+        "64",
+        "Impôts, taxes et versements assimilés",
+        Some("6"),
+        "expense",
+        true,
+    ),
+    (
+        "642",
+        "Impôts et taxes non récupérables",
+        Some("64"),
         "expense",
         false,
     ),
@@ -154,6 +201,13 @@ pub const DZ_CHART: &[ChartRow] = &[
         Some("6"),
         "expense",
         true,
+    ),
+    (
+        "654",
+        "Pertes sur créances irrécouvrables",
+        Some("65"),
+        "expense",
+        false,
     ),
     (
         "658",
@@ -184,6 +238,13 @@ pub const DZ_CHART: &[ChartRow] = &[
         Some("7"),
         "income",
         true,
+    ),
+    (
+        "752",
+        "Revenus des immeubles (loyers perçus)",
+        Some("75"),
+        "income",
+        false,
     ),
     (
         "758",
@@ -225,14 +286,53 @@ pub const DZ_CHART_AR: &[(&str, &str)] = &[
     ("603", "تغيّر مخزونات البضائع"),
     ("61", "الخدمات الخارجية"),
     ("62", "الخدمات الخارجية الأخرى"),
+    ("607", "المشتريات غير المخزنة (الماء، الطاقة)"),
+    ("613", "الإيجارات"),
+    ("615", "الصيانة والتصليحات"),
+    ("616", "أقساط التأمين"),
+    ("624", "النقل"),
+    ("626", "مصاريف البريد والاتصالات"),
+    ("627", "الخدمات المصرفية"),
+    ("63", "أعباء المستخدمين"),
+    ("631", "أجور المستخدمين"),
+    ("64", "الضرائب والرسوم والمدفوعات المماثلة"),
+    ("642", "الضرائب والرسوم غير القابلة للاسترجاع"),
     ("65", "الأعباء العملياتية الأخرى"),
+    ("654", "خسائر الديون غير القابلة للتحصيل"),
     ("658", "أعباء أخرى (خسائر المخزون)"),
     ("7", "حسابات المنتجات"),
     ("70", "مبيعات البضائع والمنتجات"),
     ("700", "مبيعات البضائع"),
     ("709", "التخفيضات والتنزيلات الممنوحة"),
     ("75", "المنتجات العملياتية الأخرى"),
+    ("752", "إيرادات العقارات (إيجارات محصّلة)"),
     ("758", "منتجات أخرى (أرباح المخزون)"),
+];
+
+/// The expense and income categories a shop starts with: (kind, French,
+/// Arabic, account).
+pub const DZ_EXPENSE_CATEGORIES: &[(&str, &str, &str, &str)] = &[
+    ("expense", "Loyer", "الإيجار", "613"),
+    (
+        "expense",
+        "Électricité, eau et gaz",
+        "الكهرباء والماء والغاز",
+        "607",
+    ),
+    ("expense", "Salaires", "الأجور", "631"),
+    ("expense", "Transport", "النقل", "624"),
+    ("expense", "Téléphone et internet", "الهاتف والإنترنت", "626"),
+    (
+        "expense",
+        "Entretien et réparations",
+        "الصيانة والتصليح",
+        "615",
+    ),
+    ("expense", "Frais bancaires", "مصاريف بنكية", "627"),
+    ("expense", "Impôts et taxes", "الضرائب والرسوم", "642"),
+    ("expense", "Divers", "متفرقات", "658"),
+    ("income", "Loyers perçus", "إيجارات محصّلة", "752"),
+    ("income", "Autres produits", "إيرادات أخرى", "758"),
 ];
 
 /// An account's name in the store's language.
@@ -351,6 +451,20 @@ pub fn setup_organization(store: &mut Store, input: SetupInput) -> Result<SetupR
             ] {
                 let name = chart_name(code, name, &input.language);
                 crate::usecases::accounting::insert_money_account(w, org, None, kind, &name, code)?;
+            }
+            for (kind, fr, ar, code) in DZ_EXPENSE_CATEGORIES {
+                w.tx().execute(
+                    "INSERT INTO expense_categories (id, org_id, kind, name, account_code, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        nb_core::uuid::Uuid::now_v7().to_string(),
+                        org.to_string(),
+                        kind,
+                        if input.language == "ar" { ar } else { fr },
+                        code,
+                        w.now()
+                    ],
+                )?;
             }
         }
         w.event("org.created", "organization", &o.id, &o)?;

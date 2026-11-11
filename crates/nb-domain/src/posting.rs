@@ -64,6 +64,7 @@ roles! {
     CashShort "cash_short" "658",
     CashOver "cash_over" "758",
     InternalTransfer "internal_transfer" "58",
+    BadDebt "bad_debt" "654",
 }
 
 /// The accounts an organization uses for each role.
@@ -178,6 +179,13 @@ pub enum Operation {
     /// Money put in the till (`into_till`) or taken out of it, through
     /// internal transfers (to or from the bank, the safe, another till).
     TillTransfer { amount: Money, into_till: bool },
+    /// A customer's debt given up (M9.9).
+    WriteOff { amount: Money },
+    /// An allowance granted on a customer's debt (M9.9).
+    Allowance { amount: Money },
+    /// What a customer owed (`owed`) or was owed (`owing`) before the
+    /// books started here.
+    CustomerOpening { owed: Money, owing: Money },
 }
 
 impl Operation {
@@ -196,6 +204,9 @@ impl Operation {
             Operation::StockLoss { .. } => "stock.loss",
             Operation::CashDifference { .. } => "cash.difference",
             Operation::TillTransfer { .. } => "cash.transfer",
+            Operation::WriteOff { .. } => "debt.write_off",
+            Operation::Allowance { .. } => "debt.allowance",
+            Operation::CustomerOpening { .. } => "debt.opening",
         }
     }
 }
@@ -345,6 +356,29 @@ fn lines(op: &Operation, map: &AccountMap) -> Result<Vec<Line>, RuleError> {
             vec![
                 Line::debit(a(debit)?, amount),
                 Line::credit(a(credit)?, amount),
+            ]
+        }
+        Operation::WriteOff { amount } => {
+            check_positive(&[amount])?;
+            vec![
+                Line::debit(a(Role::BadDebt)?, amount),
+                Line::credit(a(Role::Receivable)?, amount),
+            ]
+        }
+        Operation::Allowance { amount } => {
+            check_positive(&[amount])?;
+            vec![
+                Line::debit(a(Role::SalesReturns)?, amount),
+                Line::credit(a(Role::Receivable)?, amount),
+            ]
+        }
+        Operation::CustomerOpening { owed, owing } => {
+            check_positive(&[owed, owing])?;
+            vec![
+                Line::debit(a(Role::Receivable)?, owed),
+                Line::credit(a(Role::OpeningEquity)?, owed),
+                Line::debit(a(Role::OpeningEquity)?, owing),
+                Line::credit(a(Role::Receivable)?, owing),
             ]
         }
     };
@@ -499,6 +533,21 @@ mod tests {
                 over: da(50)
             }),
             [l("531", 50, 0), l("758", 0, 50)]
+        );
+        assert_eq!(
+            lines(Operation::WriteOff { amount: da(90) }),
+            [l("654", 90, 0), l("411", 0, 90)]
+        );
+        assert_eq!(
+            lines(Operation::Allowance { amount: da(10) }),
+            [l("709", 10, 0), l("411", 0, 10)]
+        );
+        assert_eq!(
+            lines(Operation::CustomerOpening {
+                owed: da(400),
+                owing: da(0)
+            }),
+            [l("411", 400, 0), l("101", 0, 400)]
         );
     }
 
