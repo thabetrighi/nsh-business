@@ -22,12 +22,12 @@ use crate::{Error, Result, Store};
 /// Line discounts above this share need `sales.discount_exceptional`.
 pub const ORDINARY_DISCOUNT_BPS: i64 = 1_000;
 
-fn the_org(conn: &Connection) -> Result<(OrganizationId, nb_core::Currency)> {
+pub(crate) fn the_org(conn: &Connection) -> Result<(OrganizationId, nb_core::Currency)> {
     let o = org::the_org(conn)?.ok_or(Error::NotFound("organization"))?;
     Ok((o.org_id()?, o.currency()?))
 }
 
-fn money_field(field: &'static str, minor: i64) -> std::result::Result<i64, RuleError> {
+pub(crate) fn money_field(field: &'static str, minor: i64) -> std::result::Result<i64, RuleError> {
     if minor < 0 {
         Err(RuleError::on(field, "ledger.negative"))
     } else {
@@ -55,14 +55,16 @@ pub struct ShiftRow {
     pub credit_minor: i64,
     pub cash_in_minor: i64,
     pub cash_out_minor: i64,
+    /// Cash given back for returns.
+    pub refunds_minor: i64,
     pub sales: u32,
-    /// What the till should hold: opening + cash sales + in − out.
+    /// What the till should hold: opening + cash sales + in − out − refunds.
     pub expected_minor: i64,
     pub counted_minor: Option<i64>,
     pub difference_minor: Option<i64>,
 }
 
-fn shift_of(conn: &Connection, id: &str) -> Result<ShiftRow> {
+pub(crate) fn shift_of(conn: &Connection, id: &str) -> Result<ShiftRow> {
     let mut row = conn
         .query_row(
             "SELECT s.id, s.number, s.register_id, r.name, s.status, s.opening_minor, s.opened_at, s.closed_at,
@@ -87,6 +89,7 @@ fn shift_of(conn: &Connection, id: &str) -> Result<ShiftRow> {
                     credit_minor: 0,
                     cash_in_minor: 0,
                     cash_out_minor: 0,
+                    refunds_minor: 0,
                     sales: 0,
                     expected_minor: 0,
                 })
@@ -120,7 +123,13 @@ fn shift_of(conn: &Connection, id: &str) -> Result<ShiftRow> {
         [id],
         |r| r.get(0),
     )?;
-    row.expected_minor = row.opening_minor + row.cash_sales_minor + cash_in - cash_out;
+    row.refunds_minor = conn.query_row(
+        "SELECT COALESCE(SUM(total_minor), 0) FROM sale_returns WHERE shift_id = ?1 AND refund_method = 'cash'",
+        [id],
+        |r| r.get(0),
+    )?;
+    row.expected_minor =
+        row.opening_minor + row.cash_sales_minor + cash_in - cash_out - row.refunds_minor;
     Ok(row)
 }
 
@@ -144,7 +153,7 @@ pub fn shift_summary(store: &Store, shift_id: &str) -> Result<ShiftRow> {
 }
 
 /// The till, its branch, and the account of its cash.
-fn till(w: &Writer<'_>, register: RegisterId) -> Result<(org::Branch, String, String)> {
+pub(crate) fn till(w: &Writer<'_>, register: RegisterId) -> Result<(org::Branch, String, String)> {
     let (branch_id, code, account): (String, String, Option<String>) = w
         .tx()
         .query_row(

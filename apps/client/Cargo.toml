@@ -12,6 +12,8 @@ nb-core.workspace = true
 nb-i18n.workspace = true
 nb-domain.workspace = true
 nb-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio = { version = "1", default-features = false, features = ["sync"] }
 nsh-core = "=0.4.0"
 nsh-base = "=0.4.0"

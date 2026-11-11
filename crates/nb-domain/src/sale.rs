@@ -262,6 +262,72 @@ pub fn settle(
     })
 }
 
+/// What a sold line came to (amounts of the whole line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sold {
+    /// Quantity sold, in thousandths.
+    pub qty_milli: i64,
+    pub net: i64,
+    pub tax: i64,
+    /// Cost of one base unit.
+    pub unit_cost: i64,
+}
+
+/// What a return gives back for a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Refund {
+    pub qty_milli: i64,
+    pub net: i64,
+    pub tax: i64,
+    pub cost: i64,
+}
+
+impl Refund {
+    pub fn gross(&self) -> i64 {
+        self.net + self.tax
+    }
+}
+
+/// Returning `qty_milli` more of a line already returned by `before`: in
+/// proportion to what was sold, and the exact remainder when the last of
+/// it comes back — so the returns of a line never exceed its sale.
+pub fn refund(sold: Sold, before: Refund, qty_milli: i64) -> Result<Refund, RuleError> {
+    if qty_milli <= 0 {
+        return Err(RuleError::on("qty", "sale.qty_positive"));
+    }
+    let left = sold.qty_milli - before.qty_milli;
+    if qty_milli > left {
+        return Err(RuleError::on("qty", "return.too_much"));
+    }
+    if qty_milli == left {
+        return Ok(Refund {
+            qty_milli,
+            net: sold.net - before.net,
+            tax: sold.tax - before.tax,
+            cost: unit_cost(sold.unit_cost, qty_milli),
+        });
+    }
+    // Shares of the whole, minus what already went back (no drift).
+    let share = |total: i64| -> i64 {
+        let upto = i128::from(total) * i128::from(before.qty_milli + qty_milli)
+            / i128::from(sold.qty_milli);
+        i64::try_from(upto).unwrap_or(0)
+    };
+    let net = share(sold.net) - before.net;
+    let tax = share(sold.tax) - before.tax;
+    Ok(Refund {
+        qty_milli,
+        net,
+        tax,
+        cost: unit_cost(sold.unit_cost, qty_milli),
+    })
+}
+
+fn unit_cost(unit: i64, qty_milli: i64) -> i64 {
+    let v = (i128::from(unit) * i128::from(qty_milli) + 500) / 1_000;
+    i64::try_from(v).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +471,47 @@ mod tests {
                 due.minor()
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn returns_never_exceed_the_sale() -> Result<(), RuleError> {
+        // 3 sold for 100.00 net + 19.00 tax: returned one by one.
+        let sold = Sold {
+            qty_milli: 3_000,
+            net: 10_000,
+            tax: 1_900,
+            unit_cost: 2_000,
+        };
+        let a = refund(sold, Refund::default(), 1_000)?;
+        assert_eq!((a.net, a.tax, a.cost), (3_333, 633, 2_000));
+        let b = refund(sold, a, 1_000)?;
+        let both = Refund {
+            qty_milli: 2_000,
+            net: a.net + b.net,
+            tax: a.tax + b.tax,
+            cost: 0,
+        };
+        assert_eq!((b.net, b.tax), (3_333, 633));
+        let c = refund(sold, both, 1_000)?;
+        assert_eq!(
+            (c.net, c.tax),
+            (3_334, 634),
+            "the last one takes the remainder"
+        );
+        assert_eq!(a.gross() + b.gross() + c.gross(), 11_900);
+        let all = Refund {
+            qty_milli: 3_000,
+            ..both
+        };
+        assert_eq!(
+            refund(sold, all, 1).err().map(|e| e.code),
+            Some("return.too_much")
+        );
+        assert_eq!(
+            refund(sold, Refund::default(), 0).err().map(|e| e.code),
+            Some("sale.qty_positive")
+        );
         Ok(())
     }
 }

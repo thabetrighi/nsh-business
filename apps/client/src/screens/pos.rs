@@ -14,6 +14,10 @@ use nb_store::repo::catalog::{ProductPage, ProductQuery, ProductRow, ProductSort
 use nb_store::usecases::catalog::{Scan, TaxClass, list_tax_classes, scan};
 use nb_store::usecases::org::{Register, registers};
 use nb_store::usecases::products::list_products;
+use nb_store::usecases::returns::{
+    HeldCart, ReturnInput, ReturnLineInput, SaleDetail, held_carts, hold_cart, return_sale,
+    sale_for_return, take_held,
+};
 use nb_store::usecases::sales::{
     PaymentInput, SaleInput, SaleLineInput, ShiftRow, close_shift, complete_sale, current_shift,
     open_shift,
@@ -26,10 +30,10 @@ use crate::nav::Route;
 use crate::screens::common::page_head;
 use crate::screens::forms::{error_text, parse_price};
 use crate::state::AppState;
-use crate::ui::form::{field, labelled};
+use crate::ui::form::{field, labelled, row_input};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{
-    Size, Variant, badge, button, figure, icon_button, kbd, label, label_line, segmented,
+    Size, Variant, badge, button, checkbox, figure, icon_button, kbd, label, label_line, segmented,
 };
 use crate::ui::overlay::{dialog_frame, modal, show_toast};
 use crate::ui::popup::dropdown;
@@ -64,7 +68,7 @@ fn parse_qty(s: &str) -> Option<i64> {
 /// One line of the cart: a product of the catalog (or an item typed at the
 /// till), how much of it (thousandths of its unit), and its price, name and
 /// discount as the seller may have changed them.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Item {
     product: Option<ProductRow>,
     name: String,
@@ -132,6 +136,13 @@ struct Till {
     paying: Signal<bool>,
     cart_open: Signal<bool>,
     search: ElementRef,
+    /// This device's till (once known).
+    register: Signal<Option<String>>,
+    /// The carts put aside at it, reloaded when `held_rev` moves.
+    held: Memo<Vec<HeldCart>>,
+    held_rev: Signal<u32>,
+    recalling: Signal<bool>,
+    returning: Signal<bool>,
 }
 
 impl Till {
@@ -218,7 +229,30 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
     let state = computed(move || {
         till.with(|t: Option<&Option<(Register, Option<ShiftRow>)>>| t.cloned().flatten())
     });
+    let register: Signal<Option<String>> = signal(None);
+    let held_rev = signal(0u32);
+    effect(move || {
+        let id = state.with(|s| s.as_ref().map(|(r, _)| r.id.clone()));
+        if register.get_untracked() != id {
+            register.set(id);
+        }
+    });
+    let held_list = resource(
+        move || register.get().map(|r| (r, held_rev.get())),
+        move |(reg, _): (String, u32), _| {
+            let db = st.db();
+            async move { db.call(move |s| held_carts(s, &reg)).await }
+        },
+    );
+    let held = computed(move || {
+        held_list.with(|v: Option<&Vec<HeldCart>>| v.cloned().unwrap_or_default())
+    });
     let t = Till {
+        register,
+        held,
+        held_rev,
+        recalling: signal(false),
+        returning: signal(false),
         cart: signal(Vec::new()),
         selected: signal(None),
         editing: signal(None),
@@ -240,6 +274,8 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             && !t.editing_open.get_untracked()
             && !t.free_open.get_untracked()
             && !closing.get_untracked()
+            && !t.recalling.get_untracked()
+            && !t.returning.get_untracked()
     };
 
     // Shortcuts at the counter (while this page is shown).
@@ -262,6 +298,21 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
     on_key("f8", move |_| {
         if no_dialog() {
             t.clear();
+        }
+    });
+    on_key("f7", move |_| {
+        if selling() && no_dialog() {
+            hold(st, t);
+        }
+    });
+    on_key("f3", move |_| {
+        if selling() && no_dialog() {
+            t.recalling.set(true);
+        }
+    });
+    on_key("f12", move |_| {
+        if selling() && no_dialog() {
+            t.returning.set(true);
         }
     });
     on_key("alt+up", move |_| {
@@ -304,6 +355,60 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
                 tr_args(st.lang(), "pos.till_open", &[("number", &shift.number)])
             }))
             // Phones: the actions as icons, beside the till's badge.
+            .child(dynamic(move || {
+                let n = t.held.get().len();
+                if n == 0 {
+                    return view().into_element();
+                }
+                let caption = move || {
+                    tr_args(
+                        st.lang(),
+                        "pos.held.count",
+                        &[("count", &st.fmt().integer(n as i64))],
+                    )
+                };
+                if compact {
+                    icon_button(
+                        || Icon::Clock,
+                        caption,
+                        Variant::Secondary,
+                        move || t.recalling.set(true),
+                    )
+                } else {
+                    button(
+                        Variant::Secondary,
+                        Size::Md,
+                        Some(Icon::Clock),
+                        caption,
+                        move || t.recalling.set(true),
+                    )
+                }
+                .test_id("pos-held")
+                .into_element()
+            }))
+            .child(when(
+                move || st.can("sales.return"),
+                move || {
+                    if compact {
+                        icon_button(
+                            || Icon::Undo,
+                            st.t("pos.return"),
+                            Variant::Secondary,
+                            move || t.returning.set(true),
+                        )
+                    } else {
+                        button(
+                            Variant::Secondary,
+                            Size::Md,
+                            Some(Icon::Undo),
+                            st.t("pos.return"),
+                            move || t.returning.set(true),
+                        )
+                    }
+                    .test_id("pos-return")
+                    .into_element()
+                },
+            ))
             .child(if compact {
                 icon_button(
                     || Icon::PackagePlus,
@@ -394,6 +499,12 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
                 .min_h(px(0.0))
                 .child(cart_panel(st, t, true))
                 .into_element()
+        }))
+        .child(modal(t.recalling, compact, move || {
+            held_dialog(st, t, move || t.recalling.set(false)).into_element()
+        }))
+        .child(modal(t.returning, compact, move || {
+            return_dialog(st, t, move || t.returning.set(false)).into_element()
         }))
         .child(modal(closing, compact, move || {
             match state.get_untracked() {
@@ -689,6 +800,9 @@ fn shortcut_bar(st: AppState) -> View {
         ("F6", "pos.key.edit"),
         ("Alt ↑↓", "pos.key.select"),
         ("Alt +/−", "pos.key.qty"),
+        ("F7", "pos.key.hold"),
+        ("F3", "pos.key.held"),
+        ("F12", "pos.key.return"),
         ("F8", "pos.key.clear"),
         ("F9", "pos.key.pay"),
     ] {
@@ -896,15 +1010,34 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
             view().child(when(
                 move || !t.cart.get().is_empty(),
                 move || {
-                    button(
-                        Variant::Ghost,
-                        Size::Sm,
-                        Some(Icon::Trash),
-                        st.t("pos.cart.clear"),
-                        move || t.clear(),
-                    )
-                    .test_id("cart-clear")
-                    .into_element()
+                    view()
+                        .flex_row()
+                        .gap(px(4.0))
+                        .child(
+                            button(
+                                Variant::Ghost,
+                                Size::Sm,
+                                Some(Icon::Clock),
+                                st.t("pos.hold"),
+                                move || hold(st, t),
+                            )
+                            .test_id(if in_sheet {
+                                "sheet-hold"
+                            } else {
+                                "cart-hold"
+                            }),
+                        )
+                        .child(
+                            button(
+                                Variant::Ghost,
+                                Size::Sm,
+                                Some(Icon::Trash),
+                                st.t("pos.cart.clear"),
+                                move || t.clear(),
+                            )
+                            .test_id("cart-clear"),
+                        )
+                        .into_element()
                 },
             )),
         ))
@@ -1980,6 +2113,553 @@ fn close_dialog(st: AppState, shift: ShiftRow, close: impl Fn() + Clone + 'stati
         st,
         move || tr_args(st.lang(), "pos.close_till.title", &[("number", &number)]),
         st.t("pos.close_till.help"),
+        body,
+        footer,
+        close,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Carts put aside (M8.7)
+
+/// Puts the cart aside (the next customer is served meanwhile).
+fn hold(st: AppState, t: Till) {
+    let (Some(session), Some(reg)) = (st.session.get_untracked(), t.register.get_untracked())
+    else {
+        return;
+    };
+    let items = t.cart.get_untracked();
+    if items.is_empty() {
+        return;
+    }
+    let total = cart_of(&items, session.currency)
+        .totals()
+        .map_or(0, |x| x.total.minor());
+    let Ok(payload) = serde_json::to_string(&items) else {
+        return;
+    };
+    let lines = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let meta = session.meta("cart.hold");
+    let db = st.db();
+    let task = spawn(async move {
+        match db
+            .call(move |s| hold_cart(s, meta, &reg, "", lines, total, &payload))
+            .await
+        {
+            Ok(h) => {
+                t.clear();
+                t.cart_open.set(false);
+                t.held_rev.update(|n| *n += 1);
+                show_toast(st, tr_args(st.lang(), "pos.held", &[("label", &h.label)]));
+            }
+            Err(e) => show_toast(st, first_error(st, &e)),
+        }
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
+}
+
+/// Takes a cart back; the cart being served, if any, is put aside first.
+fn recall(st: AppState, t: Till, id: String, close: impl Fn() + 'static) {
+    let (Some(session), Some(reg)) = (st.session.get_untracked(), t.register.get_untracked())
+    else {
+        return;
+    };
+    let items = t.cart.get_untracked();
+    let current = if items.is_empty() {
+        None
+    } else {
+        let total = cart_of(&items, session.currency)
+            .totals()
+            .map_or(0, |x| x.total.minor());
+        serde_json::to_string(&items).ok().map(|p| {
+            (
+                p,
+                u32::try_from(items.len()).unwrap_or(u32::MAX),
+                total,
+                session.meta("cart.hold"),
+            )
+        })
+    };
+    let meta = session.meta("cart.take");
+    let db = st.db();
+    let task = spawn(async move {
+        let r = db
+            .call(move |s| {
+                if let Some((payload, lines, total, m)) = current {
+                    hold_cart(s, m, &reg, "", lines, total, &payload)?;
+                }
+                take_held(s, meta, &id)
+            })
+            .await;
+        match r {
+            Ok(h) => {
+                let items: Vec<Item> = serde_json::from_str(&h.payload).unwrap_or_default();
+                let n = items.len();
+                t.cart.set(items);
+                t.selected.set(n.checked_sub(1));
+                t.held_rev.update(|n| *n += 1);
+                close();
+            }
+            Err(e) => show_toast(st, first_error(st, &e)),
+        }
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
+}
+
+/// The carts put aside at this till: tap one to take it back.
+fn held_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> View {
+    let list = {
+        let close = close.clone();
+        dynamic(move || {
+            let held = t.held.get();
+            if held.is_empty() {
+                return view()
+                    .p(px(20.0))
+                    .items_center()
+                    .child(label(
+                        st.t("pos.held.none"),
+                        ty::SM,
+                        FontWeight::NORMAL,
+                        Tone::Muted,
+                    ))
+                    .into_element();
+            }
+            let mut v = view().gap(px(8.0));
+            for (i, h) in held.into_iter().enumerate() {
+                let close = close.clone();
+                let id = h.id.clone();
+                let lines = i64::from(h.lines);
+                v = v.child(
+                    view()
+                        .test_id(&format!("held-{i}"))
+                        .flex_row()
+                        .items_center()
+                        .gap(px(12.0))
+                        .p(px(12.0))
+                        .rounded(px(radius::md()))
+                        .border_1()
+                        .border_color(Tone::Border.color())
+                        .cursor_pointer()
+                        .on_press(move || recall(st, t, id.clone(), close.clone()))
+                        .child(icon(Icon::Clock, 18.0, || Tone::Primary))
+                        .child(
+                            view()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .child(label_line(
+                                    move || h.label.clone(),
+                                    ty::MD,
+                                    FontWeight::SEMIBOLD,
+                                    Tone::Ink,
+                                ))
+                                .child(label_line(
+                                    move || {
+                                        tr_args(
+                                            st.lang(),
+                                            "pos.cart.count",
+                                            &[("count", &st.fmt().integer(lines))],
+                                        )
+                                    },
+                                    ty::XS,
+                                    FontWeight::NORMAL,
+                                    Tone::Muted,
+                                )),
+                        )
+                        .child(figure(
+                            move || money(st, h.total_minor),
+                            ty::MD,
+                            FontWeight::BOLD,
+                            || Tone::Ink,
+                        )),
+                );
+            }
+            v.into_element()
+        })
+    };
+    let body = view()
+        .gap(px(12.0))
+        .child(when(
+            move || !t.cart.get().is_empty(),
+            move || {
+                label(
+                    st.t("pos.held.swap"),
+                    ty::XS,
+                    FontWeight::NORMAL,
+                    Tone::Muted,
+                )
+                .into_element()
+            },
+        ))
+        .child(list);
+    let footer = view().child(button(
+        Variant::Secondary,
+        Size::Md,
+        None,
+        st.t("action.close"),
+        close.clone(),
+    ));
+    dialog_frame(
+        st,
+        st.t("pos.held.title"),
+        st.t("pos.held.help"),
+        body,
+        footer,
+        close,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Returns (M8.8)
+
+/// A refund way and its caption.
+type Choice = (&'static str, Box<dyn Fn() -> String>);
+
+/// Goods brought back: find the sale by its number, choose what comes back
+/// (and whether it goes back on the shelf), how it is refunded, and why.
+fn return_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> View {
+    let Some(session) = st.session.get_untracked() else {
+        return view();
+    };
+    // Made when the dialog opens: a double tap returns once.
+    let meta = session.meta("sale.return");
+    let number = signal(String::new());
+    let found: Signal<Option<SaleDetail>> = signal(None);
+    let qtys: Signal<Vec<String>> = signal(Vec::new());
+    let restock: Signal<Vec<bool>> = signal(Vec::new());
+    let method = signal("cash");
+    let reason = signal(String::new());
+    let error = signal(String::new());
+    let busy = signal(false);
+
+    let find = move || {
+        let key = number.get_untracked();
+        if key.trim().is_empty() {
+            return;
+        }
+        error.set(String::new());
+        let db = st.db();
+        let task = spawn(async move {
+            match db.call(move |s| sale_for_return(s, &key)).await {
+                Ok(d) => {
+                    qtys.set(vec![String::new(); d.lines.len()]);
+                    restock.set(d.lines.iter().map(|l| l.product_id.is_some()).collect());
+                    if d.customer_id.is_none() && method.get_untracked() == "credit" {
+                        method.set("cash");
+                    }
+                    found.set(Some(d));
+                }
+                Err(e) => {
+                    found.set(None);
+                    error.set(first_error(st, &e));
+                }
+            }
+        });
+        drop(task); // runs to completion: tasks end with their owner, not their handle
+    };
+    on_key("enter", move |_| {
+        if found.get_untracked().is_none() {
+            find();
+        }
+    });
+
+    // What goes back, as the sale priced it (the store computes the exact
+    // shares; this is the preview).
+    let total = computed(move || {
+        let q = qtys.get();
+        found.with(|f| {
+            f.as_ref().map_or(0, |d| {
+                d.lines
+                    .iter()
+                    .zip(q.iter())
+                    .map(|(l, q)| {
+                        let back = parse_qty(q).unwrap_or(0).min(l.returnable_milli());
+                        if l.qty_milli == 0 {
+                            0
+                        } else {
+                            i64::try_from(
+                                i128::from(l.gross_minor) * i128::from(back)
+                                    / i128::from(l.qty_milli),
+                            )
+                            .unwrap_or(0)
+                        }
+                    })
+                    .sum()
+            })
+        })
+    });
+
+    let save = {
+        let close = close.clone();
+        move || {
+            if busy.get_untracked() {
+                return;
+            }
+            let (Some(d), Some(reg)) = (found.get_untracked(), t.register.get_untracked()) else {
+                return;
+            };
+            let q = qtys.get_untracked();
+            let r = restock.get_untracked();
+            let lines: Vec<ReturnLineInput> = d
+                .lines
+                .iter()
+                .enumerate()
+                .filter_map(|(i, l)| {
+                    let text = q.get(i)?.trim().to_owned();
+                    (!text.is_empty()).then(|| ReturnLineInput {
+                        position: l.position,
+                        qty: text,
+                        restock: r.get(i).copied().unwrap_or(true),
+                    })
+                })
+                .collect();
+            let input = ReturnInput {
+                sale: d.id.clone(),
+                register_id: reg,
+                lines,
+                refund: method.get_untracked().to_owned(),
+                reason: reason.get_untracked(),
+                approval: None,
+            };
+            busy.set(true);
+            let close = close.clone();
+            let db = st.db();
+            let task = spawn(async move {
+                match db.call(move |s| return_sale(s, meta, input)).await {
+                    Ok(r) => {
+                        st.changed();
+                        close();
+                        show_toast(
+                            st,
+                            tr_args(
+                                st.lang(),
+                                "pos.returned",
+                                &[("number", &r.number), ("amount", &money(st, r.total_minor))],
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        busy.set(false);
+                        error.set(first_error(st, &e));
+                    }
+                }
+            });
+            drop(task); // runs to completion: tasks end with their owner, not their handle
+        }
+    };
+
+    let search = view()
+        .flex_row()
+        .items_end()
+        .gap(px(8.0))
+        .child(view().flex_1().child(field(
+            st.t("pos.return.sale"),
+            number,
+            || "FV-01-…".to_owned(),
+            String::new,
+            KeyboardType::Default,
+            "ret-sale",
+        )))
+        .child(
+            button(
+                Variant::Secondary,
+                Size::Md,
+                Some(Icon::Search),
+                st.t("pos.return.find"),
+                find,
+            )
+            .test_id("ret-find"),
+        );
+
+    let lines = dynamic(move || {
+        let Some(d) = found.get() else {
+            return view().into_element();
+        };
+        let mut v = view().gap(px(8.0)).child(label_line(
+            {
+                let n = d.number.clone();
+                move || n.clone()
+            },
+            ty::MD,
+            FontWeight::BOLD,
+            Tone::Ink,
+        ));
+        for (i, l) in d.lines.into_iter().enumerate() {
+            let left = l.returnable_milli();
+            let q = signal(String::new());
+            effect(move || {
+                let text = q.get();
+                qtys.update(|v| {
+                    if let Some(s) = v.get_mut(i) {
+                        *s = text;
+                    }
+                });
+            });
+            let unit = l.unit.clone();
+            let sold = l.qty_milli;
+            let info = move || {
+                tr_args(
+                    st.lang(),
+                    "pos.return.left",
+                    &[
+                        ("sold", &qty_text(st, sold)),
+                        ("left", &qty_text(st, left)),
+                        ("unit", &unit),
+                    ],
+                )
+            };
+            let mut row = view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap(px(10.0))
+                .py(px(8.0))
+                .border_t_1()
+                .border_color(Tone::Border.color())
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(140.0))
+                        .child(label_line(
+                            move || l.name.clone(),
+                            ty::SM,
+                            FontWeight::SEMIBOLD,
+                            Tone::Ink,
+                        ))
+                        .child(label_line(info, ty::XS, FontWeight::NORMAL, Tone::Muted)),
+                );
+            if left <= 0 {
+                row = row.child(badge(Status::Neutral, None, st.t("pos.return.done")));
+            } else {
+                row = row
+                    .child(view().w(px(90.0)).child(row_input(
+                        q,
+                        || "0".to_owned(),
+                        KeyboardType::Decimal,
+                        format!("ret-qty-{i}"),
+                        move || parse_qty(&q.get()).is_some_and(|x| x > left),
+                    )))
+                    .child(
+                        button(
+                            Variant::Ghost,
+                            Size::Sm,
+                            None,
+                            st.t("pos.return.all"),
+                            move || q.set(Quantity::from_milli(left).to_string()),
+                        )
+                        .test_id(&format!("ret-all-{i}")),
+                    );
+                if l.product_id.is_some() {
+                    row = row.child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                checkbox(
+                                    move || {
+                                        Some(restock.with(|r| r.get(i).copied().unwrap_or(true)))
+                                    },
+                                    move || {
+                                        restock.update(|r| {
+                                            if let Some(x) = r.get_mut(i) {
+                                                *x = !*x;
+                                            }
+                                        })
+                                    },
+                                )
+                                .test_id(&format!("ret-restock-{i}")),
+                            )
+                            .child(label_line(
+                                st.t("pos.return.restock"),
+                                ty::XS,
+                                FontWeight::NORMAL,
+                                Tone::Body,
+                            )),
+                    );
+                }
+            }
+            v = v.child(row);
+        }
+        v.into_element()
+    });
+
+    let credit_ok =
+        computed(move || found.with(|f| f.as_ref().is_some_and(|d| d.customer_id.is_some())));
+    let refund = move || {
+        dynamic(move || {
+            let mut options: Vec<Choice> = vec![
+                ("cash", Box::new(st.t("pos.method.cash"))),
+                ("card", Box::new(st.t("pos.method.card"))),
+                ("transfer", Box::new(st.t("pos.method.transfer"))),
+            ];
+            if credit_ok.get() {
+                options.push(("credit", Box::new(st.t("pos.method.credit"))));
+            }
+            labelled(st.t("pos.return.refund"), segmented(options, method), None).into_element()
+        })
+    };
+
+    let body = view()
+        .gap(px(14.0))
+        .child(search)
+        .child(lines)
+        .child(when(
+            move || found.get().is_some(),
+            move || {
+                view()
+                    .gap(px(14.0))
+                    .child(refund())
+                    .child(field(
+                        st.t("pos.return.reason"),
+                        reason,
+                        String::new,
+                        String::new,
+                        KeyboardType::Default,
+                        "ret-reason",
+                    ))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .child(view().flex_1().child(label_line(
+                                st.t("pos.return.total"),
+                                ty::MD,
+                                FontWeight::BOLD,
+                                Tone::Ink,
+                            )))
+                            .child(figure(
+                                move || money(st, total.get()),
+                                ty::H2,
+                                FontWeight::BOLD,
+                                || Tone::Ink,
+                            )),
+                    )
+                    .into_element()
+            },
+        ))
+        .child(error_line(error));
+    let footer = view()
+        .child(button(
+            Variant::Secondary,
+            Size::Md,
+            None,
+            st.t("form.cancel"),
+            close.clone(),
+        ))
+        .child(
+            button(
+                Variant::Primary,
+                Size::Md,
+                Some(Icon::Undo),
+                st.t("pos.return.confirm"),
+                save,
+            )
+            .test_id("ret-confirm"),
+        );
+    dialog_frame(
+        st,
+        st.t("pos.return.title"),
+        st.t("pos.return.help"),
         body,
         footer,
         close,

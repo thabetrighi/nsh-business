@@ -11,6 +11,7 @@ use nb_store::repo::access::GrantRow;
 use nb_store::usecases::access::{UserInput, create_user};
 use nb_store::usecases::inventory::available;
 use nb_store::usecases::products::{Opening, create_product};
+use nb_store::usecases::returns::*;
 use nb_store::usecases::sales::*;
 use nb_store::usecases::stock::rebuild_balances;
 use nb_store::{OpMeta, Store};
@@ -423,4 +424,156 @@ fn items_not_in_the_catalog_and_renamed_lines() -> R {
         ["sale.free_price"]
     );
     healthy(&s)
+}
+
+fn back(sale: &str, reg: &str, lines: Vec<(u32, &str, bool)>, refund: &str) -> ReturnInput {
+    ReturnInput {
+        sale: sale.into(),
+        register_id: reg.into(),
+        lines: lines
+            .into_iter()
+            .map(|(position, qty, restock)| ReturnLineInput {
+                position,
+                qty: qty.into(),
+                restock,
+            })
+            .collect(),
+        refund: refund.into(),
+        reason: "Client".into(),
+        approval: None,
+    }
+}
+
+#[test]
+fn returns_follow_their_sale_and_never_exceed_it() -> R {
+    let (mut s, setup) = store();
+    let reg = register(&s);
+    let milk = stocked(&mut s, &setup, "Lait", "10", 800, 1_190)?;
+    let oil = stocked(&mut s, &setup, "Huile", "5", 2_500, 3_570)?;
+    let shift = open_shift(&mut s, meta(&setup, "shift.open"), &reg, 1_000)?;
+    let sold = complete_sale(
+        &mut s,
+        meta(&setup, "sale"),
+        sale(&setup, &reg, vec![(milk, "3")], vec![("cash", 3_570)]),
+    )?;
+    let found = sale_for_return(&s, &sold.number.to_lowercase())?;
+    assert_eq!(found.id, sold.id);
+    assert_eq!(
+        (found.lines.len(), found.lines[0].returnable_milli()),
+        (1, 3_000)
+    );
+    assert_eq!(
+        err(sale_for_return(&s, "FV-99-999999")),
+        ["return.sale_unknown"]
+    );
+
+    let mut no_reason = back(&sold.number, &reg, vec![(0, "1", true)], "cash");
+    no_reason.reason = " ".into();
+    assert_eq!(
+        err(return_sale(&mut s, meta(&setup, "return"), no_reason)),
+        ["required"]
+    );
+
+    // Two back to stock, refunded in cash: 2 × 11.90 = 23.80 out of the till.
+    let tap = meta(&setup, "return");
+    let input = back(&sold.number, &reg, vec![(0, "2", true)], "cash");
+    let r = return_sale(&mut s, tap, input.clone())?;
+    assert!(r.number.starts_with("AV-"));
+    assert_eq!(
+        (r.net_minor, r.tax_minor, r.total_minor, r.cost_minor),
+        (2_000, 380, 2_380, 1_600)
+    );
+    // A double tap returns once.
+    assert_eq!(return_sale(&mut s, tap, input)?, r);
+    assert_eq!(available(&s, milk, setup.warehouse)?.to_string(), "9");
+    assert_eq!(balance(&s, "709"), 2_000);
+    assert_eq!(balance(&s, "531"), 3_570 - 2_380);
+    assert_eq!(balance(&s, "600"), 2_400 - 1_600);
+    assert_eq!(balance(&s, "30"), 10 * 800 + 5 * 2_500 - 2_400 + 1_600);
+
+    // Not more than what is left.
+    assert_eq!(
+        err(return_sale(
+            &mut s,
+            meta(&setup, "return"),
+            back(&sold.number, &reg, vec![(0, "2", true)], "cash")
+        )),
+        ["return.too_much"]
+    );
+    // The last one, damaged (stays out of stock), refunded by card.
+    let r = return_sale(
+        &mut s,
+        meta(&setup, "return"),
+        back(&sold.number, &reg, vec![(0, "1", false)], "card"),
+    )?;
+    assert_eq!((r.total_minor, r.cost_minor), (1_190, 0));
+    assert_eq!(available(&s, milk, setup.warehouse)?.to_string(), "9");
+    assert_eq!(balance(&s, "5121"), -1_190);
+    assert_eq!(balance(&s, "600"), 800);
+    let found = sale_for_return(&s, &sold.number)?;
+    assert_eq!(found.lines[0].returnable_milli(), 0);
+    assert_eq!(found.returned_minor, 3_570);
+
+    // The till expects the cash refund gone.
+    let sum = shift_summary(&s, &shift.id)?;
+    assert_eq!(sum.refunds_minor, 2_380);
+    assert_eq!(sum.expected_minor, 1_000 + 3_570 - 2_380);
+
+    // On account only for a sale to a customer.
+    let cash_sale = complete_sale(
+        &mut s,
+        meta(&setup, "sale"),
+        sale(&setup, &reg, vec![(oil, "1")], vec![("cash", 3_570)]),
+    )?;
+    assert_eq!(
+        err(return_sale(
+            &mut s,
+            meta(&setup, "return"),
+            back(&cash_sale.number, &reg, vec![(0, "1", true)], "credit")
+        )),
+        ["sale.credit_needs_customer"]
+    );
+    // Not more cash out than the drawer holds.
+    let big = complete_sale(
+        &mut s,
+        meta(&setup, "sale"),
+        sale(&setup, &reg, vec![(oil, "4")], vec![("card", 14_280)]),
+    )?;
+    assert_eq!(
+        err(return_sale(
+            &mut s,
+            meta(&setup, "return"),
+            back(&big.number, &reg, vec![(0, "4", true)], "cash")
+        )),
+        ["shift.not_enough_cash"]
+    );
+    healthy(&s)
+}
+
+#[test]
+fn carts_put_aside_come_back_once() -> R {
+    let (mut s, setup) = store();
+    let reg = register(&s);
+    assert_eq!(
+        err(hold_cart(
+            &mut s,
+            meta(&setup, "hold"),
+            &reg,
+            "",
+            0,
+            0,
+            "[]"
+        )),
+        ["sale.empty"]
+    );
+    let a = hold_cart(&mut s, meta(&setup, "hold"), &reg, "", 2, 4_760, "[1,2]")?;
+    let b = hold_cart(&mut s, meta(&setup, "hold"), &reg, "Ali", 1, 1_190, "[3]")?;
+    assert_eq!((a.label.as_str(), b.label.as_str()), ("#1", "Ali"));
+    assert_eq!(held_carts(&s, &reg)?.len(), 2);
+    let back = take_held(&mut s, meta(&setup, "take"), &a.id)?;
+    assert_eq!(back.payload, "[1,2]");
+    assert_eq!(held_carts(&s, &reg)?, vec![b]);
+    assert!(take_held(&mut s, meta(&setup, "take"), &a.id).is_err());
+    assert_eq!(s.verify_audit_chain()?, None);
+    Ok(())
 }

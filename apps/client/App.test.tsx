@@ -425,3 +425,51 @@ test("a cash sale at the till, from opening to closing", async () => {
   await app.press("id:till-close-confirm");
   await app.waitFor("id:till-open");
 });
+
+test("a cart put aside comes back, and a sale is returned", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "1000");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.waitFor("id:cart-line-0");
+  // Put aside: the till is free; the cart waits under its number.
+  await app.press("id:cart-hold");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "Panier mis de côté : #1"));
+  await app.waitFor("text:Scannez ou touchez un produit pour commencer la vente.");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "En attente (1)"));
+  await app.press("id:pos-held");
+  await app.waitFor("id:held-0");
+  await app.press("id:held-0");
+  await app.waitFor("id:cart-line-0");
+  await app.waitUntil(() => !app.texts().some((t) => plain(t).startsWith("En attente (")));
+  // Sold, then brought back.
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-confirm");
+  await app.press("id:pay-confirm");
+  let number = "";
+  await app.waitUntil(() =>
+    app.texts().some((t) => {
+      const m = /^Vente (FV-01-\d\d-A\d+) enregistrée/.exec(plain(t));
+      if (m) number = m[1];
+      return !!m;
+    }),
+  );
+  await app.press("id:pos-return");
+  await app.waitFor("id:ret-sale");
+  await app.type("id:ret-sale", number);
+  await app.press("id:ret-find");
+  await app.waitFor("id:ret-all-0");
+  await app.press("id:ret-all-0");
+  await app.type("id:ret-reason", "Emballage abîmé");
+  await app.press("id:ret-confirm");
+  await app.waitUntil(() => app.texts().some((t) => /^Retour AV-01-\d\d-A\d+ enregistré : .+ remboursés\.$/.test(plain(t))));
+  // Nothing is left to return.
+  await app.press("id:pos-return");
+  await app.type("id:ret-sale", number);
+  await app.press("id:ret-find");
+  await app.waitFor("text:Entièrement retourné");
+});
