@@ -24,6 +24,13 @@ pub enum Error {
     Corrupt(String),
     #[error("backup: {0}")]
     Backup(String),
+    /// The actor may not do this; a sensitive action may be approved by a
+    /// supervisor (`needs_approval`). The attempt is audited.
+    #[error("forbidden: {permission}")]
+    Forbidden {
+        permission: &'static str,
+        needs_approval: bool,
+    },
 }
 
 impl From<RuleError> for Error {
@@ -51,6 +58,17 @@ impl Error {
             Error::Rules(v) => v.iter().map(|e| (e.field, e.code)).collect(),
             Error::Duplicate(what) => vec![(Some(what), "duplicate")],
             Error::NotFound(what) => vec![(Some(what), "not_found")],
+            Error::Forbidden {
+                permission,
+                needs_approval,
+            } => vec![(
+                Some(permission),
+                if *needs_approval {
+                    "access.needs_approval"
+                } else {
+                    "access.denied"
+                },
+            )],
             _ => vec![(None, "internal")],
         }
     }

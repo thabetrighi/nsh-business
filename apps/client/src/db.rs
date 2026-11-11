@@ -134,6 +134,12 @@ fn open(lang: DemoLang) -> Result<(Store, Session), Error> {
                     currency_exp: 2,
                     branch_name: branch.into(),
                     owner_name: owner.into(),
+                    language: match lang {
+                        DemoLang::Ar => "ar",
+                        DemoLang::Fr => "fr",
+                    }
+                    .into(),
+                    fiscal_year_start: 1,
                 },
             )?;
             demo::seed(&mut store, &setup, lang, 2_000)?;

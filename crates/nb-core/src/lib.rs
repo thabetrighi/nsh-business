@@ -13,7 +13,7 @@ pub mod quantity;
 
 pub use clock::{Clock, FixedClock, Hlc, HlcTimestamp, SystemClock};
 pub use error::CoreError;
-pub use id::{DeviceId, OperationId, OrganizationId};
+pub use id::{DeviceId, OperationId, OrganizationId, random_bytes};
 pub use money::{Currency, Money};
 pub use quantity::{Quantity, Rate};
 pub use rust_decimal::{Decimal, RoundingStrategy};

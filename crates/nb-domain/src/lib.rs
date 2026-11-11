@@ -2,7 +2,9 @@
 //! Use cases (in `nb-store`) read data, call these rules, and write the
 //! results in one transaction (ADR-0003).
 
+pub mod access;
 pub mod barcode;
+pub mod features;
 pub mod ids;
 pub mod ledger;
 pub mod numbering;

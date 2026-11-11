@@ -46,3 +46,15 @@ typed_id!(
     /// A sales, purchase or stock document.
     DocumentId
 );
+typed_id!(
+    /// A cash register (point of sale till).
+    RegisterId
+);
+typed_id!(
+    /// A role defined by an organization.
+    RoleId
+);
+typed_id!(
+    /// A supervisor's approval of a sensitive action.
+    ApprovalId
+);

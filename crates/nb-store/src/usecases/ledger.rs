@@ -11,6 +11,7 @@ use crate::repo::{ledger, org, parse_id};
 use crate::time::iso_date;
 use crate::uow::OpMeta;
 use crate::{Error, Result, Store};
+use nb_domain::access::{Permission, Target};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryLineInput {
@@ -58,6 +59,7 @@ pub fn post_entry(
             .collect(),
     )?;
     store.write(meta, |w| {
+        w.require(Permission::AccountingPost, &Target::org())?;
         let org = w.org()?;
         let number = w.next_number(DocKind::Journal, &branch_id, &branch_code)?;
         let date = iso_date(w.now(), offset);
@@ -95,6 +97,7 @@ pub fn reverse_entry(
     let entry_id: EntryId = parse_id(id)?;
     let (currency, branch_id, branch_code, offset) = branch_of(store)?;
     store.write(meta, |w| {
+        w.require(Permission::AccountingReverse, &Target::org())?;
         if ledger::is_reversed(w.tx(), entry_id)? {
             return Err(RuleError::new("ledger.already_reversed").into());
         }

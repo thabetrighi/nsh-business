@@ -5,6 +5,7 @@ use nb_core::{Currency, OrganizationId};
 use nb_domain::{BranchId, RuleError, UserId, WarehouseId};
 use serde::{Deserialize, Serialize};
 
+use crate::repo::access;
 use crate::repo::ledger::{Account, insert_account};
 use crate::repo::org::{self, Branch, Organization, Warehouse};
 use crate::uow::OpMeta;
@@ -21,6 +22,20 @@ pub struct SetupInput {
     pub currency_exp: u8,
     pub branch_name: String,
     pub owner_name: String,
+    /// Default language (`ar`, `fr`, `en`).
+    #[serde(default = "default_language")]
+    pub language: String,
+    /// First month of the fiscal year.
+    #[serde(default = "default_fiscal")]
+    pub fiscal_year_start: u8,
+}
+
+fn default_language() -> String {
+    "ar".into()
+}
+
+fn default_fiscal() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +83,16 @@ pub fn setup_organization(store: &mut Store, input: SetupInput) -> Result<SetupR
     if Currency::new(&input.currency, input.currency_exp).is_err() {
         errors.push(RuleError::on("currency", "setup.currency"));
     }
+    if let Err(mut e) = crate::usecases::org::check_settings(&crate::usecases::org::OrgSettings {
+        name: input.org_name.clone(),
+        activity: input.activity.clone(),
+        language: input.language.clone(),
+        fiscal_year_start: input.fiscal_year_start,
+        auto_lock_min: 5,
+    }) {
+        e.retain(|r| r.field != Some("name"));
+        errors.append(&mut e);
+    }
     if !errors.is_empty() {
         return Err(Error::Rules(errors));
     }
@@ -108,7 +133,18 @@ pub fn setup_organization(store: &mut Store, input: SetupInput) -> Result<SetupR
                 negative_stock: "permission".into(),
             },
         )?;
+        w.tx().execute(
+            "UPDATE organizations SET language = ?2, fiscal_year_start = ?3 WHERE id = ?1",
+            rusqlite::params![o.id, input.language, input.fiscal_year_start],
+        )?;
+        w.tx().execute(
+            "INSERT INTO business_profiles (org_id, legal_name, updated_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![o.id, o.name, w.now()],
+        )?;
+        crate::usecases::org::first_register(w, org, &branch.to_string(), "01")?;
         org::insert_user(w, org, owner, input.owner_name.trim(), "owner")?;
+        access::insert_grant(w, org, owner, &access::GrantRow::org("owner"))?;
+        access::ensure_credentials(w, org, owner)?;
         if o.country == "DZ" {
             for (code, name, kind) in DZ_ACCOUNTS {
                 insert_account(

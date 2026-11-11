@@ -13,6 +13,7 @@ use crate::repo::catalog::{self, ProductPage, ProductQuery, ProductRow};
 use crate::repo::{ledger, org, parse_id, stock};
 use crate::uow::{OpMeta, Writer};
 use crate::{Error, Result, Store};
+use nb_domain::access::{Permission, Target};
 
 /// Opening stock entered with a new product.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +179,7 @@ pub fn create_product(store: &mut Store, meta: OpMeta, input: ProductInput) -> R
     };
     let id = ProductId::new();
     store.write(meta, |w| {
+        w.require(Permission::ProductsEdit, &Target::org())?;
         check_unique(w, &valid, None)?;
         let org = w.org()?;
         catalog::insert(w, org, id, &valid, input.category_id.as_deref())?;
@@ -231,7 +233,11 @@ pub fn update_product(
     }
     let valid = draft(currency, &input, input.sku.clone())?.validate()?;
     store.write(meta, |w| {
+        w.require(Permission::ProductsEdit, &Target::org())?;
         let before = catalog::get(w.tx(), id)?;
+        if before.price_minor != valid.0.price.minor() {
+            w.require(Permission::ProductsPrice, &Target::org())?;
+        }
         check_unique(w, &valid, Some(id))?;
         let org = w.org()?;
         catalog::update(w, org, id, version, &valid, input.category_id.as_deref())?;
@@ -259,6 +265,7 @@ pub fn update_product(
 /// Archives products (they stay in past documents).
 pub fn archive_products(store: &mut Store, meta: OpMeta, ids: &[ProductId]) -> Result<u32> {
     store.write(meta, |w| {
+        w.require(Permission::ProductsArchive, &Target::org())?;
         for id in ids {
             catalog::archive(w, *id)?;
             w.event(

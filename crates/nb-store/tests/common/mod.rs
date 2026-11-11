@@ -34,6 +34,8 @@ pub fn setup_input() -> SetupInput {
         currency_exp: 2,
         branch_name: "El Oued".into(),
         owner_name: "Ahmed".into(),
+        language: "fr".into(),
+        fiscal_year_start: 1,
     }
 }
 

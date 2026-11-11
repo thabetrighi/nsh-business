@@ -1,6 +1,12 @@
 //! Typed identifiers: UUIDv7 (unique offline, time ordered). A `ProductId`
 //! can never be passed where a `CustomerId` is expected.
 
+/// 16 bytes from the system's secure random source (122 random bits; the
+/// browser's Web Crypto API on the web), e.g. for password salts.
+pub fn random_bytes() -> [u8; 16] {
+    uuid::Uuid::new_v4().into_bytes()
+}
+
 /// Declares a typed UUIDv7 identifier.
 #[macro_export]
 macro_rules! typed_id {

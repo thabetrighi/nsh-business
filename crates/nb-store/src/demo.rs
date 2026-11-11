@@ -169,6 +169,8 @@ mod tests {
                 currency_exp: 2,
                 branch_name: "Demo".into(),
                 owner_name: "Owner".into(),
+                language: "fr".into(),
+                fiscal_year_start: 1,
             },
         )?;
         assert_eq!(seed(&mut s, &setup, DemoLang::Fr, 2_000)?, 2_000);

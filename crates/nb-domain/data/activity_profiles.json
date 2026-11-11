@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "core": ["pos", "sales", "catalog", "inventory", "customers", "debts", "cash", "accounting", "reports"],
+  "profiles": {
+    "general": {
+      "features": ["purchasing", "promotions", "unit_conversion"]
+    },
+    "grocery": {
+      "features": ["purchasing", "scale", "weighed_barcodes", "labels", "packaging", "expiry", "fast_pos", "promotions", "unit_conversion", "fractional_qty"]
+    },
+    "apparel": {
+      "features": ["purchasing", "variants", "labels", "exchanges", "seasons", "promotions"]
+    },
+    "electronics": {
+      "features": ["purchasing", "serials", "warranty", "installments", "promotions"]
+    },
+    "auto_parts": {
+      "features": ["purchasing", "compatibility", "oem_numbers", "price_lists", "credit_limits", "multi_warehouse"]
+    },
+    "wholesale": {
+      "features": ["purchasing", "price_lists", "credit_limits", "sales_reps", "vehicles", "routes", "field_collection", "packaging", "unit_conversion", "multi_warehouse", "installments"]
+    },
+    "restaurant": {
+      "features": ["tables", "kitchen", "modifiers", "split_bill", "fast_pos", "purchasing", "fractional_qty"]
+    },
+    "building": {
+      "features": ["purchasing", "unit_conversion", "fractional_qty", "delivery", "price_lists", "credit_limits", "installments", "multi_warehouse"]
+    },
+    "pharmacy": {
+      "features": ["purchasing", "batches", "expiry", "compliance", "labels"]
+    }
+  }
+}

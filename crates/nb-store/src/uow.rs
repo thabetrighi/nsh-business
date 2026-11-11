@@ -5,8 +5,9 @@
 //! result and changes nothing (a double tap pays once).
 
 use nb_core::{HlcTimestamp, OperationId, OrganizationId};
-use nb_domain::UserId;
+use nb_domain::access::{self, Decision, Permission, Target};
 use nb_domain::numbering::{self, DocKind};
+use nb_domain::{ApprovalId, UserId};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -128,43 +129,61 @@ impl<'a> Writer<'a> {
         entity_id: &str,
         detail: &impl Serialize,
     ) -> Result<()> {
-        let prev: String = self
-            .tx
-            .query_row(
-                "SELECT hash FROM audit_log ORDER BY seq DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or_else(|| GENESIS.to_owned());
-        let rec = AuditRecord {
-            operation_id: self.meta.id.to_string(),
-            org_id: self.meta.org.map(|o| o.to_string()),
-            actor_id: self.actor_text(),
-            action: action.to_owned(),
-            entity: entity.to_owned(),
-            entity_id: entity_id.to_owned(),
-            detail: serde_json::to_string(detail)?,
-            created_at: self.now,
-        };
-        let hash = rec.hash(&prev);
-        self.tx.execute(
-            "INSERT INTO audit_log (operation_id, org_id, actor_id, action, entity, entity_id, detail, created_at, prev_hash, hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                rec.operation_id,
-                rec.org_id,
-                rec.actor_id,
-                rec.action,
-                rec.entity,
-                rec.entity_id,
-                rec.detail,
-                rec.created_at,
-                prev,
-                hash
-            ],
-        )?;
-        Ok(())
+        append_audit(
+            &self.tx,
+            &self.meta,
+            self.now,
+            action,
+            entity,
+            entity_id,
+            serde_json::to_string(detail)?,
+        )
+    }
+
+    /// The user running the operation.
+    pub fn actor(&self) -> Result<UserId> {
+        self.meta.actor.ok_or(Error::Forbidden {
+            permission: "session",
+            needs_approval: false,
+        })
+    }
+
+    /// What the actor's roles say about `p` on `t` (M4.6).
+    pub fn decide(&self, p: Permission, t: &Target) -> Result<Decision> {
+        let (active, grants) = crate::repo::access::grants(&self.tx, self.actor()?)?;
+        Ok(access::authorize(&grants, active, p, t))
+    }
+
+    /// Whether the actor holds `p` on `t` (no approval involved).
+    pub fn allowed(&self, p: Permission, t: &Target) -> Result<bool> {
+        Ok(self.decide(p, t)? == Decision::Allow)
+    }
+
+    /// Fails with [`Error::Forbidden`] unless the actor holds `p` on `t`.
+    pub fn require(&mut self, p: Permission, t: &Target) -> Result<()> {
+        self.require_approved(p, t, None)
+    }
+
+    /// As [`Writer::require`], or with a supervisor's `approval` of this
+    /// very action for this actor (M4.8), which is then used up.
+    pub fn require_approved(
+        &mut self,
+        p: Permission,
+        t: &Target,
+        approval: Option<ApprovalId>,
+    ) -> Result<()> {
+        match (self.decide(p, t)?, approval) {
+            (Decision::Allow, _) => Ok(()),
+            (Decision::NeedsApproval, Some(a)) => {
+                let actor = self.actor()?;
+                crate::repo::access::use_approval(self, a, p, actor, t)?;
+                self.audit("approval.use", "approval", &a.to_string(), &p.code())
+            }
+            (d, _) => Err(Error::Forbidden {
+                permission: p.code(),
+                needs_approval: d == Decision::NeedsApproval,
+            }),
+        }
     }
 
     /// The next document number for this device (M2.8).
@@ -193,6 +212,53 @@ impl<'a> Writer<'a> {
 }
 
 const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+fn append_audit(
+    tx: &rusqlite::Connection,
+    meta: &OpMeta,
+    now: i64,
+    action: &str,
+    entity: &str,
+    entity_id: &str,
+    detail: String,
+) -> Result<()> {
+    let prev: String = tx
+        .query_row(
+            "SELECT hash FROM audit_log ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| GENESIS.to_owned());
+    let rec = AuditRecord {
+        operation_id: meta.id.to_string(),
+        org_id: meta.org.map(|o| o.to_string()),
+        actor_id: meta.actor.map(|a| a.to_string()),
+        action: action.to_owned(),
+        entity: entity.to_owned(),
+        entity_id: entity_id.to_owned(),
+        detail,
+        created_at: now,
+    };
+    let hash = rec.hash(&prev);
+    tx.execute(
+        "INSERT INTO audit_log (operation_id, org_id, actor_id, action, entity, entity_id, detail, created_at, prev_hash, hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            rec.operation_id,
+            rec.org_id,
+            rec.actor_id,
+            rec.action,
+            rec.entity,
+            rec.entity_id,
+            rec.detail,
+            rec.created_at,
+            prev,
+            hash
+        ],
+    )?;
+    Ok(())
+}
 
 struct AuditRecord {
     operation_id: String,
@@ -274,7 +340,28 @@ impl Store {
             utc_offset_min,
             events: 0,
         };
-        let out = f(&mut w)?; // dropping `w` rolls back
+        let out = match f(&mut w) {
+            Ok(out) => out,
+            Err(e) => {
+                drop(w); // rolls back
+                if let Error::Forbidden { permission, .. } = &e {
+                    // A refused attempt leaves a trace (PRD §12.1), outside
+                    // the operation, which may still be retried (approved).
+                    let tx = self.conn.transaction()?;
+                    append_audit(
+                        &tx,
+                        &meta,
+                        now,
+                        "denied",
+                        "permission",
+                        permission,
+                        serde_json::to_string(meta.kind)?,
+                    )?;
+                    tx.commit()?;
+                }
+                return Err(e);
+            }
+        };
         if w.events == 0 {
             return Err(Error::NoEvent);
         }

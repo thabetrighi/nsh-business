@@ -1,6 +1,7 @@
 //! Rows in and out. Repositories map tables to domain values; they hold no
 //! business rules (those are in `nb-domain`, called by the use cases).
 
+pub mod access;
 pub mod catalog;
 pub mod ledger;
 pub mod org;

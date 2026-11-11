@@ -13,6 +13,7 @@ use crate::repo::{catalog, ledger, org, parse_id, stock};
 use crate::time::iso_date;
 use crate::uow::OpMeta;
 use crate::{Error, Result, Store};
+use nb_domain::access::{Permission, Target};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdjustInput {
@@ -26,8 +27,12 @@ pub struct AdjustInput {
     /// Cost of one base unit for stock coming in; default: the average cost.
     pub unit_cost_minor: Option<i64>,
     pub reason: String,
-    /// The user may take stock below zero (permission checked by the caller's role).
+    /// The user confirms taking stock below zero; it happens only where the
+    /// warehouse allows it, or with `stock.negative`.
     pub may_go_negative: bool,
+    /// A supervisor's approval (`stock.adjust`) for a user who lacks it.
+    #[serde(default)]
+    pub approval: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,13 +81,18 @@ pub fn adjust_stock(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Resu
         let qty = product.unit_set()?.to_base(typed, &input.unit)?;
         let warehouse = org::warehouse(w.tx(), warehouse_id)?;
         let branch = org::branch(w.tx(), parse_id(&warehouse.branch_id)?)?;
+        let target = Target::warehouse(parse_id(&branch.id)?, warehouse_id);
+        let approval = input.approval.as_deref().map(parse_id).transpose()?;
+        w.require_approved(Permission::StockAdjust, &target, approval)?;
+        let may_go_negative =
+            input.may_go_negative && w.allowed(Permission::StockNegative, &target)?;
         let before = stock::balance(w.tx(), product_id, warehouse_id, currency)?;
         let cost = Money::from_minor(
             input.unit_cost_minor.unwrap_or(before.avg_cost.minor()),
             currency,
         );
         // Adjustments in carry a cost but do not change the average unless priced.
-        let after = before.apply(kind, qty, None, warehouse.policy(), input.may_go_negative)?;
+        let after = before.apply(kind, qty, None, warehouse.policy(), may_go_negative)?;
         let number = w.next_number(DocKind::Adjustment, &branch.id, &branch.code)?;
         stock::append(
             w,

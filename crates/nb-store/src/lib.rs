@@ -11,6 +11,7 @@ pub mod demo;
 pub mod error;
 pub mod migrate;
 pub mod repo;
+pub mod secret;
 pub mod store;
 pub mod time;
 pub mod uow;

@@ -46,6 +46,7 @@ fn adjust(product: &str, wh: &str, kind: &str, qty: &str, unit: &str) -> AdjustI
         unit_cost_minor: None,
         reason: "casse".into(),
         may_go_negative: false,
+        approval: None,
     }
 }
 
