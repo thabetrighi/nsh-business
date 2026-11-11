@@ -39,13 +39,15 @@ test("adds a product from the phone, with validation", async () => {
   await app.press("text:Produits");
   await app.waitFor("text:Ajouter un produit");
   await app.press("text:Ajouter un produit");
-  await app.waitFor("text:Stock initial");
-  await app.press("text:Enregistrer");
+  // The editor: organized in tabs, saved from its header.
+  await app.waitFor("text:Identification");
+  await app.press("id:product-save");
   await app.waitFor("text:Ce champ est obligatoire.");
-  expect(app.texts()).toContain("Saisissez le prix en chiffres, par exemple 120 ou 120,50.");
   await app.type("id:product-name", "Lait test");
+  await app.press("id:editor-tab-prices");
+  await app.waitFor("text:Prix de vente");
   await app.type("id:product-price", "120,5");
-  await app.press("text:Enregistrer");
+  await app.press("id:product-save");
   await app.waitUntil(() => app.texts().some((t) => t.includes("Lait test") && t.includes("enregistré")));
   // The confirmation goes away by itself.
   await app.waitUntil(() => !app.texts().some((t) => t.includes("enregistré")), { timeout: 6000 });
@@ -64,7 +66,7 @@ test("command palette: search across languages and run an action", async () => {
   await app.clear("label:ابحث في الأقسام والإجراءات");
   await app.press("text:أضف منتجاً");
   // The action goes to Products and opens the form straight away.
-  await app.waitFor("text:المخزون الافتتاحي");
+  await app.waitFor("text:التعريف");
 });
 
 /** Visible text without bidi isolates and with plain spaces, for matching figures. */
@@ -129,25 +131,63 @@ test("the database's rules come back under their fields", async () => {
   await app.press("id:nav-products");
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 000 résultats"));
   await app.press("text:Ajouter un produit");
-  await app.waitFor("text:Stock initial");
+  await app.waitFor("text:Identification");
   await app.type("id:product-name", "Doublon");
-  await app.type("id:product-price", "10");
   // P-01000 is the first demo product's code.
   await app.type("id:product-sku", "p-01000");
-  await app.press("text:Enregistrer");
+  await app.press("id:editor-tab-prices");
+  await app.type("id:product-price", "10");
+  await app.press("id:product-save");
+  // The error opens the tab of its field.
   await app.waitFor("text:Un autre produit a déjà ce code.");
   await app.clear("id:product-sku");
   await app.type("id:product-sku", "DBL-1");
+  await app.press("id:editor-tab-stock");
   await app.type("id:product-stock", "1,5");
-  await app.press("text:Enregistrer");
+  await app.press("id:product-save");
   // A piece is counted in whole units.
-  await app.waitFor("text:Saisissez une quantité, par exemple 0, 24 ou 1,5 pour les kilos.");
+  await app.waitFor("text:Cette unité n'accepte pas autant de décimales.");
   await app.clear("id:product-stock");
   await app.type("id:product-stock", "3");
-  await app.press("text:Enregistrer");
+  await app.press("id:product-save");
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 001 résultats"));
   await app.type("id:product-search", "doublon");
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "1 résultat"));
+});
+
+test("the editor generates a barcode, packaging, list prices and variants", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Catalogue");
+  await app.press("id:nav-products");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 000 résultats"));
+  await app.press("text:Ajouter un produit");
+  await app.waitFor("text:Identification");
+  await app.type("id:product-name", "T-shirt coton");
+  await app.type("id:product-sku", "TSH");
+  await app.press("id:editor-tab-prices");
+  await app.type("id:product-price", "1500");
+  await app.type("id:product-cost", "900");
+  // The margin follows what is typed.
+  await app.waitUntil(() => app.texts().some((t) => plain(t).startsWith("600,00 DA")));
+  await app.press("id:price-row-add");
+  await app.type("id:price-row-qty-0", "10");
+  await app.type("id:price-row-price-0", "1400");
+  await app.press("id:editor-tab-units");
+  await app.press("id:barcode-generate-0");
+  await app.waitUntil(() => app.texts().some((t) => t.startsWith("2000000000")));
+  await app.press("id:pack-add");
+  await app.type("id:pack-factor-0", "12");
+  await app.press("id:editor-tab-variants");
+  await app.press("id:attr-add");
+  await app.type("id:attr-name-0", "Taille");
+  await app.type("id:attr-values-0", "S, M, L");
+  await app.waitFor("id:variants-preview");
+  await app.press("id:product-save");
+  await app.waitUntil(() => app.texts().some((t) => t.includes("T-shirt coton") && t.includes("enregistré")));
+  await app.type("id:product-search", "t-shirt coton");
+  // The product and its three variants.
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "4 résultats"));
 });
 
 test("the owner adds a cashier with a PIN, locks the screen, and the cashier signs in", async () => {

@@ -481,16 +481,12 @@ fn prices_of(conn: &Connection, product: ProductId) -> Result<Vec<PriceInput>> {
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
-/// Replaces a product's list prices. Prices under the product's floor are
-/// refused; every change is kept in the price history.
-pub fn set_product_prices(
-    store: &mut Store,
-    meta: OpMeta,
-    product: ProductId,
-    prices: Vec<PriceInput>,
-) -> Result<Vec<PriceInput>> {
+/// A list price checked: its input and its minimum quantity in thousandths.
+type ParsedPrice = (PriceInput, i64);
+
+fn parse_prices(prices: &[PriceInput]) -> Result<Vec<ParsedPrice>> {
     let mut parsed = Vec::new();
-    for p in &prices {
+    for p in prices {
         if list_of(&p.list).is_none() {
             return Err(RuleError::on("list", "invalid_value").into());
         }
@@ -509,6 +505,12 @@ pub fn set_product_prices(
         if q.is_negative() {
             return Err(RuleError::on("min_qty", "invalid_quantity").into());
         }
+        let clean = |s: &Option<String>| s.clone().filter(|v| !v.is_empty());
+        let p = PriceInput {
+            branch_id: clean(&p.branch_id),
+            customer_id: clean(&p.customer_id),
+            ..p.clone()
+        };
         parsed.push((p, to_milli(q)?));
     }
     let mut keys: Vec<_> = parsed
@@ -519,44 +521,79 @@ pub fn set_product_prices(
     if keys.windows(2).any(|k| k[0] == k[1]) {
         return Err(RuleError::on("prices", "price.duplicate").into());
     }
-    store.write(meta, |w| {
-        w.require(Permission::ProductsPrice, &Target::org())?;
-        let org = w.org()?;
-        let p = catalog::get(w.tx(), product)?;
-        for (pi, _) in &parsed {
-            let listed: bool = w.tx().query_row(
-                "SELECT EXISTS (SELECT 1 FROM price_lists WHERE org_id = ?1 AND code = ?2 AND deleted_at IS NULL)",
-                params![org.to_string(), pi.list],
-                |r| r.get(0),
-            )?;
-            if !listed {
-                return Err(RuleError::on("list", "not_found").into());
-            }
-            if p.min_price_minor.is_some_and(|f| pi.price_minor < f) {
-                return Err(RuleError::on("price", "price.below_floor").into());
-            }
+    Ok(parsed)
+}
+
+fn write_prices(
+    w: &mut Writer<'_>,
+    product: ProductId,
+    parsed: &[ParsedPrice],
+) -> Result<Vec<PriceInput>> {
+    w.require(Permission::ProductsPrice, &Target::org())?;
+    let org = w.org()?;
+    let p = catalog::get(w.tx(), product)?;
+    for (pi, _) in parsed {
+        let listed: bool = w.tx().query_row(
+            "SELECT EXISTS (SELECT 1 FROM price_lists WHERE org_id = ?1 AND code = ?2 AND deleted_at IS NULL)",
+            params![org.to_string(), pi.list],
+            |r| r.get(0),
+        )?;
+        if !listed {
+            return Err(RuleError::on("list", "not_found").into());
         }
-        let before = prices_of(w.tx(), product)?;
-        w.tx().execute("DELETE FROM product_prices WHERE product_id = ?1", [product.to_string()])?;
-        for (pi, q) in &parsed {
-            w.tx().execute(
-                "INSERT INTO product_prices (id, product_id, list, price_minor, min_qty_milli, branch_id, customer_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![nb_core::OperationId::new().to_string(), product.to_string(), pi.list, pi.price_minor, q, pi.branch_id, pi.customer_id],
-            )?;
-            let old = before
-                .iter()
-                .find(|b| b.list == pi.list && b.branch_id == pi.branch_id && b.customer_id == pi.customer_id && to_milli(b.min_qty.parse().unwrap_or_default()).ok() == Some(*q))
-                .map(|b| b.price_minor);
-            if old != Some(pi.price_minor) {
-                catalog::record_price_change(w, product, &pi.list, old, pi.price_minor)?;
-            }
+        if p.min_price_minor.is_some_and(|f| pi.price_minor < f) {
+            return Err(RuleError::on("price", "price.below_floor").into());
         }
-        let after = prices_of(w.tx(), product)?;
-        w.event("product.prices", "product", &product.to_string(), &after)?;
-        w.audit("prices", "product", &product.to_string(), &serde_json::json!({ "before": before, "after": after }))?;
-        Ok(after)
-    })
+    }
+    let before = prices_of(w.tx(), product)?;
+    w.tx().execute(
+        "DELETE FROM product_prices WHERE product_id = ?1",
+        [product.to_string()],
+    )?;
+    for (pi, q) in parsed {
+        w.tx().execute(
+            "INSERT INTO product_prices (id, product_id, list, price_minor, min_qty_milli, branch_id, customer_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![nb_core::OperationId::new().to_string(), product.to_string(), pi.list, pi.price_minor, q, pi.branch_id, pi.customer_id],
+        )?;
+        let old = before
+            .iter()
+            .find(|b| {
+                b.list == pi.list
+                    && b.branch_id == pi.branch_id
+                    && b.customer_id == pi.customer_id
+                    && b.min_qty
+                        .parse::<Quantity>()
+                        .ok()
+                        .and_then(|m| to_milli(m).ok())
+                        == Some(*q)
+            })
+            .map(|b| b.price_minor);
+        if old != Some(pi.price_minor) {
+            catalog::record_price_change(w, product, &pi.list, old, pi.price_minor)?;
+        }
+    }
+    let after = prices_of(w.tx(), product)?;
+    w.event("product.prices", "product", &product.to_string(), &after)?;
+    w.audit(
+        "prices",
+        "product",
+        &product.to_string(),
+        &serde_json::json!({ "before": before, "after": after }),
+    )?;
+    Ok(after)
+}
+
+/// Replaces a product's list prices. Prices under the product's floor are
+/// refused; every change is kept in the price history.
+pub fn set_product_prices(
+    store: &mut Store,
+    meta: OpMeta,
+    product: ProductId,
+    prices: Vec<PriceInput>,
+) -> Result<Vec<PriceInput>> {
+    let parsed = parse_prices(&prices)?;
+    store.write(meta, |w| write_prices(w, product, &parsed))
 }
 
 /// What one base unit of a product costs in a context (list, quantity,
@@ -763,6 +800,26 @@ pub fn scan(store: &Store, code: &str) -> Result<Scan> {
     })
 }
 
+/// `n` new in-store barcodes (`200…`), none in use yet.
+pub fn next_internal_barcodes(store: &Store, n: usize) -> Result<Vec<String>> {
+    store.read(|r| {
+        let (org, _) = the_org(r.conn())?;
+        let max: Option<i64> = r.conn().query_row(
+            "SELECT MAX(CAST(substr(code, 4, 9) AS INTEGER)) FROM product_barcodes
+             WHERE org_id = ?1 AND length(code) = 13 AND code GLOB '200[0-9]*'",
+            [org.to_string()],
+            |row| row.get(0),
+        )?;
+        let start = u64::try_from(max.unwrap_or(0)).unwrap_or(0) + 1;
+        (start..start + n as u64)
+            .map(|seq| {
+                nb_domain::barcode::internal_ean13(seq)
+                    .ok_or(Error::from(RuleError::on("barcode", "barcode.exhausted")))
+            })
+            .collect()
+    })
+}
+
 /// Links an unknown barcode to a product (in a unit of it).
 pub fn link_barcode(
     store: &mut Store,
@@ -803,15 +860,19 @@ pub struct AttributeInput {
     pub values: Vec<String>,
 }
 
-/// Generates a product's variants: one product per combination of the
-/// attributes' values, with its own code (parent code + values), the
-/// parent's units, price, tax and category. Existing combinations are kept.
-pub fn create_variants(
-    store: &mut Store,
-    meta: OpMeta,
-    parent: ProductId,
+/// Variants to write: the parent's attributes (JSON) and each new
+/// combination prepared, with its values (JSON).
+struct VariantPlan {
+    defs: String,
+    todo: Vec<(crate::usecases::products::Prepared, String)>,
+}
+
+fn plan_variants(
+    conn: &Connection,
+    parent: &ProductRow,
     attrs: Vec<AttributeInput>,
-) -> Result<Vec<ProductRow>> {
+    currency: Currency,
+) -> Result<VariantPlan> {
     let attrs: Vec<Attribute> = attrs
         .into_iter()
         .map(|a| Attribute {
@@ -820,25 +881,23 @@ pub fn create_variants(
         })
         .collect();
     let combos = rules::combinations(&attrs)?;
-    let (_, currency) = store.read(|r| the_org(r.conn()))?;
-    let offset = store.read(|r| Ok(r.utc_offset_min))?;
-    let p = store.read(|r| catalog::get(r.conn(), parent))?;
-    if p.parent_id.is_some() {
+    if parent.parent_id.is_some() {
         return Err(RuleError::on("product", "variants.of_variant").into());
     }
-    let existing: Vec<String> = store.read(|r| {
-        let mut s = r.conn().prepare(
+    let existing: Vec<String> = {
+        let mut s = conn.prepare(
             "SELECT variant_attrs FROM products WHERE parent_id = ?1 AND deleted_at IS NULL",
         )?;
-        let rows = s.query_map([parent.to_string()], |r| r.get::<_, Option<String>>(0))?;
-        Ok(rows.filter_map(|r| r.ok().flatten()).collect())
-    })?;
+        let rows = s.query_map([&parent.id], |r| r.get::<_, Option<String>>(0))?;
+        rows.filter_map(|r| r.ok().flatten()).collect()
+    };
     let defs = serde_json::to_string(
         &attrs
             .iter()
             .map(|a| (&a.name, &a.values))
             .collect::<Vec<_>>(),
     )?;
+    let p = parent;
     let mut todo = Vec::new();
     for c in &combos {
         let json = serde_json::to_string(c)?;
@@ -871,22 +930,59 @@ pub fn create_variants(
         let sku = input.sku.clone();
         todo.push((prepare(input, sku, currency)?, json));
     }
+    Ok(VariantPlan { defs, todo })
+}
+
+fn write_variants(
+    w: &mut Writer<'_>,
+    parent: ProductId,
+    plan: &mut VariantPlan,
+    currency: Currency,
+    offset: i32,
+) -> Result<Vec<ProductRow>> {
+    w.tx().execute(
+        "UPDATE products SET variant_attrs = ?2, updated_at = ?3, version = version + 1 WHERE id = ?1",
+        params![parent.to_string(), plan.defs, w.now()],
+    )?;
+    let mut out = Vec::new();
+    for (prep, json) in &mut plan.todo {
+        let (row, _) = write_new(
+            w,
+            ProductId::new(),
+            prep,
+            currency,
+            offset,
+            Some((parent.to_string(), json.clone())),
+            true,
+        )?;
+        out.push(row);
+    }
+    w.audit("variants", "product", &parent.to_string(), &plan.defs)?;
+    w.event(
+        "product.variants",
+        "product",
+        &parent.to_string(),
+        &plan.defs,
+    )?;
+    Ok(out)
+}
+
+/// Generates a product's variants: one product per combination of the
+/// attributes' values, with its own code (parent code + values), the
+/// parent's units, price, tax and category. Existing combinations are kept.
+pub fn create_variants(
+    store: &mut Store,
+    meta: OpMeta,
+    parent: ProductId,
+    attrs: Vec<AttributeInput>,
+) -> Result<Vec<ProductRow>> {
+    let (_, currency) = store.read(|r| the_org(r.conn()))?;
+    let offset = store.read(|r| Ok(r.utc_offset_min))?;
+    let p = store.read(|r| catalog::get(r.conn(), parent))?;
+    let mut plan = store.read(|r| plan_variants(r.conn(), &p, attrs, currency))?;
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
-        w.tx().execute(
-            "UPDATE products SET variant_attrs = ?2, updated_at = ?3, version = version + 1 WHERE id = ?1",
-            params![parent.to_string(), defs, w.now()],
-        )?;
-        let mut out = Vec::new();
-        for (prep, json) in &mut todo {
-            let (row, _) = write_new(w, nb_domain::ProductId::new(), prep, currency, offset, Some((parent.to_string(), json.clone())), true)?;
-            out.push(row);
-        }
-        w.audit("variants", "product", &parent.to_string(), &defs)?;
-        if out.is_empty() {
-            w.event("product.variants", "product", &parent.to_string(), &defs)?;
-        }
-        Ok(out)
+        write_variants(w, parent, &mut plan, currency, offset)
     })
 }
 
@@ -934,41 +1030,64 @@ pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// Checks a picture: its type from its bytes, its size; returns its type and hash.
+fn check_image(bytes: &[u8]) -> Result<(&'static str, String)> {
+    let mime = sniff_image(bytes).ok_or(Error::from(RuleError::on("image", "image.format")))?;
+    if bytes.len() > IMAGE_MAX_BYTES {
+        return Err(RuleError::on("image", "image.too_large").into());
+    }
+    Ok((
+        mime,
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    ))
+}
+
+fn write_image(
+    w: &mut Writer<'_>,
+    product: ProductId,
+    bytes: &[u8],
+    mime: &str,
+    sha: &str,
+) -> Result<ImageRow> {
+    catalog::get(w.tx(), product)?;
+    let n: i64 = w.tx().query_row(
+        "SELECT COUNT(*) FROM product_images WHERE product_id = ?1 AND deleted_at IS NULL",
+        [product.to_string()],
+        |r| r.get(0),
+    )?;
+    if usize::try_from(n).unwrap_or(usize::MAX) >= IMAGES_MAX {
+        return Err(RuleError::on("image", "image.too_many").into());
+    }
+    let row = ImageRow {
+        id: nb_core::OperationId::new().to_string(),
+        mime: mime.into(),
+        size: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+        sha256: sha.into(),
+    };
+    w.tx().execute(
+        "INSERT INTO product_images (id, product_id, position, mime, bytes, sha256, created_at, created_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![row.id, product.to_string(), n, row.mime, bytes, row.sha256, w.now(), w.actor_text()],
+    )?;
+    // The bytes travel with sync separately; the event says what changed.
+    w.event("product.image_added", "product", &product.to_string(), &row)?;
+    w.audit("image_add", "product", &product.to_string(), &row)?;
+    Ok(row)
+}
+
 pub fn add_image(
     store: &mut Store,
     meta: OpMeta,
     product: ProductId,
     bytes: Vec<u8>,
 ) -> Result<ImageRow> {
-    let mime = sniff_image(&bytes).ok_or(Error::from(RuleError::on("image", "image.format")))?;
-    if bytes.len() > IMAGE_MAX_BYTES {
-        return Err(RuleError::on("image", "image.too_large").into());
-    }
-    let sha: String = Sha256::digest(&bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let (mime, sha) = check_image(&bytes)?;
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
-        catalog::get(w.tx(), product)?;
-        let n: i64 = w.tx().query_row(
-            "SELECT COUNT(*) FROM product_images WHERE product_id = ?1 AND deleted_at IS NULL",
-            [product.to_string()],
-            |r| r.get(0),
-        )?;
-        if n as usize >= IMAGES_MAX {
-            return Err(RuleError::on("image", "image.too_many").into());
-        }
-        let row = ImageRow { id: nb_core::OperationId::new().to_string(), mime: mime.into(), size: i64::try_from(bytes.len()).unwrap_or(i64::MAX), sha256: sha };
-        w.tx().execute(
-            "INSERT INTO product_images (id, product_id, position, mime, bytes, sha256, created_at, created_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![row.id, product.to_string(), n, row.mime, bytes, row.sha256, w.now(), w.actor_text()],
-        )?;
-        // The bytes travel with sync separately; the event says what changed.
-        w.event("product.image_added", "product", &product.to_string(), &row)?;
-        w.audit("image_add", "product", &product.to_string(), &row)?;
-        Ok(row)
+        write_image(w, product, &bytes, mime, &sha)
     })
 }
 
@@ -1212,5 +1331,110 @@ pub fn import_products(
         }
         w.audit("import", "organization", &org.to_string(), &(out.created, out.categories_created))?;
         Ok(out)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The product editor's save (M5.10): everything in one operation
+
+/// What the product editor saves: the product, its list prices, new
+/// variant attributes, pictures to add and pictures to remove.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductSave {
+    /// The product edited and the version read; `None` creates one.
+    pub existing: Option<(String, i64)>,
+    pub input: ProductInput,
+    pub prices: Vec<PriceInput>,
+    /// Attributes to generate variants from (empty: none).
+    pub variants: Vec<AttributeInput>,
+    pub add_images: Vec<Vec<u8>>,
+    pub remove_images: Vec<String>,
+}
+
+/// Saves the product editor's work in one operation: all of it or nothing,
+/// once (a second tap returns the first result).
+pub fn save_product(store: &mut Store, meta: OpMeta, save: ProductSave) -> Result<ProductRow> {
+    let (_, currency) = store.read(|r| the_org(r.conn()))?;
+    let offset = store.read(|r| Ok(r.utc_offset_min))?;
+    let existing = match &save.existing {
+        Some((id, v)) => Some((parse_id::<ProductId>(id)?, *v)),
+        None => None,
+    };
+    let mut prepared = match existing {
+        Some(_) => crate::usecases::products::prepare_update(save.input.clone(), currency)?,
+        None => {
+            let sku = if save.input.sku.trim().is_empty() {
+                next_sku(store)?
+            } else {
+                save.input.sku.clone()
+            };
+            prepare(save.input.clone(), sku, currency)?
+        }
+    };
+    let prices = parse_prices(&save.prices)?;
+    let images = save
+        .add_images
+        .iter()
+        .map(|b| check_image(b).map(|(m, h)| (b, m, h)))
+        .collect::<Result<Vec<_>>>()?;
+    if !save.variants.is_empty() {
+        // Checked now so that a mistake shows before anything is written.
+        let attrs: Vec<Attribute> = save
+            .variants
+            .iter()
+            .map(|a| Attribute {
+                name: a.name.clone(),
+                values: a.values.clone(),
+            })
+            .collect();
+        rules::combinations(&attrs)?;
+    }
+    store.write(meta, |w| {
+        w.require(Permission::ProductsEdit, &Target::org())?;
+        let row = match existing {
+            Some((id, version)) => crate::usecases::products::write_update(w, id, version, &mut prepared)?,
+            None => write_new(w, ProductId::new(), &mut prepared, currency, offset, None, true)?.0,
+        };
+        let id: ProductId = parse_id(&row.id)?;
+        let current = prices_of(w.tx(), id)?;
+        let same = current.len() == prices.len() && prices.iter().all(|(p, _)| current.contains(p));
+        if !same {
+            write_prices(w, id, &prices)?;
+        }
+        for img in &save.remove_images {
+            let n = w.tx().execute(
+                "UPDATE product_images SET deleted_at = ?3 WHERE id = ?1 AND product_id = ?2 AND deleted_at IS NULL",
+                params![img, row.id, w.now()],
+            )?;
+            if n == 1 {
+                w.audit("image_remove", "image", img, &row.id)?;
+            }
+        }
+        for (bytes, mime, sha) in &images {
+            write_image(w, id, bytes, mime, sha)?;
+        }
+        if !save.variants.is_empty() {
+            let mut plan = plan_variants(w.tx(), &row, save.variants.clone(), currency)?;
+            write_variants(w, id, &mut plan, currency, offset)?;
+        }
+        catalog::get(w.tx(), id)
+    })
+}
+
+/// Everything the product editor shows for one product.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductDetail {
+    pub product: ProductRow,
+    pub prices: Vec<PriceInput>,
+    pub variants: Vec<ProductRow>,
+    pub images: Vec<ImageRow>,
+}
+
+pub fn product_detail(store: &Store, id: ProductId) -> Result<ProductDetail> {
+    Ok(ProductDetail {
+        product: store.read(|r| catalog::get(r.conn(), id))?,
+        prices: product_prices(store, id)?,
+        variants: variants_of(store, id)?,
+        images: list_images(store, id)?,
     })
 }

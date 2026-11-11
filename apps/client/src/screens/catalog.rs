@@ -13,7 +13,7 @@ use nsh_core::prelude::*;
 
 use crate::nav::Route;
 use crate::screens::common::{page_head, section_tabs};
-use crate::screens::product_form::error_text;
+use crate::screens::forms::error_text;
 use crate::state::AppState;
 use crate::ui::form::field;
 use crate::ui::icon::{Icon, icon};

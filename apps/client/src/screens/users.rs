@@ -14,7 +14,7 @@ use nb_store::usecases::org::{BranchTree, places};
 use nsh_core::element::{KeyboardType, View};
 use nsh_core::prelude::*;
 
-use crate::screens::product_form::error_text;
+use crate::screens::forms::error_text;
 use crate::state::{AppState, now_ms};
 use crate::ui::form::{chips, field, secret_field};
 use crate::ui::icon::{Icon, icon};

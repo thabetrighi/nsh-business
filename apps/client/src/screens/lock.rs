@@ -8,7 +8,7 @@ use nb_store::usecases::access::{SignInOutcome, list_users, sign_in_password, si
 use nsh_core::element::{KeyboardType, View};
 use nsh_core::prelude::*;
 
-use crate::screens::product_form::error_text;
+use crate::screens::forms::error_text;
 use crate::state::AppState;
 use crate::ui::form::{field, secret_field};
 use crate::ui::icon::{Icon, icon};

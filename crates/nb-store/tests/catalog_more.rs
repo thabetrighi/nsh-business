@@ -12,7 +12,7 @@ use nb_store::Error;
 use nb_store::repo::access::GrantRow;
 use nb_store::usecases::access::{UserInput, create_user};
 use nb_store::usecases::catalog::*;
-use nb_store::usecases::products::{Opening, create_product, update_product};
+use nb_store::usecases::products::{Opening, ProductInput, create_product, update_product};
 
 type R = Result<(), Error>;
 
@@ -632,5 +632,123 @@ fn older_databases_get_lists_and_classes() -> R {
         n("SELECT COUNT(*) FROM scale_formats WHERE org_id = 'o1'")?,
         1
     );
+    Ok(())
+}
+
+#[test]
+fn in_store_barcodes_follow_each_other() -> R {
+    let (mut s, setup) = store();
+    let first = next_internal_barcodes(&s, 2)?;
+    assert_eq!(first[0], ean13("200000000001"));
+    assert_eq!(first[1], ean13("200000000002"));
+    let mut p = product("Pain maison", "", 3_000);
+    p.barcodes = vec![first[1].clone()];
+    create_product(&mut s, meta(&setup, "product.create"), p)?;
+    assert_eq!(next_internal_barcodes(&s, 1)?, [ean13("200000000003")]);
+    Ok(())
+}
+
+#[test]
+fn the_editor_saves_everything_at_once() -> R {
+    let (mut s, setup) = store();
+    let png = [
+        &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A][..],
+        &[0u8; 16],
+    ]
+    .concat();
+    let mut input = product("Polo", "POLO", 200_000);
+    input.min_price_minor = Some(150_000);
+    let save = ProductSave {
+        existing: None,
+        input: input.clone(),
+        prices: vec![PriceInput {
+            list: "wholesale".into(),
+            price_minor: 170_000,
+            min_qty: String::new(),
+            branch_id: None,
+            customer_id: None,
+        }],
+        variants: vec![AttributeInput {
+            name: "Taille".into(),
+            values: vec!["M".into(), "L".into()],
+        }],
+        add_images: vec![png.clone()],
+        remove_images: vec![],
+    };
+    let m = meta(&setup, "product.save");
+    let row = save_product(&mut s, m, save.clone())?;
+    // A second tap gives the same product, made once.
+    assert_eq!(save_product(&mut s, m, save.clone())?.id, row.id);
+    let d = product_detail(&s, id(&row.id))?;
+    assert_eq!(
+        (d.prices.len(), d.variants.len(), d.images.len()),
+        (1, 2, 1)
+    );
+    // Editing: a price under the floor fails, and nothing of that save stays.
+    let mut edit = ProductSave {
+        existing: Some((row.id.clone(), d.product.version)),
+        input: ProductInput {
+            name: "Polo coton".into(),
+            ..input.clone()
+        },
+        prices: vec![PriceInput {
+            list: "wholesale".into(),
+            price_minor: 100_000,
+            min_qty: String::new(),
+            branch_id: None,
+            customer_id: None,
+        }],
+        remove_images: vec![d.images[0].id.clone()],
+        ..Default::default()
+    };
+    assert_eq!(
+        err(save_product(
+            &mut s,
+            meta(&setup, "product.save"),
+            edit.clone()
+        )),
+        ["price.below_floor"]
+    );
+    let d2 = product_detail(&s, id(&row.id))?;
+    assert_eq!((d2.product.name.as_str(), d2.images.len()), ("Polo", 1));
+    edit.prices[0].price_minor = 160_000;
+    let after = save_product(&mut s, meta(&setup, "product.save"), edit)?;
+    let d3 = product_detail(&s, id(&after.id))?;
+    assert_eq!(
+        (
+            d3.product.name.as_str(),
+            d3.images.len(),
+            d3.prices[0].price_minor
+        ),
+        ("Polo coton", 0, 160_000)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_new_product_with_everything() -> R {
+    let (mut s, setup) = store();
+    let code = next_internal_barcodes(&s, 1)?.remove(0);
+    let mut input = product("T-shirt coton", "TSH", 150_000);
+    input.cost_minor = Some(90_000);
+    input.extra_units = vec![("ctn".into(), "12".into())];
+    input.barcodes = vec![code];
+    let save = ProductSave {
+        input,
+        prices: vec![PriceInput {
+            list: "retail".into(),
+            price_minor: 140_000,
+            min_qty: "10".into(),
+            branch_id: None,
+            customer_id: None,
+        }],
+        variants: vec![AttributeInput {
+            name: "Taille".into(),
+            values: vec!["S".into(), "M".into(), "L".into()],
+        }],
+        ..Default::default()
+    };
+    let row = save_product(&mut s, meta(&setup, "product.save"), save)?;
+    assert_eq!(product_detail(&s, id(&row.id))?.variants.len(), 3);
     Ok(())
 }

@@ -3,9 +3,10 @@
 pub mod catalog;
 pub mod common;
 pub mod design;
+pub mod forms;
 pub mod home;
 pub mod lock;
-pub mod product_form;
+pub mod product_editor;
 pub mod products;
 pub mod sample;
 pub mod settings;

@@ -11,7 +11,7 @@ use nb_store::usecases::products::{archive_products, list_products};
 use nsh_core::element::View;
 use nsh_core::prelude::*;
 
-use super::product_form::product_form;
+use super::product_editor::{Target, product_editor};
 use crate::nav::Route;
 use crate::screens::common::{page_head, section_tabs};
 use crate::state::{AppState, Intent};
@@ -121,7 +121,7 @@ fn archive(st: AppState, ids: Vec<ProductId>) {
             }
             Err(e) => show_toast(
                 st,
-                super::product_form::error_text(st, e.codes.first().map_or("internal", |c| c.1)),
+                super::forms::error_text(st, e.codes.first().map_or("internal", |c| c.1)),
             ),
         }
     });
@@ -130,12 +130,13 @@ fn archive(st: AppState, ids: Vec<ProductId>) {
 
 pub fn products(st: AppState, compact: bool) -> View {
     // NB_OPEN=add_product (development): open the form at start, for screenshots.
-    let adding = signal(std::env::var("NB_OPEN").as_deref() == Ok("add_product"));
+    let editor: Signal<Option<Target>> =
+        signal((std::env::var("NB_OPEN").as_deref() == Ok("add_product")).then_some(Target::New));
     // Opened from the command palette's "Add a product".
     effect(move || {
         if st.intent.get() == Some(Intent::AddProduct) {
             st.intent.set(None);
-            adding.set(true);
+            editor.set(Some(Target::New));
         }
     });
     let query = signal(String::new());
@@ -163,22 +164,6 @@ pub fn products(st: AppState, compact: bool) -> View {
         },
     );
     let cat_list = computed(move || cats.get().unwrap_or_default());
-    let choices = resource(
-        move || st.session.get().map(|_| st.data_rev.get()),
-        move |_, _| {
-            let db = st.db();
-            async move {
-                db.call(|s| {
-                    Ok(crate::screens::product_form::Choices {
-                        categories: nb_store::usecases::catalog::list_categories(s)?,
-                        taxes: nb_store::usecases::catalog::list_tax_classes(s)?,
-                    })
-                })
-                .await
-            }
-        },
-    );
-    let choices_now = computed(move || choices.get().unwrap_or_default());
     let page = resource(
         move || {
             st.session.get()?;
@@ -753,8 +738,16 @@ pub fn products(st: AppState, compact: bool) -> View {
             _ => row_menu(
                 move || {
                     vec![
-                        Action::new(Icon::Pencil, st.tn("action.edit"), || {}),
-                        Action::new(Icon::Copy, st.tn("action.duplicate"), || {}),
+                        Action::new(Icon::Pencil, st.tn("action.edit"), move || {
+                            if let Some(p) = p.get_untracked() {
+                                editor.set(Some(Target::Edit(p.id)));
+                            }
+                        }),
+                        Action::new(Icon::Copy, st.tn("action.duplicate"), move || {
+                            if let Some(p) = p.get_untracked() {
+                                editor.set(Some(Target::Copy(p.id)));
+                            }
+                        }),
                         Action::new(Icon::Printer, st.tn("products.print_label"), || {}),
                         Action::new(Icon::Trash, st.tn("action.delete"), move || {
                             if let Some(id) = p.get_untracked().and_then(|p| p.product_id().ok()) {
@@ -816,7 +809,7 @@ pub fn products(st: AppState, compact: bool) -> View {
             Size::Md,
             Some(Icon::Plus),
             st.t("products.add"),
-            move || adding.set(true),
+            move || editor.set(Some(Target::New)),
         ))
     } else {
         view()
@@ -835,7 +828,7 @@ pub fn products(st: AppState, compact: bool) -> View {
                 Size::Md,
                 Some(Icon::Plus),
                 st.t("products.add"),
-                move || adding.set(true),
+                move || editor.set(Some(Target::New)),
             ))
     };
 
@@ -852,7 +845,7 @@ pub fn products(st: AppState, compact: bool) -> View {
         )
     };
 
-    view()
+    let list = view()
         .flex_1()
         .w_full()
         .p(px(page_pad(compact)))
@@ -883,26 +876,24 @@ pub fn products(st: AppState, compact: bool) -> View {
         )
         .child(modal(importing, compact, move || {
             crate::screens::catalog::import_dialog(st, move || importing.set(false)).into_element()
-        }))
-        .child(modal(adding, compact, move || {
-            let Some(session) = st.session.get_untracked() else {
-                return view().into_element();
-            };
-            product_form(
-                st,
-                session,
-                choices_now,
-                st.tn("products.form.sku_auto"),
-                move || adding.set(false),
-                move |p: ProductRow| {
-                    st.changed();
-                    adding.set(false);
-                    show_toast(
-                        st,
-                        nb_i18n::tr_args(st.lang(), "products.saved", &[("name", &p.name)]),
-                    );
-                },
-            )
-            .into_element()
+        }));
+    // The editor takes the page while open; the list (and its filters)
+    // waits underneath, as it was.
+    view()
+        .flex_1()
+        .child(
+            view()
+                .flex_1()
+                .style_when(move || editor.get().is_some(), |s| s.hidden())
+                .child(list),
+        )
+        .child(dynamic(move || match editor.get() {
+            Some(target) => scroll()
+                .flex_1()
+                .child(product_editor(st, target, compact, move || {
+                    editor.set(None)
+                }))
+                .into_element(),
+            None => view().into_element(),
         }))
 }

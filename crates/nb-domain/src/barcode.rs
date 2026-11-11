@@ -49,6 +49,54 @@ pub fn normalize(code: &str) -> Result<String, RuleError> {
     Ok(c.to_owned())
 }
 
+/// Prefix of the barcodes a store makes for its own products (GS1 keeps
+/// 200–299 for in-store use; 21 and 22 usually go to scale labels).
+pub const INTERNAL_PREFIX: &str = "200";
+
+/// The `seq`-th in-store EAN-13: `200`, 9 digits, check digit.
+pub fn internal_ean13(seq: u64) -> Option<String> {
+    if seq >= 1_000_000_000 {
+        return None;
+    }
+    let body = format!("{INTERNAL_PREFIX}{seq:09}");
+    Some(format!("{body}{}", gtin_check_digit(&body)?))
+}
+
+/// The bars of an EAN-13 (95 modules, `true` = black), for drawing it.
+pub fn ean13_modules(code: &str) -> Option<Vec<bool>> {
+    if code.len() != 13 || !is_valid_gtin(code) {
+        return None;
+    }
+    const L: [&str; 10] = [
+        "0001101", "0011001", "0010011", "0111101", "0100011", "0110001", "0101111", "0111011",
+        "0110111", "0001011",
+    ];
+    const G: [&str; 10] = [
+        "0100111", "0110011", "0011011", "0100001", "0011101", "0111001", "0000101", "0010001",
+        "0001001", "0010111",
+    ];
+    const R: [&str; 10] = [
+        "1110010", "1100110", "1101100", "1000010", "1011100", "1001110", "1010000", "1000100",
+        "1001000", "1110100",
+    ];
+    // Which of the left six digits use the G set, by the first digit.
+    const PARITY: [&str; 10] = [
+        "LLLLLL", "LLGLGG", "LLGGLG", "LLGGGL", "LGLLGG", "LGGLLG", "LGGGLL", "LGLGLG", "LGLGGL",
+        "LGGLGL",
+    ];
+    let d: Vec<usize> = code.bytes().map(|b| usize::from(b - b'0')).collect();
+    let mut bits = String::from("101");
+    for (i, p) in PARITY[d[0]].chars().enumerate() {
+        bits.push_str(if p == 'L' { L[d[i + 1]] } else { G[d[i + 1]] });
+    }
+    bits.push_str("01010");
+    for &x in &d[7..13] {
+        bits.push_str(R[x]);
+    }
+    bits.push_str("101");
+    Some(bits.chars().map(|c| c == '1').collect())
+}
+
 /// What the value digits of a scale barcode carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScaleValue {
@@ -138,6 +186,21 @@ impl ScaleFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_codes_and_bars() {
+        let c = internal_ean13(42).unwrap_or_default();
+        assert_eq!(c.len(), 13);
+        assert!(c.starts_with("200000000042"));
+        assert!(is_valid_gtin(&c));
+        assert_eq!(internal_ean13(1_000_000_000), None);
+        // A known EAN-13 (4006381333931) starts and ends with guards.
+        let m = ean13_modules("4006381333931").unwrap_or_default();
+        assert_eq!(m.len(), 95);
+        assert_eq!(&m[..3], &[true, false, true]);
+        assert_eq!(&m[45..50], &[false, true, false, true, false]);
+        assert!(ean13_modules("4006381333932").is_none());
+    }
 
     #[test]
     fn check_digits() {

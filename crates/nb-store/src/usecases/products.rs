@@ -417,56 +417,72 @@ pub fn update_product(
     version: i64,
     input: ProductInput,
 ) -> Result<ProductRow> {
-    let org_row = store
+    let currency = store
         .read(|r| org::the_org(r.conn()))?
-        .ok_or(Error::NotFound("organization"))?;
-    let currency = org_row.currency()?;
+        .ok_or(Error::NotFound("organization"))?
+        .currency()?;
+    let mut p = prepare_update(input, currency)?;
+    store.write(meta, |w| {
+        w.require(Permission::ProductsEdit, &Target::org())?;
+        write_update(w, id, version, &mut p)
+    })
+}
+
+/// Checks an edited product with the rules that need no database.
+pub(crate) fn prepare_update(input: ProductInput, currency: nb_core::Currency) -> Result<Prepared> {
     if input.opening.is_some() {
         return Err(RuleError::on("opening_qty", "product.opening_on_update").into());
     }
-    let mut valid = draft(currency, &input, input.sku.clone())?.validate()?;
-    store.write(meta, |w| {
-        w.require(Permission::ProductsEdit, &Target::org())?;
-        let before = catalog::get(w.tx(), id)?;
-        if before.price_minor != valid.0.price.minor() {
-            w.require(Permission::ProductsPrice, &Target::org())?;
-        }
-        check_unique(w, &valid, Some(id))?;
-        resolve_refs(w, &input, &mut valid)?;
-        // A conversion stock already moved with keeps its meaning (PRD §6.4).
-        if before.unit_set()?.reinterprets(&valid.0.units) && catalog::has_movements(w.tx(), id)? {
-            return Err(RuleError::on("units", "units.in_use").into());
-        }
-        let org = w.org()?;
-        let parent = before
-            .parent_id
-            .clone()
-            .map(|p| (p, before.variant_attrs.clone().unwrap_or_default()));
-        let mut extra = input.extra(parent);
-        if extra.parent_id.is_none() {
-            extra.variant_attrs = before.variant_attrs.clone();
-        }
-        catalog::update(w, org, id, version, &valid, &extra)?;
-        catalog::set_tags(w, org, id, &input.tags)?;
-        if before.price_minor != valid.0.price.minor() {
-            catalog::record_price_change(
-                w,
-                id,
-                "retail",
-                Some(before.price_minor),
-                valid.0.price.minor(),
-            )?;
-        }
-        let after = catalog::get(w.tx(), id)?;
-        w.event("product.updated", "product", &after.id, &after)?;
-        w.audit(
-            "update",
-            "product",
-            &after.id,
-            &serde_json::json!({ "before": before, "after": after }),
+    let sku = input.sku.clone();
+    prepare(input, sku, currency)
+}
+
+/// Writes an edited product read at `version` in the running operation.
+pub(crate) fn write_update(
+    w: &mut Writer<'_>,
+    id: ProductId,
+    version: i64,
+    p: &mut Prepared,
+) -> Result<ProductRow> {
+    let before = catalog::get(w.tx(), id)?;
+    if before.price_minor != p.valid.0.price.minor() {
+        w.require(Permission::ProductsPrice, &Target::org())?;
+    }
+    check_unique(w, &p.valid, Some(id))?;
+    resolve_refs(w, &p.input, &mut p.valid)?;
+    // A conversion stock already moved with keeps its meaning (PRD §6.4).
+    if before.unit_set()?.reinterprets(&p.valid.0.units) && catalog::has_movements(w.tx(), id)? {
+        return Err(RuleError::on("units", "units.in_use").into());
+    }
+    let org = w.org()?;
+    let parent = before
+        .parent_id
+        .clone()
+        .map(|pid| (pid, before.variant_attrs.clone().unwrap_or_default()));
+    let mut extra = p.input.extra(parent);
+    if extra.parent_id.is_none() {
+        extra.variant_attrs = before.variant_attrs.clone();
+    }
+    catalog::update(w, org, id, version, &p.valid, &extra)?;
+    catalog::set_tags(w, org, id, &p.input.tags)?;
+    if before.price_minor != p.valid.0.price.minor() {
+        catalog::record_price_change(
+            w,
+            id,
+            "retail",
+            Some(before.price_minor),
+            p.valid.0.price.minor(),
         )?;
-        Ok(after)
-    })
+    }
+    let after = catalog::get(w.tx(), id)?;
+    w.event("product.updated", "product", &after.id, &after)?;
+    w.audit(
+        "update",
+        "product",
+        &after.id,
+        &serde_json::json!({ "before": before, "after": after }),
+    )?;
+    Ok(after)
 }
 
 /// Archives products (they stay in past documents).

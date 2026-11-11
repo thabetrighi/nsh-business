@@ -127,6 +127,10 @@ icons! {
     FolderTree => "folder-tree",
     FileUp => "file-up",
     SubItem => "corner-down-right",
+    ImagePlus => "image-plus",
+    Wand => "wand-sparkles",
+    ArrowBack => "arrow-left",
+    ArrowForward => "arrow-right",
 }
 
 /// An icon `size` points square, stroked in `tone`.

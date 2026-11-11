@@ -250,3 +250,47 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod key_tests {
+    /// Every message key written in the screens exists in every language
+    /// (a missing one would show as its key).
+    #[test]
+    fn every_literal_key_is_translated() {
+        let mut missing = Vec::new();
+        let mut seen = 0;
+        let mut files = vec![std::path::PathBuf::from("src")];
+        while let Some(p) = files.pop() {
+            if p.is_dir() {
+                for e in std::fs::read_dir(&p).into_iter().flatten().flatten() {
+                    files.push(e.path());
+                }
+                continue;
+            }
+            if p.extension().is_none_or(|x| x != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            for pat in ["st.t(\"", "st.tn(\"", "tr_args(st.lang(), \""] {
+                for (i, _) in text.match_indices(pat) {
+                    let rest = &text[i + pat.len()..];
+                    let Some(end) = rest.find('"') else { continue };
+                    let key = &rest[..end];
+                    if key.contains('{') || key.ends_with('.') {
+                        continue;
+                    }
+                    seen += 1;
+                    for lang in nb_i18n::Lang::ALL {
+                        if nb_i18n::tr(lang, key) == key {
+                            missing.push(format!("{} {key} ({})", p.display(), lang.code()));
+                        }
+                    }
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(seen > 300, "only {seen} keys found: wrong directory?");
+        assert!(missing.is_empty(), "{missing:#?}");
+    }
+}

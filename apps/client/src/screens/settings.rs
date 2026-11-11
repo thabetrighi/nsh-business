@@ -588,7 +588,7 @@ fn store(st: AppState, compact: bool) -> View {
                                 _ => form_err,
                             };
                             if target.get_untracked().is_empty() {
-                                target.set(crate::screens::product_form::error_text(st, code));
+                                target.set(crate::screens::forms::error_text(st, code));
                             }
                         }
                     }
@@ -866,7 +866,7 @@ fn modules(st: AppState, compact: bool) -> View {
                         on.set(!want);
                         show_toast(
                             st,
-                            crate::screens::product_form::error_text(
+                            crate::screens::forms::error_text(
                                 st,
                                 e.codes.first().map_or("internal", |c| c.1),
                             ),

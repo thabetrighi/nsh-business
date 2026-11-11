@@ -181,3 +181,82 @@ pub fn chips(
         .child(label(caption, ty::SM, FontWeight::SEMIBOLD, Tone::Ink))
         .child(row)
 }
+
+/// A bare text input (no label), for rows of a table-like editor. Its test
+/// id may be built at run time (`price-2`).
+pub fn row_input(
+    value: Signal<String>,
+    placeholder: impl Fn() -> String + 'static,
+    keyboard: KeyboardType,
+    test_id: String,
+    invalid: impl Fn() -> bool + 'static,
+) -> View {
+    input_box()
+        .border_color(move || {
+            if invalid() {
+                Tone::Danger.color()
+            } else {
+                Tone::BorderStrong.color()
+            }
+        })
+        .child(
+            input()
+                .test_id(&test_id)
+                .flex_1()
+                .value(move || value.get())
+                .on_change(move |t: &str| value.set(t.to_owned()))
+                .placeholder(placeholder)
+                .keyboard_type(keyboard)
+                .text_size(px(fs(ty::SM)))
+                .text_color(Tone::Ink.color()),
+        )
+}
+
+/// A labelled multi-line text field.
+pub fn text_area(
+    caption: impl Fn() -> String + 'static,
+    value: Signal<String>,
+    placeholder: impl Fn() -> String + 'static,
+    height: f32,
+    test_id: &'static str,
+) -> View {
+    view()
+        .gap(px(6.0))
+        .child(label(caption, ty::SM, FontWeight::SEMIBOLD, Tone::Ink))
+        .child(
+            view()
+                .h(px(height))
+                .p(px(10.0))
+                .rounded(px(radius::md()))
+                .bg(Tone::Surface.color())
+                .border_1()
+                .border_color(Tone::BorderStrong.color())
+                .child(
+                    input()
+                        .test_id(test_id)
+                        .flex_1()
+                        .multiline(true)
+                        .value(move || value.get())
+                        .on_change(move |t: &str| value.set(t.to_owned()))
+                        .placeholder(placeholder)
+                        .text_size(px(fs(ty::SM)))
+                        .text_color(Tone::Ink.color()),
+                ),
+        )
+}
+
+/// A caption above a control (dropdowns, chips), with an optional help line.
+pub fn labelled(
+    caption: impl Fn() -> String + 'static,
+    control: View,
+    help: Option<Box<dyn Fn() -> String>>,
+) -> View {
+    let mut v = view()
+        .gap(px(6.0))
+        .child(label(caption, ty::SM, FontWeight::SEMIBOLD, Tone::Ink))
+        .child(control);
+    if let Some(h) = help {
+        v = v.child(label(h, ty::XS, FontWeight::NORMAL, Tone::Muted));
+    }
+    v
+}
