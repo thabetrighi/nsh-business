@@ -4,6 +4,7 @@
 
 pub mod access;
 pub mod barcode;
+pub mod catalog;
 pub mod features;
 pub mod ids;
 pub mod ledger;

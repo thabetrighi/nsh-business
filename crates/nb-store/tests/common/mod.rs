@@ -58,6 +58,7 @@ pub fn product(name: &str, sku: &str, price: i64) -> ProductInput {
         min_price_minor: None,
         min_stock: None,
         opening: None,
+        ..Default::default()
     }
 }
 

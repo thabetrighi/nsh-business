@@ -45,7 +45,35 @@ pub struct ProductRow {
     pub active: bool,
     pub version: i64,
     pub units: Vec<UnitRow>,
+    /// Barcodes of the base unit.
     pub barcodes: Vec<String>,
+    /// Barcodes of packaging units: (code, unit).
+    pub pack_barcodes: Vec<(String, String)>,
+    pub brand_id: Option<String>,
+    pub brand: Option<String>,
+    pub tax_class_id: Option<String>,
+    pub alt_name: Option<String>,
+    pub description: Option<String>,
+    pub cost_minor: Option<i64>,
+    pub plu: Option<String>,
+    /// The product this one is a variant of.
+    pub parent_id: Option<String>,
+    /// A variant's values, or a parent's attributes (JSON).
+    pub variant_attrs: Option<String>,
+    pub tags: Vec<String>,
+}
+
+/// What a product row carries besides its rules-checked fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductExtra {
+    pub category_id: Option<String>,
+    pub brand_id: Option<String>,
+    pub tax_class_id: Option<String>,
+    pub alt_name: Option<String>,
+    pub description: Option<String>,
+    pub plu: Option<String>,
+    pub parent_id: Option<String>,
+    pub variant_attrs: Option<String>,
 }
 
 /// Stock state for lists and filters.
@@ -157,6 +185,8 @@ pub fn fts_query(text: &str) -> Option<String> {
     }
 }
 
+const EXTRA_COLS: &str = "p.brand_id, br.name, p.tax_class_id, p.alt_name, p.description, p.cost_minor, p.plu, p.parent_id, p.variant_attrs";
+
 const STOCK_EXPR: &str =
     "COALESCE((SELECT SUM(b.on_hand_milli) FROM stock_balances b WHERE b.product_id = p.id), 0)";
 
@@ -238,8 +268,8 @@ pub fn query(conn: &Connection, org: OrganizationId, q: &ProductQuery) -> Result
     };
     let sql = format!(
         "SELECT p.id, p.sku, p.name, p.kind, p.category_id, c.name, p.tax_bps, p.price_minor, p.min_price_minor,
-                p.min_stock_milli, {STOCK_EXPR} AS on_hand, p.active, p.version, {state} AS st
-         FROM products p LEFT JOIN categories c ON c.id = p.category_id
+                p.min_stock_milli, {STOCK_EXPR} AS on_hand, p.active, p.version, {EXTRA_COLS}, {state} AS st
+         FROM products p LEFT JOIN categories c ON c.id = p.category_id LEFT JOIN brands br ON br.id = p.brand_id
          WHERE {where_all}
          ORDER BY {order}
          LIMIT {} OFFSET {}",
@@ -277,6 +307,17 @@ fn row_basic(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProductRow> {
         version: r.get(12)?,
         units: Vec::new(),
         barcodes: Vec::new(),
+        pack_barcodes: Vec::new(),
+        brand_id: r.get(13)?,
+        brand: r.get(14)?,
+        tax_class_id: r.get(15)?,
+        alt_name: r.get(16)?,
+        description: r.get(17)?,
+        cost_minor: r.get(18)?,
+        plu: r.get(19)?,
+        parent_id: r.get(20)?,
+        variant_attrs: r.get(21)?,
+        tags: Vec::new(),
     })
 }
 
@@ -293,9 +334,21 @@ fn load_children(conn: &Connection, p: &mut ProductRow) -> Result<()> {
             })
         })?
         .collect::<std::result::Result<_, _>>()?;
-    let mut s = conn
-        .prepare_cached("SELECT code FROM product_barcodes WHERE product_id = ?1 ORDER BY code")?;
-    p.barcodes = s
+    let base = p.units.first().map(|u| u.code.clone()).unwrap_or_default();
+    let mut s = conn.prepare_cached(
+        "SELECT code, unit_code FROM product_barcodes WHERE product_id = ?1 ORDER BY code",
+    )?;
+    let all: Vec<(String, String)> = s
+        .query_map([&p.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let (b, packs): (Vec<_>, Vec<_>) = all.into_iter().partition(|(_, u)| *u == base);
+    p.barcodes = b.into_iter().map(|(c, _)| c).collect();
+    p.pack_barcodes = packs;
+    let mut s = conn.prepare_cached(
+        "SELECT t.name FROM product_tags pt JOIN tags t ON t.id = pt.tag_id
+         WHERE pt.product_id = ?1 AND t.deleted_at IS NULL ORDER BY t.name COLLATE NOCASE",
+    )?;
+    p.tags = s
         .query_map([&p.id], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;
     Ok(())
@@ -305,8 +358,8 @@ fn load_children(conn: &Connection, p: &mut ProductRow) -> Result<()> {
 pub fn get(conn: &Connection, id: ProductId) -> Result<ProductRow> {
     let sql = format!(
         "SELECT p.id, p.sku, p.name, p.kind, p.category_id, c.name, p.tax_bps, p.price_minor, p.min_price_minor,
-                p.min_stock_milli, {STOCK_EXPR}, p.active, p.version
-         FROM products p LEFT JOIN categories c ON c.id = p.category_id
+                p.min_stock_milli, {STOCK_EXPR}, p.active, p.version, {EXTRA_COLS}
+         FROM products p LEFT JOIN categories c ON c.id = p.category_id LEFT JOIN brands br ON br.id = p.brand_id
          WHERE p.id = ?1 AND p.deleted_at IS NULL"
     );
     let mut row = conn
@@ -380,29 +433,39 @@ pub fn insert(
     org: OrganizationId,
     id: ProductId,
     p: &ValidProduct,
-    category_id: Option<&str>,
+    x: &ProductExtra,
 ) -> Result<()> {
     let d = &p.0;
-    w.tx().execute(
+    let r = w.tx().execute(
         "INSERT INTO products (id, org_id, sku, name, kind, category_id, tax_bps, price_minor, min_price_minor, min_stock_milli,
-                               created_at, updated_at, created_by, device_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13)",
+                               created_at, updated_at, created_by, device_id, brand_id, tax_class_id, alt_name, description,
+                               cost_minor, plu, parent_id, variant_attrs)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             id.to_string(),
             org.to_string(),
             d.sku,
             d.name,
             d.kind.code(),
-            category_id,
+            x.category_id,
             d.tax_rate.bps(),
             d.price.minor(),
             d.min_price.map(|m| m.minor()),
             d.min_stock.map(to_milli).transpose()?,
             w.now(),
             w.actor_text(),
-            w.device().id.to_string()
+            w.device().id.to_string(),
+            x.brand_id,
+            x.tax_class_id,
+            x.alt_name,
+            x.description,
+            d.cost.map(|c| c.minor()),
+            x.plu,
+            x.parent_id,
+            x.variant_attrs
         ],
-    )?;
+    );
+    plu_conflict(r)?;
     write_children(w, org, id, p)?;
     Ok(())
 }
@@ -415,27 +478,37 @@ pub fn update(
     id: ProductId,
     version: i64,
     p: &ValidProduct,
-    category_id: Option<&str>,
+    x: &ProductExtra,
 ) -> Result<()> {
     let d = &p.0;
-    let n = w.tx().execute(
+    let n = plu_conflict(w.tx().execute(
         "UPDATE products SET sku = ?1, name = ?2, kind = ?3, category_id = ?4, tax_bps = ?5, price_minor = ?6,
-                min_price_minor = ?7, min_stock_milli = ?8, updated_at = ?9, version = version + 1
+                min_price_minor = ?7, min_stock_milli = ?8, updated_at = ?9, version = version + 1,
+                brand_id = ?12, tax_class_id = ?13, alt_name = ?14, description = ?15, cost_minor = ?16, plu = ?17,
+                parent_id = ?18, variant_attrs = ?19
          WHERE id = ?10 AND version = ?11 AND deleted_at IS NULL",
         params![
             d.sku,
             d.name,
             d.kind.code(),
-            category_id,
+            x.category_id,
             d.tax_rate.bps(),
             d.price.minor(),
             d.min_price.map(|m| m.minor()),
             d.min_stock.map(to_milli).transpose()?,
             w.now(),
             id.to_string(),
-            version
+            version,
+            x.brand_id,
+            x.tax_class_id,
+            x.alt_name,
+            x.description,
+            d.cost.map(|c| c.minor()),
+            x.plu,
+            x.parent_id,
+            x.variant_attrs
         ],
-    )?;
+    ))?;
     if n == 0 {
         return Err(Error::Rules(vec![nb_domain::RuleError::new(
             "stale_version",
@@ -467,10 +540,15 @@ fn write_children(
         )?;
     }
     let base = d.units.base_unit().code.clone();
-    for b in &d.barcodes {
+    let all = d
+        .barcodes
+        .iter()
+        .map(|b| (b, &base))
+        .chain(d.pack_barcodes.iter().map(|(b, u)| (b, u)));
+    for (b, unit) in all {
         w.tx().execute(
             "INSERT INTO product_barcodes (org_id, code, product_id, unit_code) VALUES (?1, ?2, ?3, ?4)",
-            params![org.to_string(), b, id.to_string(), base],
+            params![org.to_string(), b, id.to_string(), unit],
         )?;
     }
     reindex(w.tx(), id)?;
@@ -481,7 +559,7 @@ fn write_children(
 pub fn reindex(conn: &Connection, id: ProductId) -> Result<()> {
     let row: Option<(i64, String, String, Option<i64>)> = conn
         .query_row(
-            "SELECT rowid, name, sku, deleted_at FROM products WHERE id = ?1",
+            "SELECT rowid, name || ifnull(' ' || alt_name, ''), sku, deleted_at FROM products WHERE id = ?1",
             [id.to_string()],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
@@ -553,6 +631,73 @@ pub fn insert_category(w: &Writer<'_>, org: OrganizationId, c: &Category) -> Res
         params![c.id, org.to_string(), c.name, w.now(), w.actor_text(), w.device().id.to_string()],
     )?;
     Ok(())
+}
+
+/// Replaces a product's tags by `names`, creating tags not seen before.
+pub fn set_tags(
+    w: &Writer<'_>,
+    org: OrganizationId,
+    id: ProductId,
+    names: &[String],
+) -> Result<()> {
+    w.tx().execute(
+        "DELETE FROM product_tags WHERE product_id = ?1",
+        [id.to_string()],
+    )?;
+    let mut seen = std::collections::BTreeSet::new();
+    for name in names
+        .iter()
+        .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
+    {
+        if name.is_empty() || !seen.insert(name.to_lowercase()) {
+            continue;
+        }
+        let existing: Option<String> = w
+            .tx()
+            .query_row(
+                "SELECT id FROM tags WHERE org_id = ?1 AND lower(name) = lower(?2) AND deleted_at IS NULL",
+                params![org.to_string(), name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let tag = match existing {
+            Some(t) => t,
+            None => {
+                let t = nb_core::OperationId::new().to_string();
+                w.tx().execute(
+                    "INSERT INTO tags (id, org_id, name, created_at, device_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![t, org.to_string(), name, w.now(), w.device().id.to_string()],
+                )?;
+                t
+            }
+        };
+        w.tx().execute(
+            "INSERT INTO product_tags (product_id, tag_id) VALUES (?1, ?2)",
+            params![id.to_string(), tag],
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether stock ever moved for a product (its units are then in use).
+pub fn has_movements(conn: &Connection, id: ProductId) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM stock_movements WHERE product_id = ?1)",
+        [id.to_string()],
+        |r| r.get(0),
+    )?)
+}
+
+/// A taken weighed-article code is a rule, not a crash.
+fn plu_conflict(r: rusqlite::Result<usize>) -> Result<usize> {
+    match r {
+        Err(rusqlite::Error::SqliteFailure(e, Some(msg)))
+            if e.code == rusqlite::ErrorCode::ConstraintViolation && msg.contains("plu") =>
+        {
+            Err(nb_domain::RuleError::on("plu", "product.plu_taken").into())
+        }
+        other => Ok(other?),
+    }
 }
 
 /// Rate of a stored product.

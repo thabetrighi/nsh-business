@@ -37,12 +37,18 @@ pub struct ProductDraft {
     pub sku: String,
     pub kind: ProductKind,
     pub units: UnitSet,
+    /// Barcodes of the base unit.
     pub barcodes: Vec<String>,
+    /// Barcodes of packaging units: (code, unit). Scanning one sells or
+    /// receives that unit (a carton).
+    pub pack_barcodes: Vec<(String, String)>,
     pub tax_rate: Rate,
     /// Retail price of one base unit.
     pub price: Money,
     /// Lowest allowed selling price, if any.
     pub min_price: Option<Money>,
+    /// Usual purchase cost of one base unit, if known.
+    pub cost: Option<Money>,
     /// Alert level, in base units.
     pub min_stock: Option<Quantity>,
 }
@@ -85,7 +91,25 @@ impl ProductDraft {
                 Err(e) => errors.push(e),
             }
         }
-        self.barcodes = codes;
+        self.barcodes = codes.clone();
+        let mut packs = Vec::new();
+        for (b, unit) in &self.pack_barcodes {
+            if self.units.get(unit.trim()).is_none() {
+                errors.push(RuleError::on("barcodes", "units.unknown"));
+                continue;
+            }
+            match barcode::normalize(b) {
+                Ok(c) if codes.contains(&c) => {
+                    errors.push(RuleError::on("barcodes", "barcode.duplicate"))
+                }
+                Ok(c) => {
+                    codes.push(c.clone());
+                    packs.push((c, unit.trim().to_owned()));
+                }
+                Err(e) => errors.push(e),
+            }
+        }
+        self.pack_barcodes = packs;
         if !(0..=10_000).contains(&self.tax_rate.bps()) {
             errors.push(RuleError::on("tax_rate", "tax.rate_range"));
         }
@@ -100,6 +124,9 @@ impl ProductDraft {
             } else if min.minor() > self.price.minor() {
                 errors.push(RuleError::on("min_price", "product.min_above_price"));
             }
+        }
+        if self.cost.is_some_and(|c| c.is_negative()) {
+            errors.push(RuleError::on("cost", "product.price_negative"));
         }
         if let Some(q) = self.min_stock
             && q.is_negative()
@@ -126,9 +153,11 @@ mod tests {
             kind: ProductKind::Goods,
             units: UnitSet::base("pc", 0)?,
             barcodes: vec!["6130000123455".into()],
+            pack_barcodes: vec![],
             tax_rate: Rate::from_bps(900),
             price: Money::from_minor(12_000, Currency::DZD),
             min_price: Some(Money::from_minor(11_000, Currency::DZD)),
+            cost: None,
             min_stock: Some(Quantity::whole(10)),
         })
     }
@@ -162,6 +191,28 @@ mod tests {
                 (Some("min_price"), "product.min_above_price"),
                 (Some("min_stock"), "product.min_stock_negative"),
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn packaging_barcodes() -> Result<(), RuleError> {
+        let mut d = draft()?;
+        d.units = UnitSet::nested("pc", 0, &[("ctn", nb_core::Decimal::from(12))])?;
+        d.pack_barcodes = vec![
+            ("16130000123452".into(), "ctn".into()),
+            ("6130000123455".into(), "ctn".into()),
+        ];
+        let errs = d.clone().validate().err().unwrap_or_default();
+        assert_eq!(errs, vec![RuleError::on("barcodes", "barcode.duplicate")]);
+        d.pack_barcodes = vec![("16130000123452".into(), "box".into())];
+        let errs = d.clone().validate().err().unwrap_or_default();
+        assert_eq!(errs, vec![RuleError::on("barcodes", "units.unknown")]);
+        d.pack_barcodes = vec![(" 16130000123452 ".into(), "ctn".into())];
+        let v = d.validate().map_err(|e| e[0].clone())?;
+        assert_eq!(
+            v.0.pack_barcodes,
+            vec![("16130000123452".to_owned(), "ctn".to_owned())]
         );
         Ok(())
     }

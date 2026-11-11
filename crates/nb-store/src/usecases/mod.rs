@@ -3,6 +3,7 @@
 //! `nb-domain`.
 
 pub mod access;
+pub mod catalog;
 pub mod ledger;
 pub mod org;
 pub mod products;

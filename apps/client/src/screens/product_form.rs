@@ -160,6 +160,7 @@ fn read(
             qty: stock.to_string(),
             unit_cost_minor: 0,
         }),
+        ..Default::default()
     })
 }
 

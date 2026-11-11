@@ -25,7 +25,7 @@ pub struct Opening {
 }
 
 /// A product as a form or an import sends it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductInput {
     pub name: String,
     /// Empty: the next free code (`P-00042`).
@@ -43,6 +43,108 @@ pub struct ProductInput {
     /// Alert level in base units, as decimal text.
     pub min_stock: Option<String>,
     pub opening: Option<Opening>,
+    /// Barcodes of packaging units: (code, unit code).
+    #[serde(default)]
+    pub pack_barcodes: Vec<(String, String)>,
+    /// A tax class; when given, its rate replaces `tax_bps`.
+    #[serde(default)]
+    pub tax_class_id: Option<String>,
+    #[serde(default)]
+    pub brand_id: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub alt_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Usual purchase cost of one base unit.
+    #[serde(default)]
+    pub cost_minor: Option<i64>,
+    /// Article code in scale labels (weighed goods), digits only.
+    #[serde(default)]
+    pub plu: Option<String>,
+}
+
+impl ProductInput {
+    fn extra(&self, parent: Option<(String, String)>) -> catalog::ProductExtra {
+        let text = |s: &Option<String>| {
+            s.as_deref()
+                .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|v| !v.is_empty())
+        };
+        let (parent_id, variant_attrs) = parent.unzip();
+        catalog::ProductExtra {
+            category_id: self.category_id.clone().filter(|c| !c.is_empty()),
+            brand_id: self.brand_id.clone().filter(|c| !c.is_empty()),
+            tax_class_id: self.tax_class_id.clone().filter(|c| !c.is_empty()),
+            alt_name: text(&self.alt_name),
+            description: self
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .map(Into::into),
+            plu: self
+                .plu
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(Into::into),
+            parent_id,
+            variant_attrs,
+        }
+    }
+}
+
+/// Checks what refers to other rows (category, brand, tax class exist) and
+/// takes the tax class's rate.
+fn resolve_refs(w: &Writer<'_>, input: &ProductInput, valid: &mut ValidProduct) -> Result<()> {
+    let org = w.org()?.to_string();
+    let exists = |table: &str, id: &Option<String>| -> Result<bool> {
+        match id.as_deref().filter(|i| !i.is_empty()) {
+            None => Ok(true),
+            Some(id) => Ok(w.tx().query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE id = ?1 AND org_id = ?2 AND deleted_at IS NULL"),
+                rusqlite::params![id, org],
+                |r| r.get::<_, i64>(0),
+            )? == 1),
+        }
+    };
+    let mut errors = Vec::new();
+    if !exists("categories", &input.category_id)? {
+        errors.push(RuleError::on("category", "not_found"));
+    }
+    if !exists("brands", &input.brand_id)? {
+        errors.push(RuleError::on("brand", "not_found"));
+    }
+    match input.tax_class_id.as_deref().filter(|i| !i.is_empty()) {
+        None => {}
+        Some(id) => {
+            let rate: Option<i64> = rusqlite::OptionalExtension::optional(w.tx().query_row(
+                "SELECT rate_bps FROM tax_classes WHERE id = ?1 AND org_id = ?2 AND deleted_at IS NULL",
+                rusqlite::params![id, org],
+                |r| r.get(0),
+            ))?;
+            match rate {
+                Some(bps) => valid.0.tax_rate = Rate::from_bps(bps),
+                None => errors.push(RuleError::on("tax_class", "not_found")),
+            }
+        }
+    }
+    if let Some(plu) = input
+        .plu
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        && (plu.len() > 6 || !plu.bytes().all(|b| b.is_ascii_digit()))
+    {
+        errors.push(RuleError::on("plu", "product.plu_format"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Rules(errors))
+    }
 }
 
 fn quantity(field: &'static str, s: &str) -> std::result::Result<Quantity, RuleError> {
@@ -106,10 +208,14 @@ fn draft(
         kind,
         units,
         barcodes: input.barcodes.clone(),
+        pack_barcodes: input.pack_barcodes.clone(),
         tax_rate: Rate::from_bps(input.tax_bps),
         price: Money::from_minor(input.price_minor, store_currency),
         min_price: input
             .min_price_minor
+            .map(|m| Money::from_minor(m, store_currency)),
+        cost: input
+            .cost_minor
             .map(|m| Money::from_minor(m, store_currency)),
         min_stock,
     })
@@ -144,23 +250,29 @@ fn check_unique(w: &Writer<'_>, p: &ValidProduct, except: Option<ProductId>) -> 
 }
 
 /// Creates a product, with its opening stock if given.
-pub fn create_product(store: &mut Store, meta: OpMeta, input: ProductInput) -> Result<ProductRow> {
-    let org_row = store
-        .read(|r| org::the_org(r.conn()))?
-        .ok_or(Error::NotFound("organization"))?;
-    let currency = org_row.currency()?;
-    let offset = store.read(|r| Ok(r.utc_offset_min))?;
-    let sku = if input.sku.trim().is_empty() {
-        next_sku(store)?
-    } else {
-        input.sku.clone()
-    };
+/// A product checked and ready to write.
+pub(crate) struct Prepared {
+    pub input: ProductInput,
+    pub valid: ValidProduct,
+    /// Opening stock: warehouse, base quantity, unit cost.
+    pub opening: Option<(WarehouseId, Quantity, i64)>,
+}
+
+/// Checks a product input with the rules that need no database.
+pub(crate) fn prepare(
+    input: ProductInput,
+    sku: String,
+    currency: nb_core::Currency,
+) -> Result<Prepared> {
     let valid = draft(currency, &input, sku)?.validate()?;
     let opening = match &input.opening {
         Some(o) => {
             let q = quantity("opening_qty", &o.qty)?;
             if q.is_negative() {
                 return Err(RuleError::on("opening_qty", "stock.quantity_positive").into());
+            }
+            if !q.fits_precision(valid.0.units.base_unit().precision) {
+                return Err(RuleError::on("opening_qty", "units.too_precise").into());
             }
             if o.unit_cost_minor < 0 {
                 return Err(RuleError::on("unit_cost", "product.price_negative").into());
@@ -177,42 +289,123 @@ pub fn create_product(store: &mut Store, meta: OpMeta, input: ProductInput) -> R
         }
         None => None,
     };
+    Ok(Prepared {
+        input,
+        valid,
+        opening,
+    })
+}
+
+/// Writes a prepared product (and its opening stock) in the running
+/// operation. With `journal`, the opening stock's entry is posted here;
+/// otherwise its value is returned for one entry over many products.
+pub(crate) fn write_new(
+    w: &mut Writer<'_>,
+    id: ProductId,
+    p: &mut Prepared,
+    currency: nb_core::Currency,
+    offset: i32,
+    parent: Option<(String, String)>,
+    journal: bool,
+) -> Result<(ProductRow, Money)> {
+    check_unique(w, &p.valid, None)?;
+    resolve_refs(w, &p.input, &mut p.valid)?;
+    let org = w.org()?;
+    catalog::insert(w, org, id, &p.valid, &p.input.extra(parent))?;
+    catalog::set_tags(w, org, id, &p.input.tags)?;
+    catalog::record_price_change(w, id, "retail", None, p.valid.0.price.minor())?;
+    let mut value = Money::zero(currency);
+    if let Some((wh, qty, cost)) = p.opening {
+        if p.valid.0.kind == ProductKind::Service {
+            return Err(RuleError::on("opening_qty", "product.service_stock").into());
+        }
+        let warehouse = org::warehouse(w.tx(), wh)?;
+        let branch = org::branch(w.tx(), parse_id(&warehouse.branch_id)?)?;
+        let number = w.next_number(
+            nb_domain::numbering::DocKind::Adjustment,
+            &branch.id,
+            &branch.code,
+        )?;
+        let unit_cost = Money::from_minor(cost, currency);
+        let before = stock::balance(w.tx(), id, wh, currency)?;
+        let after = before.apply(
+            MovementKind::Opening,
+            qty,
+            Some(unit_cost),
+            warehouse.policy(),
+            false,
+        )?;
+        stock::append(
+            w,
+            id,
+            wh,
+            MovementKind::Opening,
+            qty,
+            Some(unit_cost),
+            Some(&number),
+            None,
+            after,
+        )?;
+        value = qty.times_price(unit_cost)?;
+        // Opening stock enters the books against opening equity
+        // (provisional mapping 30 / 101, gate G2).
+        if journal && !value.is_zero() {
+            let memo = format!("{number} {}", p.valid.0.name);
+            post_opening(w, &branch, offset, value, &memo)?;
+        }
+        w.event("stock.moved", "product", &id.to_string(), &serde_json::json!({
+            "kind": "opening", "warehouse": wh.to_string(), "qty": qty.to_string(), "unit_cost": cost, "number": number
+        }))?;
+    }
+    let row = catalog::get(w.tx(), id)?;
+    w.event("product.created", "product", &row.id, &row)?;
+    w.audit("create", "product", &row.id, &row)?;
+    Ok((row, value))
+}
+
+/// The opening stock entry: 30 / 101 (provisional, gate G2).
+pub(crate) fn post_opening(
+    w: &mut Writer<'_>,
+    branch: &org::Branch,
+    offset: i32,
+    value: Money,
+    memo: &str,
+) -> Result<()> {
+    let entry = Entry::new(vec![Line::debit("30", value), Line::credit("101", value)])?;
+    let jnumber = w.next_number(
+        nb_domain::numbering::DocKind::Journal,
+        &branch.id,
+        &branch.code,
+    )?;
+    let date = crate::time::iso_date(w.now(), offset);
+    let header = ledger::Header {
+        number: &jnumber,
+        date: &date,
+        memo,
+        source: "stock.opening",
+        reverses: None,
+    };
+    ledger::post(w, w.org()?, header, &entry)?;
+    Ok(())
+}
+
+/// Creates a product, with its opening stock if given.
+pub fn create_product(store: &mut Store, meta: OpMeta, input: ProductInput) -> Result<ProductRow> {
+    let org_row = store
+        .read(|r| org::the_org(r.conn()))?
+        .ok_or(Error::NotFound("organization"))?;
+    let currency = org_row.currency()?;
+    let offset = store.read(|r| Ok(r.utc_offset_min))?;
+    let sku = if input.sku.trim().is_empty() {
+        next_sku(store)?
+    } else {
+        input.sku.clone()
+    };
+    let mut p = prepare(input, sku, currency)?;
     let id = ProductId::new();
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
-        check_unique(w, &valid, None)?;
-        let org = w.org()?;
-        catalog::insert(w, org, id, &valid, input.category_id.as_deref())?;
-        catalog::record_price_change(w, id, "retail", None, valid.0.price.minor())?;
-        if let Some((wh, qty, cost)) = opening {
-            if valid.0.kind == ProductKind::Service {
-                return Err(RuleError::on("opening_qty", "product.service_stock").into());
-            }
-            let warehouse = org::warehouse(w.tx(), wh)?;
-            let branch = org::branch(w.tx(), parse_id(&warehouse.branch_id)?)?;
-            let number = w.next_number(nb_domain::numbering::DocKind::Adjustment, &branch.id, &branch.code)?;
-            let unit_cost = Money::from_minor(cost, currency);
-            let before = stock::balance(w.tx(), id, wh, currency)?;
-            let after = before.apply(MovementKind::Opening, qty, Some(unit_cost), warehouse.policy(), false)?;
-            stock::append(w, id, wh, MovementKind::Opening, qty, Some(unit_cost), Some(&number), None, after)?;
-            // Opening stock enters the books against opening equity
-            // (provisional mapping 30 / 101, gate G2).
-            let value = qty.times_price(unit_cost)?;
-            if !value.is_zero() {
-                let entry = Entry::new(vec![Line::debit("30", value), Line::credit("101", value)])?;
-                let jnumber = w.next_number(nb_domain::numbering::DocKind::Journal, &branch.id, &branch.code)?;
-                let date = crate::time::iso_date(w.now(), offset);
-                let memo = format!("{number} {}", valid.0.name);
-                ledger::post(w, w.org()?, ledger::Header { number: &jnumber, date: &date, memo: &memo, source: "stock.opening", reverses: None }, &entry)?;
-            }
-            w.event("stock.moved", "product", &id.to_string(), &serde_json::json!({
-                "kind": "opening", "warehouse": wh.to_string(), "qty": qty.to_string(), "unit_cost": cost, "number": number
-            }))?;
-        }
-        let row = catalog::get(w.tx(), id)?;
-        w.event("product.created", "product", &row.id, &row)?;
-        w.audit("create", "product", &row.id, &row)?;
-        Ok(row)
+        Ok(write_new(w, id, &mut p, currency, offset, None, true)?.0)
     })
 }
 
@@ -231,7 +424,7 @@ pub fn update_product(
     if input.opening.is_some() {
         return Err(RuleError::on("opening_qty", "product.opening_on_update").into());
     }
-    let valid = draft(currency, &input, input.sku.clone())?.validate()?;
+    let mut valid = draft(currency, &input, input.sku.clone())?.validate()?;
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
         let before = catalog::get(w.tx(), id)?;
@@ -239,8 +432,22 @@ pub fn update_product(
             w.require(Permission::ProductsPrice, &Target::org())?;
         }
         check_unique(w, &valid, Some(id))?;
+        resolve_refs(w, &input, &mut valid)?;
+        // A conversion stock already moved with keeps its meaning (PRD §6.4).
+        if before.unit_set()?.reinterprets(&valid.0.units) && catalog::has_movements(w.tx(), id)? {
+            return Err(RuleError::on("units", "units.in_use").into());
+        }
         let org = w.org()?;
-        catalog::update(w, org, id, version, &valid, input.category_id.as_deref())?;
+        let parent = before
+            .parent_id
+            .clone()
+            .map(|p| (p, before.variant_attrs.clone().unwrap_or_default()));
+        let mut extra = input.extra(parent);
+        if extra.parent_id.is_none() {
+            extra.variant_attrs = before.variant_attrs.clone();
+        }
+        catalog::update(w, org, id, version, &valid, &extra)?;
+        catalog::set_tags(w, org, id, &input.tags)?;
         if before.price_minor != valid.0.price.minor() {
             catalog::record_price_change(
                 w,

@@ -93,14 +93,20 @@ pub fn seed(store: &mut Store, setup: &SetupResult, lang: DemoLang, n: usize) ->
                 kind: ProductKind::Goods,
                 units: UnitSet::base(unit, precision)?,
                 barcodes: vec![],
+                pack_barcodes: vec![],
                 tax_rate: Rate::from_bps(if cat == 5 { 0 } else { 1_900 }),
                 price: Money::from_minor(price, currency),
                 min_price: None,
+                cost: Some(Money::from_minor(price * 7 / 10, currency)),
                 min_stock: Some(Quantity::whole(10)),
             };
             let valid = draft.validate()?;
             let id = ProductId::new();
-            catalog::insert(w, org_id, id, &valid, Some(&cats[cat]))?;
+            let extra = catalog::ProductExtra {
+                category_id: Some(cats[cat].clone()),
+                ..Default::default()
+            };
+            catalog::insert(w, org_id, id, &valid, &extra)?;
             if stock_units > 0 {
                 let qty = Quantity::new(Decimal::from(stock_units));
                 let cost = Money::from_minor(price * 7 / 10, currency);
