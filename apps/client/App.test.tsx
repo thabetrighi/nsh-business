@@ -473,3 +473,56 @@ test("a cart put aside comes back, and a sale is returned", async () => {
   await app.press("id:ret-find");
   await app.waitFor("text:Entièrement retourné");
 });
+
+test("a quote becomes an order, invoiced at the till with its discount", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Ventes");
+  await app.press("id:nav-quotes");
+  await app.waitFor("id:doc-new-quote");
+  await app.waitFor("text:Aucun document");
+  await app.press("id:doc-new-quote");
+  await app.type("id:doc-customer", "Boulangerie El Amel");
+  await app.type("id:doc-search", "Biscuits");
+  await app.press("id:doc-search-result-0");
+  await app.waitFor("id:doc-qty-0");
+  await app.clear("id:doc-qty-0");
+  await app.type("id:doc-qty-0", "10");
+  await app.type("id:doc-discount", "10");
+  await app.press("id:doc-save");
+  await seen(/^DV-01-\d\d-A\d+ enregistré\.$/);
+  // The draft is approved, then turned into an order.
+  await app.press("id:doc-approve");
+  await seen(/^DV-01-\d\d-A\d+ validé\.$/);
+  await app.press("id:doc-convert");
+  await seen(/^Commande BC-01-\d\d-A\d+ créée depuis le devis\.$/);
+  await app.waitFor("id:doc-approve");
+  await app.press("id:doc-approve");
+  await app.waitFor("id:doc-invoice");
+  await app.press("id:doc-invoice");
+  // At the till: the order fills the cart, with its discount.
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await seen(/^Facturation de BC-01-\d\d-A\d+$/);
+  await app.waitFor("id:cart-line-0");
+  await seen(/^Remise 10 %$/);
+  await app.press("id:pos-discount");
+  await app.waitFor("id:disc-apply");
+  await app.press("id:disc-15");
+  await app.press("id:disc-apply");
+  await seen(/^Remise 15 %$/);
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-confirm");
+  await app.press("id:pay-confirm");
+  await seen(/^Vente FV-01-\d\d-A\d+ enregistrée/);
+  // The sale lists the order; the order is invoiced.
+  await app.press("id:nav-sales");
+  await app.waitFor("id:sale-0");
+  await seen(/^BC-01-\d\d-A\d+$/);
+  await app.press("id:nav-quotes");
+  await app.waitFor("id:doc-0");
+  await app.waitFor("text:Facturé");
+  await app.waitFor("text:Transformé en commande");
+});

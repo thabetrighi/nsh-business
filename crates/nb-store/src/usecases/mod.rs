@@ -5,6 +5,7 @@
 pub mod access;
 pub mod accounting;
 pub mod catalog;
+pub mod documents;
 pub mod inventory;
 pub mod ledger;
 pub mod org;

@@ -518,6 +518,18 @@ fn returns_follow_their_sale_and_never_exceed_it() -> R {
     let sum = shift_summary(&s, &shift.id)?;
     assert_eq!(sum.refunds_minor, 2_380);
     assert_eq!(sum.expected_minor, 1_000 + 3_570 - 2_380);
+    let listed = list_returns(&s, &sold.number, 10, 0)?;
+    assert_eq!((listed.total, listed.total_minor), (2, 3_570));
+    assert!(listed.rows.iter().any(|r| r.restocked) && listed.rows.iter().any(|r| !r.restocked));
+    let sales = list_sales(
+        &s,
+        &SalesQuery {
+            search: sold.number.to_lowercase(),
+            limit: 10,
+            ..Default::default()
+        },
+    )?;
+    assert_eq!((sales.total, sales.rows[0].returned_minor), (1, 3_570));
 
     // On account only for a sale to a customer.
     let cash_sale = complete_sale(

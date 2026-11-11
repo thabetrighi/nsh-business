@@ -12,6 +12,7 @@ use nb_domain::tax::TaxMode;
 use nb_i18n::tr_args;
 use nb_store::repo::catalog::{ProductPage, ProductQuery, ProductRow, ProductSort};
 use nb_store::usecases::catalog::{Scan, TaxClass, list_tax_classes, scan};
+use nb_store::usecases::documents::get_document;
 use nb_store::usecases::org::{Register, registers};
 use nb_store::usecases::products::list_products;
 use nb_store::usecases::returns::{
@@ -22,7 +23,7 @@ use nb_store::usecases::sales::{
     PaymentInput, SaleInput, SaleLineInput, ShiftRow, close_shift, complete_sale, current_shift,
     open_shift,
 };
-use nsh_core::element::{AnyElement, ElementRef, KeyboardType, View, element_ref, input};
+use nsh_core::element::{AnyElement, ElementRef, KeyboardType, Owner, View, element_ref, input};
 use nsh_core::prelude::*;
 
 use crate::db::DbError;
@@ -101,8 +102,41 @@ impl Item {
     }
 }
 
+/// A discount on the whole sale: a percentage (bps) or an amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+struct SaleDiscount {
+    bps: i64,
+    minor: i64,
+}
+
+impl SaleDiscount {
+    fn is_none(self) -> bool {
+        self.bps == 0 && self.minor == 0
+    }
+    fn of(self, c: nb_core::Currency) -> Discount {
+        if self.bps > 0 {
+            Discount::Percent(self.bps)
+        } else if self.minor > 0 {
+            Discount::Amount(Money::from_minor(self.minor, c))
+        } else {
+            Discount::None
+        }
+    }
+}
+
+/// A cart put aside, as the till saves it.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+struct Held {
+    items: Vec<Item>,
+    #[serde(default)]
+    discount: SaleDiscount,
+    /// The quote or order being invoiced (id, number).
+    #[serde(default)]
+    document: Option<(String, String)>,
+}
+
 /// The cart as the domain prices it (prices with tax).
-fn cart_of(items: &[Item], c: nb_core::Currency) -> Cart {
+fn cart_of(items: &[Item], sale: SaleDiscount, c: nb_core::Currency) -> Cart {
     Cart {
         mode: TaxMode::Inclusive,
         lines: items
@@ -119,7 +153,7 @@ fn cart_of(items: &[Item], c: nb_core::Currency) -> Cart {
                 },
             })
             .collect(),
-        discount: Discount::None,
+        discount: sale.of(c),
     }
 }
 
@@ -135,6 +169,11 @@ struct Till {
     free_open: Signal<bool>,
     paying: Signal<bool>,
     cart_open: Signal<bool>,
+    /// The discount on the whole sale, and its dialog.
+    discount: Signal<SaleDiscount>,
+    discount_open: Signal<bool>,
+    /// The quote or order this sale invoices (id, number).
+    document: Signal<Option<(String, String)>>,
     search: ElementRef,
     /// This device's till (once known).
     register: Signal<Option<String>>,
@@ -194,7 +233,42 @@ impl Till {
     }
     fn clear(self) {
         self.cart.set(Vec::new());
+        self.discount.set(SaleDiscount::default());
+        self.document.set(None);
         self.selected.set(None);
+    }
+    /// The cart's figures as the domain prices them.
+    fn totals(self, c: nb_core::Currency) -> Option<Totals> {
+        let items = self.cart.get();
+        if items.is_empty() {
+            return None;
+        }
+        cart_of(&items, self.discount.get(), c).totals().ok()
+    }
+    /// The cart as it is put aside: what it saves, its lines and total.
+    fn snapshot(self, c: nb_core::Currency) -> Option<(String, u32, i64)> {
+        let held = Held {
+            items: self.cart.get_untracked(),
+            discount: self.discount.get_untracked(),
+            document: self.document.get_untracked(),
+        };
+        if held.items.is_empty() {
+            return None;
+        }
+        let total = cart_of(&held.items, held.discount, c)
+            .totals()
+            .map_or(0, |x| x.total.minor());
+        let lines = u32::try_from(held.items.len()).unwrap_or(u32::MAX);
+        serde_json::to_string(&held).ok().map(|p| (p, lines, total))
+    }
+    /// Puts back a cart saved by [`Till::snapshot`].
+    fn restore(self, payload: &str) {
+        let held: Held = serde_json::from_str(payload).unwrap_or_default();
+        let n = held.items.len();
+        self.cart.set(held.items);
+        self.discount.set(held.discount);
+        self.document.set(held.document);
+        self.selected.set(n.checked_sub(1));
     }
 }
 
@@ -260,6 +334,9 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         free_open: signal(false),
         paying: signal(false),
         cart_open: signal(false),
+        discount: signal(SaleDiscount::default()),
+        discount_open: signal(false),
+        document: signal(None),
         search: element_ref(),
     };
     effect(move || {
@@ -276,7 +353,70 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             && !closing.get_untracked()
             && !t.recalling.get_untracked()
             && !t.returning.get_untracked()
+            && !t.discount_open.get_untracked()
     };
+
+    // A quote or order sent to the till (from the sales documents): its
+    // lines fill the cart once the till is open. The loading runs under
+    // the page (the effect runs again when it clears the request, which
+    // would end a task of its own).
+    let page_owner = Owner::current();
+    effect(move || {
+        let Some(crate::state::Intent::Invoice(id)) = st.intent.get() else {
+            return;
+        };
+        if !matches!(state.get(), Some((_, Some(_)))) {
+            return;
+        }
+        st.intent.set(None);
+        let db = st.db();
+        let task = page_owner.run(|| {
+            spawn(async move {
+                let loaded = db
+                    .call(move |s| {
+                        let doc = get_document(s, &id)?;
+                        let mut items = Vec::with_capacity(doc.lines.len());
+                        for l in &doc.lines {
+                            let product = match l.product_id.as_deref() {
+                                Some(p) => Some(s.read(|r| {
+                                    nb_store::repo::catalog::get(
+                                        r.conn(),
+                                        nb_store::repo::parse_id(p)?,
+                                    )
+                                })?),
+                                None => None,
+                            };
+                            items.push(Item {
+                                product,
+                                name: l.name.clone(),
+                                unit: l.unit.clone(),
+                                qty_milli: l.qty_milli,
+                                price_minor: l.unit_price_minor,
+                                tax_bps: l.tax_bps,
+                                discount_bps: l.discount_bps,
+                            });
+                        }
+                        Ok((doc, items))
+                    })
+                    .await;
+                match loaded {
+                    Ok((doc, items)) => {
+                        let n = items.len();
+                        t.cart.set(items);
+                        t.discount.set(SaleDiscount {
+                            bps: doc.discount_bps,
+                            minor: doc.discount_minor,
+                        });
+                        t.document
+                            .set(Some((doc.row.id.clone(), doc.row.number.clone())));
+                        t.selected.set(n.checked_sub(1));
+                    }
+                    Err(e) => show_toast(st, first_error(st, &e)),
+                }
+            })
+        });
+        drop(task); // runs to completion: tasks end with their owner, not their handle
+    });
 
     // Shortcuts at the counter (while this page is shown).
     on_key("f2", move |_| t.search.focus());
@@ -298,6 +438,11 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
     on_key("f8", move |_| {
         if no_dialog() {
             t.clear();
+        }
+    });
+    on_key("f5", move |_| {
+        if selling() && no_dialog() && !t.cart.with_untracked(Vec::is_empty) {
+            t.discount_open.set(true);
         }
     });
     on_key("f7", move |_| {
@@ -499,6 +644,9 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
                 .min_h(px(0.0))
                 .child(cart_panel(st, t, true))
                 .into_element()
+        }))
+        .child(modal(t.discount_open, compact, move || {
+            discount_dialog(st, t, move || t.discount_open.set(false)).into_element()
         }))
         .child(modal(t.recalling, compact, move || {
             held_dialog(st, t, move || t.recalling.set(false)).into_element()
@@ -800,6 +948,7 @@ fn shortcut_bar(st: AppState) -> View {
         ("F6", "pos.key.edit"),
         ("Alt ↑↓", "pos.key.select"),
         ("Alt +/−", "pos.key.qty"),
+        ("F5", "pos.key.discount"),
         ("F7", "pos.key.hold"),
         ("F3", "pos.key.held"),
         ("F12", "pos.key.return"),
@@ -825,12 +974,7 @@ fn shortcut_bar(st: AppState) -> View {
 
 /// Phones: the cart's count and total, and "pay", at the bottom.
 fn cart_bar(st: AppState, t: Till) -> View {
-    let total = computed(move || {
-        let items = t.cart.get();
-        cart_of(&items, currency(st))
-            .totals()
-            .map_or(0, |x| x.total.minor())
-    });
+    let total = computed(move || t.totals(currency(st)).map_or(0, |x| x.total.minor()));
     view()
         .flex_row()
         .items_center()
@@ -891,13 +1035,7 @@ fn cart_bar(st: AppState, t: Till) -> View {
 
 /// The cart: its lines scroll; the totals and "pay" stay at the bottom.
 fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
-    let totals = computed(move || {
-        let items = t.cart.get();
-        if items.is_empty() {
-            return None;
-        }
-        cart_of(&items, currency(st)).totals().ok()
-    });
+    let totals = computed(move || t.totals(currency(st)));
     let lines = dynamic(move || {
         let items = t.cart.get();
         if items.is_empty() {
@@ -952,6 +1090,51 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
         .pt(px(12.0))
         .border_t_1()
         .border_color(Tone::Border.color())
+        .child(when(
+            move || !t.cart.get().is_empty(),
+            move || {
+                view()
+                    .flex_row()
+                    .child(
+                        button(
+                            Variant::Ghost,
+                            Size::Sm,
+                            Some(Icon::Percent),
+                            move || {
+                                let d = t.discount.get();
+                                if d.is_none() {
+                                    st.t("pos.discount.add")()
+                                } else if d.bps > 0 {
+                                    tr_args(
+                                        st.lang(),
+                                        "pos.discount.percent",
+                                        &[(
+                                            "rate",
+                                            &st.fmt().quantity(Quantity::from_milli(d.bps * 10), 2),
+                                        )],
+                                    )
+                                } else {
+                                    tr_args(
+                                        st.lang(),
+                                        "pos.discount.amount",
+                                        &[("amount", &money(st, d.minor))],
+                                    )
+                                }
+                            },
+                            move || {
+                                t.cart_open.set(false);
+                                t.discount_open.set(true);
+                            },
+                        )
+                        .test_id(if in_sheet {
+                            "sheet-discount"
+                        } else {
+                            "pos-discount"
+                        }),
+                    )
+                    .into_element()
+            },
+        ))
         .child(row("pos.net", Box::new(pick(|t| t.net.minor()))))
         .child(row("pos.tax", Box::new(pick(|t| t.tax.minor()))))
         .child(when(
@@ -1041,6 +1224,33 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
                 },
             )),
         ))
+        .child(dynamic(move || match t.document.get() {
+            Some((_, number)) => view()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(16.0))
+                .py(px(8.0))
+                .bg(Tone::PrimarySoft.color())
+                .child(icon(Icon::FileText, 16.0, || Tone::Primary))
+                .child(view().flex_1().min_w(px(0.0)).child(label_line(
+                    move || tr_args(st.lang(), "pos.from_document", &[("number", &number)]),
+                    ty::SM,
+                    FontWeight::MEDIUM,
+                    Tone::Ink,
+                )))
+                .child(
+                    icon_button(
+                        || Icon::Close,
+                        st.t("pos.detach_document"),
+                        Variant::Ghost,
+                        move || t.document.set(None),
+                    )
+                    .test_id("pos-detach"),
+                )
+                .into_element(),
+            None => view().into_element(),
+        }))
         .child(
             scroll()
                 .flex_1()
@@ -1254,7 +1464,10 @@ fn line_dialog(st: AppState, t: Till, i: usize, close: impl Fn() + Clone + 'stat
             discount_bps: d,
             ..base.clone()
         };
-        cart_of(&[line], c).totals().ok().map(|x| x.total.minor())
+        cart_of(&[line], SaleDiscount::default(), c)
+            .totals()
+            .ok()
+            .map(|x| x.total.minor())
     });
     let apply = {
         let close = close.clone();
@@ -1608,7 +1821,10 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
     let meta = session.meta("sale.complete");
     let c = session.currency;
     let items = t.cart.get_untracked();
-    let due = cart_of(&items, c).totals().map_or(0, |x| x.total.minor());
+    let sale_discount = t.discount.get_untracked();
+    let due = cart_of(&items, sale_discount, c)
+        .totals()
+        .map_or(0, |x| x.total.minor());
     let way = signal(Way::Cash);
     let given = signal(Money::from_minor(due, c).to_plain_string());
     let error = signal(String::new());
@@ -1668,6 +1884,9 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                     method: method.into(),
                     amount_minor: amount,
                 }],
+                discount_bps: (sale_discount.bps > 0).then_some(sale_discount.bps),
+                discount_minor: (sale_discount.minor > 0).then_some(sale_discount.minor),
+                document_id: t.document.get_untracked().map(|d| d.0),
                 ..Default::default()
             };
             busy.set(true);
@@ -2128,17 +2347,9 @@ fn hold(st: AppState, t: Till) {
     else {
         return;
     };
-    let items = t.cart.get_untracked();
-    if items.is_empty() {
-        return;
-    }
-    let total = cart_of(&items, session.currency)
-        .totals()
-        .map_or(0, |x| x.total.minor());
-    let Ok(payload) = serde_json::to_string(&items) else {
+    let Some((payload, lines, total)) = t.snapshot(session.currency) else {
         return;
     };
-    let lines = u32::try_from(items.len()).unwrap_or(u32::MAX);
     let meta = session.meta("cart.hold");
     let db = st.db();
     let task = spawn(async move {
@@ -2164,22 +2375,9 @@ fn recall(st: AppState, t: Till, id: String, close: impl Fn() + 'static) {
     else {
         return;
     };
-    let items = t.cart.get_untracked();
-    let current = if items.is_empty() {
-        None
-    } else {
-        let total = cart_of(&items, session.currency)
-            .totals()
-            .map_or(0, |x| x.total.minor());
-        serde_json::to_string(&items).ok().map(|p| {
-            (
-                p,
-                u32::try_from(items.len()).unwrap_or(u32::MAX),
-                total,
-                session.meta("cart.hold"),
-            )
-        })
-    };
+    let current = t
+        .snapshot(session.currency)
+        .map(|(p, lines, total)| (p, lines, total, session.meta("cart.hold")));
     let meta = session.meta("cart.take");
     let db = st.db();
     let task = spawn(async move {
@@ -2193,10 +2391,7 @@ fn recall(st: AppState, t: Till, id: String, close: impl Fn() + 'static) {
             .await;
         match r {
             Ok(h) => {
-                let items: Vec<Item> = serde_json::from_str(&h.payload).unwrap_or_default();
-                let n = items.len();
-                t.cart.set(items);
-                t.selected.set(n.checked_sub(1));
+                t.restore(&h.payload);
                 t.held_rev.update(|n| *n += 1);
                 close();
             }
@@ -2660,6 +2855,186 @@ fn return_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> V
         st,
         st.t("pos.return.title"),
         st.t("pos.return.help"),
+        body,
+        footer,
+        close,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Discount on the whole sale (M8.2)
+
+/// A percentage typed by a person (`10`, `12,5`) in basis points.
+fn parse_percent(s: &str) -> Option<i64> {
+    let q: Quantity = s.trim().replace(',', ".").parse().ok()?;
+    let bps = nb_store::repo::to_milli(q).ok()? / 10;
+    (1..=10_000).contains(&bps).then_some(bps)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscountKind {
+    Percent,
+    Amount,
+}
+
+fn discount_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> View {
+    let c = currency(st);
+    let now = t.discount.get_untracked();
+    let kind = signal(if now.minor > 0 {
+        DiscountKind::Amount
+    } else {
+        DiscountKind::Percent
+    });
+    let value = signal(if now.bps > 0 {
+        Quantity::from_milli(now.bps * 10).to_string()
+    } else if now.minor > 0 {
+        Money::from_minor(now.minor, c).to_plain_string()
+    } else {
+        String::new()
+    });
+    let error = signal(String::new());
+    let typed = move || -> Option<SaleDiscount> {
+        let v = value.get();
+        match kind.get() {
+            DiscountKind::Percent => parse_percent(&v).map(|bps| SaleDiscount { bps, minor: 0 }),
+            DiscountKind::Amount => {
+                parse_price(&v, c)
+                    .ok()
+                    .filter(|m| m.minor() > 0)
+                    .map(|m| SaleDiscount {
+                        bps: 0,
+                        minor: m.minor(),
+                    })
+            }
+        }
+    };
+    let preview = computed(move || {
+        let d = typed()?;
+        let items = t.cart.get();
+        cart_of(&items, d, c).totals().ok().map(|x| x.total.minor())
+    });
+    let apply = {
+        let close = close.clone();
+        move || match untracked(typed) {
+            Some(d) if untracked(move || preview.get()).is_some() => {
+                t.discount.set(d);
+                close();
+            }
+            _ => error.set(error_text(st, "pos.discount_invalid")),
+        }
+    };
+    on_key("enter", {
+        let apply = apply.clone();
+        move |_| apply()
+    });
+    let mut quick = view().flex_row().flex_wrap().gap(px(6.0));
+    for n in [5, 10, 15, 20] {
+        quick = quick.child(
+            button(
+                Variant::Secondary,
+                Size::Sm,
+                None,
+                move || format!("{n} %"),
+                move || {
+                    kind.set(DiscountKind::Percent);
+                    value.set(n.to_string());
+                },
+            )
+            .test_id(&format!("disc-{n}")),
+        );
+    }
+    let body = view()
+        .gap(px(14.0))
+        .child(segmented(
+            vec![
+                (
+                    DiscountKind::Percent,
+                    Box::new(st.t("pos.discount.kind.percent")),
+                ),
+                (
+                    DiscountKind::Amount,
+                    Box::new(st.t("pos.discount.kind.amount")),
+                ),
+            ],
+            kind,
+        ))
+        .child(field(
+            move || {
+                if kind.get() == DiscountKind::Percent {
+                    st.t("pos.discount.rate")()
+                } else {
+                    st.t("pos.discount.value")()
+                }
+            },
+            value,
+            String::new,
+            String::new,
+            KeyboardType::Decimal,
+            "disc-value",
+        ))
+        .child(quick)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .child(view().flex_1().child(label_line(
+                    st.t("pos.discount.new_total"),
+                    ty::MD,
+                    FontWeight::SEMIBOLD,
+                    Tone::Ink,
+                )))
+                .child(figure(
+                    move || {
+                        preview
+                            .get()
+                            .map_or_else(|| "—".to_owned(), |v| money(st, v))
+                    },
+                    ty::XL,
+                    FontWeight::BOLD,
+                    || Tone::Ink,
+                )),
+        )
+        .child(error_line(error));
+    let footer = view()
+        .child(when(move || !t.discount.get().is_none(), {
+            let close = close.clone();
+            move || {
+                let close = close.clone();
+                button(
+                    Variant::Ghost,
+                    Size::Md,
+                    Some(Icon::Trash),
+                    st.t("pos.discount.remove"),
+                    move || {
+                        t.discount.set(SaleDiscount::default());
+                        close();
+                    },
+                )
+                .test_id("disc-remove")
+                .into_element()
+            }
+        }))
+        .child(button(
+            Variant::Secondary,
+            Size::Md,
+            None,
+            st.t("form.cancel"),
+            close.clone(),
+        ))
+        .child(
+            button(
+                Variant::Primary,
+                Size::Md,
+                Some(Icon::Check),
+                st.t("pos.discount.apply"),
+                apply,
+            )
+            .test_id("disc-apply"),
+        );
+    dialog_frame(
+        st,
+        st.t("pos.discount.title"),
+        st.t("pos.discount.help"),
         body,
         footer,
         close,

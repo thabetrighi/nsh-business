@@ -20,9 +20,11 @@ pub fn now_ms() -> i64 {
 }
 
 /// Something a screen should do when it opens (e.g. from the command palette).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Intent {
     AddProduct,
+    /// Invoice this approved quote or order at the till (its id).
+    Invoice(String),
 }
 
 /// Light, dark, or as the system.

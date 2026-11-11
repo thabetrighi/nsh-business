@@ -331,6 +331,67 @@ pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Resul
     })
 }
 
+/// A return in a list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReturnRow {
+    pub id: String,
+    pub number: String,
+    pub sale_number: String,
+    pub created_at: i64,
+    pub refund_method: String,
+    pub reason: String,
+    pub total_minor: i64,
+    pub lines: u32,
+    pub restocked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ReturnPage {
+    pub rows: Vec<ReturnRow>,
+    pub total: u32,
+    pub total_minor: i64,
+}
+
+/// Returns, the latest first; `search` in their number, the sale's, or the reason.
+pub fn list_returns(store: &Store, search: &str, limit: u32, offset: u32) -> Result<ReturnPage> {
+    store.read(|r| {
+        let (org, _) = the_org(r.conn())?;
+        let search = search.trim().to_uppercase();
+        let filter = " FROM sale_returns x JOIN sales s ON s.id = x.sale_id
+             WHERE x.org_id = ?1 AND (?2 = '' OR upper(x.number) LIKE '%' || ?2 || '%'
+                   OR upper(s.number) LIKE '%' || ?2 || '%' OR upper(x.reason) LIKE '%' || ?2 || '%')";
+        let (total, sum): (u32, i64) = r.conn().query_row(
+            &format!("SELECT COUNT(*), COALESCE(SUM(x.total_minor), 0){filter}"),
+            params![org.to_string(), search],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let mut st = r.conn().prepare(&format!(
+            "SELECT x.id, x.number, s.number, x.created_at, x.refund_method, x.reason, x.total_minor,
+                    (SELECT COUNT(*) FROM sale_return_lines l WHERE l.return_id = x.id),
+                    (SELECT COUNT(*) FROM sale_return_lines l WHERE l.return_id = x.id AND l.restocked)
+             {filter} ORDER BY x.created_at DESC, x.number DESC LIMIT ?3 OFFSET ?4"
+        ))?;
+        let rows = st.query_map(params![org.to_string(), search, limit.clamp(1, 500), offset], |r| {
+            Ok(ReturnRow {
+                id: r.get(0)?,
+                number: r.get(1)?,
+                sale_number: r.get(2)?,
+                created_at: r.get(3)?,
+                refund_method: r.get(4)?,
+                reason: r.get(5)?,
+                total_minor: r.get(6)?,
+                lines: r.get(7)?,
+                restocked: r.get::<_, i64>(8)? > 0,
+            })
+        })?;
+        Ok(ReturnPage {
+            rows: rows.collect::<std::result::Result<_, _>>()?,
+            total,
+            total_minor: sum,
+        })
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Carts put aside (M8.7)
 
