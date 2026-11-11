@@ -12,6 +12,7 @@ use nb_domain::tax::TaxMode;
 use nb_i18n::tr_args;
 use nb_store::repo::catalog::{ProductPage, ProductQuery, ProductRow, ProductSort};
 use nb_store::usecases::catalog::{Scan, TaxClass, list_tax_classes, scan};
+use nb_store::usecases::customers::{CustomerQuery, CustomerRow, list_customers};
 use nb_store::usecases::documents::get_document;
 use nb_store::usecases::org::{Register, registers};
 use nb_store::usecases::products::list_products;
@@ -133,6 +134,8 @@ struct Held {
     /// The quote or order being invoiced (id, number).
     #[serde(default)]
     document: Option<(String, String)>,
+    #[serde(default)]
+    customer: Option<CustomerRow>,
 }
 
 /// The cart as the domain prices it (prices with tax).
@@ -174,6 +177,9 @@ struct Till {
     discount_open: Signal<bool>,
     /// The quote or order this sale invoices (id, number).
     document: Signal<Option<(String, String)>>,
+    /// Who buys (none: a counter customer), and its picker.
+    customer: Signal<Option<CustomerRow>>,
+    customer_open: Signal<bool>,
     search: ElementRef,
     /// This device's till (once known).
     register: Signal<Option<String>>,
@@ -235,6 +241,7 @@ impl Till {
         self.cart.set(Vec::new());
         self.discount.set(SaleDiscount::default());
         self.document.set(None);
+        self.customer.set(None);
         self.selected.set(None);
     }
     /// The cart's figures as the domain prices them.
@@ -251,6 +258,7 @@ impl Till {
             items: self.cart.get_untracked(),
             discount: self.discount.get_untracked(),
             document: self.document.get_untracked(),
+            customer: self.customer.get_untracked(),
         };
         if held.items.is_empty() {
             return None;
@@ -268,6 +276,7 @@ impl Till {
         self.cart.set(held.items);
         self.discount.set(held.discount);
         self.document.set(held.document);
+        self.customer.set(held.customer);
         self.selected.set(n.checked_sub(1));
     }
 }
@@ -337,6 +346,8 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         discount: signal(SaleDiscount::default()),
         discount_open: signal(false),
         document: signal(None),
+        customer: signal(None),
+        customer_open: signal(false),
         search: element_ref(),
     };
     effect(move || {
@@ -354,6 +365,7 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             && !t.recalling.get_untracked()
             && !t.returning.get_untracked()
             && !t.discount_open.get_untracked()
+            && !t.customer_open.get_untracked()
     };
 
     // A quote or order sent to the till (from the sales documents): its
@@ -443,6 +455,11 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
     on_key("f5", move |_| {
         if selling() && no_dialog() && !t.cart.with_untracked(Vec::is_empty) {
             t.discount_open.set(true);
+        }
+    });
+    on_key("f10", move |_| {
+        if selling() && no_dialog() {
+            t.customer_open.set(true);
         }
     });
     on_key("f7", move |_| {
@@ -644,6 +661,9 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
                 .min_h(px(0.0))
                 .child(cart_panel(st, t, true))
                 .into_element()
+        }))
+        .child(modal(t.customer_open, compact, move || {
+            customer_dialog(st, t, move || t.customer_open.set(false)).into_element()
         }))
         .child(modal(t.discount_open, compact, move || {
             discount_dialog(st, t, move || t.discount_open.set(false)).into_element()
@@ -948,6 +968,7 @@ fn shortcut_bar(st: AppState) -> View {
         ("F6", "pos.key.edit"),
         ("Alt ↑↓", "pos.key.select"),
         ("Alt +/−", "pos.key.qty"),
+        ("F10", "pos.key.customer"),
         ("F5", "pos.key.discount"),
         ("F7", "pos.key.hold"),
         ("F3", "pos.key.held"),
@@ -1224,6 +1245,7 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
                 },
             )),
         ))
+        .child(customer_chip(st, t, in_sheet))
         .child(dynamic(move || match t.document.get() {
             Some((_, number)) => view()
                 .flex_row()
@@ -1810,6 +1832,8 @@ enum Way {
     Cash,
     Card,
     Transfer,
+    /// All of it on the customer's account.
+    Credit,
 }
 
 fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + 'static) -> View {
@@ -1825,6 +1849,8 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
     let due = cart_of(&items, sale_discount, c)
         .totals()
         .map_or(0, |x| x.total.minor());
+    let customer = t.customer.get_untracked();
+    let has_customer = customer.is_some();
     let way = signal(Way::Cash);
     let given = signal(Money::from_minor(due, c).to_plain_string());
     let error = signal(String::new());
@@ -1860,6 +1886,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                 Way::Cash => "cash",
                 Way::Card => "card",
                 Way::Transfer => "transfer",
+                Way::Credit => "credit",
             };
             let input = SaleInput {
                 register_id: register.clone(),
@@ -1887,6 +1914,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                 discount_bps: (sale_discount.bps > 0).then_some(sale_discount.bps),
                 discount_minor: (sale_discount.minor > 0).then_some(sale_discount.minor),
                 document_id: t.document.get_untracked().map(|d| d.0),
+                customer_id: t.customer.get_untracked().map(|c| c.id),
                 ..Default::default()
             };
             busy.set(true);
@@ -1976,15 +2004,19 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                 .p(px(12.0))
                 .rounded(px(radius::md()))
                 .bg(move || {
-                    if short.get() > 0 {
+                    if short.get() > 0 && !has_customer {
                         Tone::DangerSoft.color()
+                    } else if short.get() > 0 {
+                        Tone::WarningSoft.color()
                     } else {
                         Tone::SuccessSoft.color()
                     }
                 })
                 .child(view().flex_1().child(label_line(
                     move || {
-                        st.tn(if short.get() > 0 {
+                        st.tn(if short.get() > 0 && has_customer {
+                            "pos.on_account"
+                        } else if short.get() > 0 {
                             "pos.missing"
                         } else {
                             "pos.change"
@@ -2008,7 +2040,9 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                     ty::H2,
                     FontWeight::BOLD,
                     move || {
-                        if short.get() > 0 {
+                        if short.get() > 0 && has_customer {
+                            Tone::Warning
+                        } else if short.get() > 0 {
                             Tone::Danger
                         } else {
                             Tone::Success
@@ -2053,18 +2087,76 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
         .child(labelled(
             st.t("pos.method"),
             segmented(
-                vec![
-                    (
-                        Way::Cash,
-                        Box::new(st.t("pos.method.cash")) as Box<dyn Fn() -> String>,
-                    ),
-                    (Way::Card, Box::new(st.t("pos.method.card"))),
-                    (Way::Transfer, Box::new(st.t("pos.method.transfer"))),
-                ],
+                {
+                    let mut ways = vec![
+                        (
+                            Way::Cash,
+                            Box::new(st.t("pos.method.cash")) as Box<dyn Fn() -> String>,
+                        ),
+                        (Way::Card, Box::new(st.t("pos.method.card"))),
+                        (Way::Transfer, Box::new(st.t("pos.method.transfer"))),
+                    ];
+                    if has_customer {
+                        ways.push((Way::Credit, Box::new(st.t("pos.method.credit"))));
+                    }
+                    ways
+                },
                 way,
             ),
             None,
         ))
+        .child(match customer {
+            Some(cu) => {
+                let after = cu.balance_minor;
+                let limit = cu.credit_limit_minor;
+                let name = cu.name.clone();
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(icon(Icon::User, 16.0, || Tone::Muted))
+                    .child(label_line(
+                        move || name.clone(),
+                        ty::SM,
+                        FontWeight::SEMIBOLD,
+                        Tone::Ink,
+                    ))
+                    .child(view().flex_1())
+                    .child(label_line(
+                        st.t("pos.customer.owes"),
+                        ty::XS,
+                        FontWeight::NORMAL,
+                        Tone::Muted,
+                    ))
+                    .child(figure(
+                        move || {
+                            let more = match way.get() {
+                                Way::Credit => due,
+                                Way::Cash => short.get(),
+                                _ => 0,
+                            };
+                            money(st, after + more)
+                        },
+                        ty::SM,
+                        FontWeight::BOLD,
+                        move || {
+                            let more = match way.get() {
+                                Way::Credit => due,
+                                Way::Cash => short.get(),
+                                _ => 0,
+                            };
+                            if after + more > limit {
+                                Tone::Danger
+                            } else {
+                                Tone::Ink
+                            }
+                        },
+                    ))
+                    .into_element()
+            }
+            None => view().into_element(),
+        })
         .child(cash_part.style_when(move || way.get() != Way::Cash, |s| s.hidden()))
         .child(error_line(error));
     let footer = view()
@@ -3035,6 +3127,238 @@ fn discount_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) ->
         st,
         st.t("pos.discount.title"),
         st.t("pos.discount.help"),
+        body,
+        footer,
+        close,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The customer of the sale (M9.3)
+
+/// Who buys: a counter customer by default; tapped, the customer picker.
+fn customer_chip(st: AppState, t: Till, in_sheet: bool) -> View {
+    view()
+        .test_id(if in_sheet {
+            "sheet-customer"
+        } else {
+            "pos-customer"
+        })
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(16.0))
+        .py(px(8.0))
+        .border_t_1()
+        .border_color(Tone::Border.color())
+        .cursor_pointer()
+        .hover(|s| s.bg(Tone::Hover.color()))
+        .on_press(move || {
+            t.cart_open.set(false);
+            t.customer_open.set(true);
+        })
+        .child(icon(Icon::User, 18.0, move || {
+            if t.customer.get().is_some() {
+                Tone::Primary
+            } else {
+                Tone::Faint
+            }
+        }))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(label_line(
+                    move || {
+                        t.customer
+                            .get()
+                            .map_or_else(|| st.tn("pos.customer.counter"), |c| c.name)
+                    },
+                    ty::SM,
+                    FontWeight::SEMIBOLD,
+                    Tone::Ink,
+                ))
+                .child(dynamic(move || match t.customer.get() {
+                    Some(c) => view()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(label_line(
+                            st.t("pos.customer.owes"),
+                            ty::XS,
+                            FontWeight::NORMAL,
+                            Tone::Muted,
+                        ))
+                        .child(figure(
+                            move || money(st, c.balance_minor),
+                            ty::XS,
+                            FontWeight::MEDIUM,
+                            move || {
+                                if c.over_limit() {
+                                    Tone::Danger
+                                } else {
+                                    Tone::Body
+                                }
+                            },
+                        ))
+                        .into_element(),
+                    None => label_line(
+                        st.t("pos.customer.choose"),
+                        ty::XS,
+                        FontWeight::NORMAL,
+                        Tone::Muted,
+                    )
+                    .into_element(),
+                })),
+        )
+        .child(when(
+            move || t.customer.get().is_some(),
+            move || {
+                icon_button(
+                    || Icon::Close,
+                    st.t("pos.customer.remove"),
+                    Variant::Ghost,
+                    move || t.customer.set(None),
+                )
+                .test_id("pos-customer-remove")
+                .into_element()
+            },
+        ))
+}
+
+/// Finds the customer by name, code, phone or city.
+fn customer_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> View {
+    let text = signal(String::new());
+    let found = resource(
+        move || Some(text.get()),
+        move |q, _| {
+            let db = st.db();
+            async move {
+                db.call(move |s| {
+                    list_customers(
+                        s,
+                        &CustomerQuery {
+                            search: q,
+                            limit: 8,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .await
+            }
+        },
+    );
+    let list = {
+        let close = close.clone();
+        dynamic(move || {
+            let rows = found
+                .with(|p: Option<&nb_store::usecases::customers::CustomerPage>| {
+                    p.map(|p| p.rows.clone())
+                })
+                .unwrap_or_default();
+            if rows.is_empty() {
+                return label(
+                    st.t("pos.customer.none"),
+                    ty::SM,
+                    FontWeight::NORMAL,
+                    Tone::Muted,
+                )
+                .into_element();
+            }
+            let mut v = view().gap(px(6.0));
+            for (i, c) in rows.into_iter().enumerate() {
+                let close = close.clone();
+                let detail = [c.code.clone(), c.phone.clone(), c.city.clone()]
+                    .into_iter()
+                    .filter(|x| !x.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let (name, balance, blocked, over) = (
+                    c.name.clone(),
+                    c.balance_minor,
+                    c.status == "blocked",
+                    c.over_limit(),
+                );
+                let mut tail = view().flex_row().items_center().gap(px(8.0));
+                if blocked {
+                    tail = tail.child(badge(Status::Danger, None, st.t("customers.blocked")));
+                }
+                if balance != 0 {
+                    tail = tail.child(figure(
+                        move || money(st, balance),
+                        ty::SM,
+                        FontWeight::SEMIBOLD,
+                        move || if over { Tone::Danger } else { Tone::Ink },
+                    ));
+                }
+                v = v.child(
+                    view()
+                        .test_id(&format!("cust-pick-{i}"))
+                        .flex_row()
+                        .items_center()
+                        .gap(px(10.0))
+                        .p(px(10.0))
+                        .rounded(px(radius::md()))
+                        .border_1()
+                        .border_color(Tone::Border.color())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(Tone::Hover.color()))
+                        .on_press(move || {
+                            t.customer.set(Some(c.clone()));
+                            close();
+                        })
+                        .child(icon(Icon::User, 18.0, || Tone::Faint))
+                        .child(
+                            view()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .child(label_line(
+                                    move || name.clone(),
+                                    ty::SM,
+                                    FontWeight::SEMIBOLD,
+                                    Tone::Ink,
+                                ))
+                                .child(label_line(
+                                    move || detail.clone(),
+                                    ty::XS,
+                                    FontWeight::NORMAL,
+                                    Tone::Muted,
+                                )),
+                        )
+                        .child(tail),
+                );
+            }
+            v.into_element()
+        })
+    };
+    let body = view()
+        .gap(px(12.0))
+        .child(crate::ui::form::search_field(
+            text,
+            st.t("pos.customer.search"),
+            "cust-search",
+        ))
+        .child(list);
+    let footer = view().child(
+        button(
+            Variant::Secondary,
+            Size::Md,
+            None,
+            st.t("pos.customer.counter"),
+            {
+                let close = close.clone();
+                move || {
+                    t.customer.set(None);
+                    close();
+                }
+            },
+        )
+        .test_id("cust-counter"),
+    );
+    dialog_frame(
+        st,
+        st.t("pos.customer.title"),
+        st.t("pos.customer.help"),
         body,
         footer,
         close,

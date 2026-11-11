@@ -3,6 +3,7 @@
 pub mod accounting;
 pub mod catalog;
 pub mod common;
+pub mod customers;
 pub mod design;
 pub mod forms;
 pub mod home;

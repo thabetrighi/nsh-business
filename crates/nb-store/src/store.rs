@@ -51,6 +51,9 @@ pub struct Health {
     pub stock_drift: usize,
     /// The first audit row whose hash does not follow.
     pub audit_broken_at: Option<i64>,
+    /// Customers whose balance differs from their receivable lines.
+    #[serde(default)]
+    pub customer_drift: usize,
 }
 
 impl Health {
@@ -60,6 +63,7 @@ impl Health {
             && self.unbalanced == 0
             && self.stock_drift == 0
             && self.audit_broken_at.is_none()
+            && self.customer_drift == 0
     }
 }
 
@@ -184,12 +188,14 @@ impl Store {
             None => 0,
         };
         let audit_broken_at = self.verify_audit_chain()?;
+        let customer_drift = crate::usecases::customers::customer_drift(&self.conn)?.len();
         Ok(Health {
             integrity,
             foreign_keys: usize::try_from(foreign_keys).unwrap_or(usize::MAX),
             unbalanced,
             stock_drift,
             audit_broken_at,
+            customer_drift,
         })
     }
 

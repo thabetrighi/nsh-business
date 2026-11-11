@@ -589,7 +589,12 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
         if totals.lines.iter().any(|l| l.below_min) {
             w.require_approved(Permission::SalesBelowMinPrice, &at_till, approval)?;
         }
-        let paid = settle(totals.total, &given, input.customer_id.is_some())?;
+        let customer = input.customer_id.as_deref().filter(|c| !c.is_empty());
+        let paid = settle(totals.total, &given, customer.is_some())?;
+        // The customer must exist; credit past its limit needs a supervisor.
+        if let Some(c) = customer {
+            crate::usecases::customers::check_credit(w, c, paid.credit.minor(), &at_till, approval)?;
+        }
 
         let number = w.next_number(DocKind::Invoice, &branch.id, &branch.code)?;
         let id = nb_core::uuid::Uuid::now_v7().to_string();
@@ -645,7 +650,7 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'inclusive', ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             params![
                 id, w.org()?.to_string(), branch.id, warehouse.id, register.to_string(), shift, number,
-                input.customer_id, totals.gross_before.minor(), totals.discounts.minor(), totals.net.minor(),
+                customer, totals.gross_before.minor(), totals.discounts.minor(), totals.net.minor(),
                 totals.tax.minor(), totals.total.minor(), paid.cash.minor(), paid.card.minor(), paid.transfer.minor(),
                 paid.credit.minor(), paid.change.minor(), cost.minor(), input.note.trim(), w.meta().id.to_string(),
                 w.now(), w.actor_text(), w.device().id.to_string(), input.document_id
@@ -682,7 +687,7 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
                 params![nb_core::uuid::Uuid::now_v7().to_string(), w.org()?.to_string(), id, shift, method, amount.minor(), account, w.now(), w.device().id.to_string()],
             )?;
         }
-        post_operations_at(
+        crate::usecases::accounting::post_operations_for(
             w,
             &branch,
             offset,
@@ -702,6 +707,7 @@ pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Resul
             &number,
             "sale",
             Some(&till_account),
+            customer,
         )?;
         let out = SaleResult {
             id: id.clone(),

@@ -51,6 +51,74 @@ const NAMES: [(&str, &str, usize, &str, u32); 12] = [
 ];
 const BRANDS: [&str; 6] = ["Soummam", "Cevital", "Ifri", "Elio", "Hamoud", "Bimo"];
 
+/// (Arabic name, French name, kind, city, Arabic city, credit limit in centimes).
+const CUSTOMERS: [(&str, &str, &str, &str, &str, i64); 8] = [
+    (
+        "مخبزة الأمل",
+        "Boulangerie El Amel",
+        "company",
+        "El Oued",
+        "الوادي",
+        5_000_000,
+    ),
+    (
+        "كريم بوزيد",
+        "Karim Bouzid",
+        "person",
+        "Guemar",
+        "قمار",
+        2_000_000,
+    ),
+    (
+        "مطعم الصحراء",
+        "Restaurant Sahara",
+        "company",
+        "El Oued",
+        "الوادي",
+        10_000_000,
+    ),
+    (
+        "نادية مرابط",
+        "Nadia Merabet",
+        "person",
+        "Debila",
+        "الدبيلة",
+        1_000_000,
+    ),
+    (
+        "سمير حداد",
+        "Samir Haddad",
+        "person",
+        "Kouinine",
+        "كوينين",
+        0,
+    ),
+    (
+        "محل الوفاء",
+        "Magasin El Wafa",
+        "company",
+        "Robbah",
+        "الرباح",
+        3_000_000,
+    ),
+    (
+        "فاطمة الزهراء بن علي",
+        "Fatima Zohra Benali",
+        "person",
+        "El Oued",
+        "الوادي",
+        0,
+    ),
+    (
+        "مقهى النخيل",
+        "Café Ennakhil",
+        "company",
+        "Bayadha",
+        "البياضة",
+        1_500_000,
+    ),
+];
+
 /// Writes `n` demo products (codes `P-01000`…) with their opening stock.
 pub fn seed(store: &mut Store, setup: &SetupResult, lang: DemoLang, n: usize) -> Result<u32> {
     let currency = store
@@ -145,9 +213,35 @@ pub fn seed(store: &mut Store, setup: &SetupResult, lang: DemoLang, n: usize) ->
                 memo: &number,
                 source: "stock.opening",
                 reverses: None,
+                party: None,
             };
             ledger::post(w, org_id, header, &entry)?;
         }
+        // Customers of a neighbourhood shop: a few with credit.
+        for (i, (ar, fr, kind, city, city_ar, limit)) in CUSTOMERS.iter().enumerate() {
+            w.tx().execute(
+                "INSERT INTO customers (id, org_id, code, kind, name, city, phone, credit_limit_minor, payment_days,
+                        created_at, updated_at, device_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)",
+                rusqlite::params![
+                    nb_core::uuid::Uuid::now_v7().to_string(),
+                    org_id.to_string(),
+                    format!("C-{:05}", i + 1),
+                    kind,
+                    if lang == DemoLang::Ar { ar } else { fr },
+                    if lang == DemoLang::Ar { city_ar } else { city },
+                    format!("06{:02} {:02} {:02} {:02}", 61 + i, 10 + i * 3, 20 + i, 40 + i * 2),
+                    limit,
+                    if *limit > 0 { 30 } else { 0 },
+                    w.now(),
+                    w.device().id.to_string()
+                ],
+            )?;
+        }
+        w.tx().execute(
+            "INSERT INTO customer_counters (org_id, last) VALUES (?1, ?2)",
+            rusqlite::params![org_id.to_string(), i64::try_from(CUSTOMERS.len()).unwrap_or(0)],
+        )?;
         w.event("demo.seeded", "organization", &org_id.to_string(), &n)?;
         w.audit("seed", "organization", &org_id.to_string(), &n)?;
         Ok(u32::try_from(n).unwrap_or(u32::MAX))

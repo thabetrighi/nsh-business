@@ -54,6 +54,21 @@ pub(crate) fn post_operations_at(
     source: &str,
     till: Option<&str>,
 ) -> Result<Option<String>> {
+    post_operations_for(w, branch, offset, ops, memo, source, till, None)
+}
+
+/// Like [`post_operations_at`], the receivable lines being `party`'s debt.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn post_operations_for(
+    w: &mut Writer<'_>,
+    branch: &Branch,
+    offset: i32,
+    ops: &[Operation],
+    memo: &str,
+    source: &str,
+    till: Option<&str>,
+    party: Option<&str>,
+) -> Result<Option<String>> {
     let org = w.org()?;
     let mut map = ledger::account_map(w.tx(), org)?;
     if let Some(code) = till {
@@ -73,6 +88,7 @@ pub(crate) fn post_operations_at(
             memo,
             source,
             reverses: None,
+            party,
         },
         &entry,
     )?;

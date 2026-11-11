@@ -72,6 +72,7 @@ pub fn post_entry(
                 memo: memo.trim(),
                 source: "manual",
                 reverses: None,
+                party: None,
             },
             &entry,
         )?;
@@ -102,6 +103,8 @@ pub fn reverse_entry(
             return Err(RuleError::new("ledger.already_reversed").into());
         }
         let original = ledger::load(w.tx(), entry_id, currency)?;
+        // The reversal moves the same customer's debt back.
+        let party = ledger::party_of(w.tx(), entry_id)?;
         let org = w.org()?;
         let number = w.next_number(DocKind::Journal, &branch_id, &branch_code)?;
         let date = iso_date(w.now(), offset);
@@ -111,6 +114,7 @@ pub fn reverse_entry(
             memo: reason.trim(),
             source: "reversal",
             reverses: Some(entry_id),
+            party: party.as_deref(),
         };
         let rid = ledger::post(w, org, header, &original.reversal())?;
         let out = PostedEntry {

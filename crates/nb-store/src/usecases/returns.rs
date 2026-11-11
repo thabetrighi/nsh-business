@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::repo::{org, parse_id, stock};
 use crate::uow::OpMeta;
-use crate::usecases::accounting::post_operations_at;
 use crate::usecases::sales::{the_org, till};
 use crate::{Error, Result, Store};
 
@@ -305,7 +304,7 @@ pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Resul
             "credit" => Settlement { cash: zero, bank: zero, credit: m(total) },
             _ => Settlement { cash: zero, bank: m(total), credit: zero },
         };
-        post_operations_at(
+        crate::usecases::accounting::post_operations_for(
             w,
             &branch,
             offset,
@@ -316,6 +315,7 @@ pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Resul
             &format!("{number} — {}", sale.number),
             "sale.return",
             Some(&till_account),
+            sale.customer_id.as_deref(),
         )?;
         let out = ReturnResult {
             id: id.clone(),

@@ -27,7 +27,7 @@ test("navigates between sections", async () => {
   const app = await open(".", { locale: "fr-DZ" });
   await app.waitFor("text:Ventes brutes");
   await app.press("text:Clients");
-  await app.waitFor("text:Cet écran est en construction et arrive dans les prochaines étapes.");
+  await app.waitFor("text:Qui achète, ce qu'ils doivent, et le crédit accordé.");
   await app.press("text:Accueil");
   await app.waitFor("text:Ventes brutes");
 });
@@ -527,4 +527,44 @@ test("a quote becomes an order, invoiced at the till with its discount", async (
   await app.waitFor("text:Transformé en commande");
   // The database was checked at start and found sound.
   expect(app.texts()).not.toContain("Contrôle des données en échec");
+});
+
+test("a customer buys on account, and owes it", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Clients et crédit");
+  await app.press("id:nav-customers");
+  await app.waitFor("id:customer-new");
+  await app.waitFor("text:Boulangerie El Amel");
+  await app.press("id:customer-new");
+  await app.type("id:customer-name", "Épicerie Test");
+  await app.type("id:customer-phone", "0770 11 22 33");
+  await app.type("id:customer-limit", "5000");
+  await app.press("id:customer-save");
+  await seen(/^Épicerie Test enregistré\.$/);
+  // At the till: the customer pays part, the rest goes on the account.
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-customer");
+  await app.type("id:cust-search", "0770");
+  await app.waitFor("id:cust-pick-0");
+  await app.press("id:cust-pick-0");
+  await app.waitFor("text:Épicerie Test");
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-confirm");
+  await app.clear("id:pay-given");
+  await app.type("id:pay-given", "100");
+  await app.waitFor("text:Sur compte");
+  await app.press("id:pay-confirm");
+  await seen(/^Vente FV-01-\d\d-A\d+ enregistrée/);
+  // The customer now owes the rest.
+  await app.press("id:nav-customers");
+  await app.press("text:Débiteurs");
+  await app.waitFor("text:Épicerie Test");
+  await app.waitUntil(() => app.texts().filter((t) => t === "Épicerie Test").length === 1 && app.texts().includes("Doit"));
 });

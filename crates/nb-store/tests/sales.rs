@@ -175,10 +175,25 @@ fn a_sale_writes_everything_at_once_and_only_once() -> R {
         ["sale.underpaid"]
     );
     let mut on_account = sale(&setup, &reg, vec![(oil, "1")], vec![("cash", 1_000)]);
-    on_account.customer_id = Some("client-1".into());
+    let client = nb_store::usecases::customers::save_customer(
+        &mut s,
+        meta(&setup, "customer"),
+        nb_store::usecases::customers::CustomerInput {
+            kind: "company".into(),
+            name: "Boulangerie El Amel".into(),
+            credit_limit_minor: 10_000,
+            status: "active".into(),
+            ..Default::default()
+        },
+    )?;
+    on_account.customer_id = Some(client.id.clone());
     let r = complete_sale(&mut s, meta(&setup, "sale"), on_account)?;
     assert_eq!((r.cash_minor, r.credit_minor), (1_000, 2_570));
     assert_eq!(balance(&s, "411"), 2_570);
+    assert_eq!(
+        nb_store::usecases::customers::get_customer(&s, &client.id)?.balance_minor,
+        2_570
+    );
     assert_eq!(balance(&s, "5121"), 3_570);
     // Not more than in stock, for a cashier (the owner may go below zero).
     let cashier = create_user(

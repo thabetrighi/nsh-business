@@ -118,6 +118,8 @@ pub struct Header<'a> {
     /// What produced it (`manual`, `stock.adjust`, `sale`…).
     pub source: &'a str,
     pub reverses: Option<EntryId>,
+    /// The customer whose debt the receivable lines move (M9.2).
+    pub party: Option<&'a str>,
 }
 
 /// Posts a balanced entry (its accounts must exist).
@@ -128,6 +130,7 @@ pub fn post(w: &Writer<'_>, org: OrganizationId, h: Header<'_>, entry: &Entry) -
         memo,
         source,
         reverses,
+        party,
     } = h;
     for l in entry.lines() {
         let code = match account(w.tx(), org, &l.account)? {
@@ -168,11 +171,42 @@ pub fn post(w: &Writer<'_>, org: OrganizationId, h: Header<'_>, entry: &Entry) -
             w.device().id.to_string()
         ],
     )?;
+    // The receivable lines are the customer's: its sub-ledger.
+    let receivable = match party {
+        Some(_) => account_map(w.tx(), org)?
+            .get(Role::Receivable)
+            .ok()
+            .map(str::to_owned),
+        None => None,
+    };
+    let mut owed = 0i64;
     for (i, l) in entry.lines().iter().enumerate() {
+        let tagged = receivable.as_deref() == Some(l.account.as_str());
+        if tagged {
+            owed += l.debit.minor() - l.credit.minor();
+        }
         w.tx().execute(
-            "INSERT INTO journal_lines (entry_id, position, account_code, debit_minor, credit_minor, memo) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id.to_string(), i64::try_from(i).unwrap_or(i64::MAX), l.account, l.debit.minor(), l.credit.minor(), l.memo],
+            "INSERT INTO journal_lines (entry_id, position, account_code, debit_minor, credit_minor, memo, party_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id.to_string(),
+                i64::try_from(i).unwrap_or(i64::MAX),
+                l.account,
+                l.debit.minor(),
+                l.credit.minor(),
+                l.memo,
+                party.filter(|_| tagged)
+            ],
         )?;
+    }
+    if let (Some(p), true) = (party, owed != 0) {
+        let n = w.tx().execute(
+            "UPDATE customers SET balance_minor = balance_minor + ?2 WHERE id = ?1",
+            params![p, owed],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound("customer"));
+        }
     }
     Ok(id)
 }
@@ -196,6 +230,15 @@ pub fn load(conn: &Connection, id: EntryId, currency: Currency) -> Result<Entry>
         return Err(Error::NotFound("journal entry"));
     }
     Ok(Entry::new(lines)?)
+}
+
+/// The customer an entry's receivable lines belong to, if any.
+pub fn party_of(conn: &Connection, id: EntryId) -> Result<Option<String>> {
+    Ok(conn.query_row(
+        "SELECT MAX(party_id) FROM journal_lines WHERE entry_id = ?1",
+        [id.to_string()],
+        |r| r.get(0),
+    )?)
 }
 
 pub fn is_reversed(conn: &Connection, id: EntryId) -> Result<bool> {
