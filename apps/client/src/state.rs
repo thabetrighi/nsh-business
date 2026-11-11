@@ -209,6 +209,9 @@ pub struct AppState {
     pub session: Signal<Option<crate::db::Session>>,
     /// Why the database could not open, if it could not.
     pub db_error: Signal<Option<String>>,
+    /// The database checked at start found something wrong (after a crash
+    /// or a disk fault): shown until it is looked at.
+    pub unsound: Signal<bool>,
     /// Bumped after every write, so lists load again.
     pub data_rev: Signal<u64>,
     /// The person using the app; `None` while the lock screen shows.
@@ -245,6 +248,7 @@ impl AppState {
             db: nsh_core::prelude::stored(None),
             session: signal(None),
             db_error: signal(None),
+            unsound: signal(false),
             data_rev: signal(0),
             user: signal(None),
             needs_sign_in: signal(false),
@@ -323,6 +327,17 @@ impl AppState {
                     self.session.set(Some(s));
                     if let Some(me) = me {
                         self.signed_in(me);
+                    }
+                    // Then checked end to end (after a crash, a disk fault),
+                    // once the shop can already work: it is told, nothing
+                    // is changed.
+                    match db.call(|store| store.health()).await {
+                        Ok(h) if !h.is_sound() => {
+                            log::error!("database check: {h:?}");
+                            self.unsound.set(true);
+                        }
+                        Ok(_) => {}
+                        Err(e) => log::error!("database check: {}", e.message),
                     }
                 }
                 Err(e) => {

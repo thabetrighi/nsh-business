@@ -1180,3 +1180,10 @@ error.doc.not_draft = المسودة وحدها قابلة للتعديل.
 error.doc.wrong_state = لم يعد هذا المستند يسمح بذلك.
 error.invalid_date = اكتب التاريخ بالصيغة YYYY-MM-DD.
 doc.date_hint = YYYY-MM-DD
+
+# Storage (M8.14)
+storage.unsound = فشل فحص البيانات
+error.storage.full = القرص ممتلئ: حرّر بعض المساحة ثم أعد المحاولة.
+error.storage.busy = قاعدة البيانات مشغولة: أعد المحاولة بعد لحظة.
+error.storage.corrupt = ملف البيانات تالف: استعد نسخة احتياطية.
+error.storage.io = تعذّرت الكتابة في ملف البيانات: تحقق من القرص وصلاحياته.

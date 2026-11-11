@@ -1180,3 +1180,10 @@ error.doc.not_draft = Only a draft can be changed.
 error.doc.wrong_state = This document can no longer do that.
 error.invalid_date = Write the date as YYYY-MM-DD.
 doc.date_hint = YYYY-MM-DD
+
+# Storage (M8.14)
+storage.unsound = Data check failed
+error.storage.full = The disk is full: free some space, then try again.
+error.storage.busy = The database is busy: try again in a moment.
+error.storage.corrupt = The data file is damaged: restore a backup.
+error.storage.io = The data file cannot be written: check the disk and its permissions.

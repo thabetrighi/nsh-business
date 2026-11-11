@@ -69,9 +69,25 @@ impl Error {
                     "access.denied"
                 },
             )],
+            Error::Sql(e) => vec![(None, storage_code(e))],
             _ => vec![(None, "internal")],
         }
     }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// What the person can do about a storage failure: free space, wait for
+/// another program, or restore a backup.
+fn storage_code(e: &rusqlite::Error) -> &'static str {
+    use rusqlite::ErrorCode as C;
+    match e.sqlite_error_code() {
+        Some(C::DiskFull) => "storage.full",
+        Some(C::DatabaseBusy | C::DatabaseLocked) => "storage.busy",
+        Some(C::DatabaseCorrupt | C::NotADatabase) => "storage.corrupt",
+        Some(C::ReadOnly | C::SystemIoFailure | C::CannotOpen | C::PermissionDenied) => {
+            "storage.io"
+        }
+        _ => "internal",
+    }
+}

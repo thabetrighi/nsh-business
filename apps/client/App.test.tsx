@@ -525,4 +525,6 @@ test("a quote becomes an order, invoiced at the till with its discount", async (
   await app.waitFor("id:doc-0");
   await app.waitFor("text:Facturé");
   await app.waitFor("text:Transformé en commande");
+  // The database was checked at start and found sound.
+  expect(app.texts()).not.toContain("Contrôle des données en échec");
 });

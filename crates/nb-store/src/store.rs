@@ -38,6 +38,31 @@ pub struct Device {
     pub prefix: String,
 }
 
+/// What [`Store::health`] found; all empty or zero when sound.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Health {
+    /// SQLite's own findings on the file.
+    pub integrity: Vec<String>,
+    /// Rows pointing at nothing.
+    pub foreign_keys: usize,
+    /// Entries whose debits and credits differ.
+    pub unbalanced: usize,
+    /// Stock balances that differ from their replayed movements.
+    pub stock_drift: usize,
+    /// The first audit row whose hash does not follow.
+    pub audit_broken_at: Option<i64>,
+}
+
+impl Health {
+    pub fn is_sound(&self) -> bool {
+        self.integrity.is_empty()
+            && self.foreign_keys == 0
+            && self.unbalanced == 0
+            && self.stock_drift == 0
+            && self.audit_broken_at.is_none()
+    }
+}
+
 /// The local database. One per organization file; used from one thread.
 pub struct Store {
     pub(crate) conn: Connection,
@@ -136,6 +161,38 @@ impl Store {
 
     /// The raw connection, for tests and maintenance tools only.
     #[doc(hidden)]
+    /// The database checked from end to end (at start, after a crash, on
+    /// demand): the file's own pages and keys, every entry balanced, the
+    /// stock equal to its replayed movements, and the audit chain whole.
+    pub fn health(&self) -> Result<Health> {
+        let integrity: Vec<String> = {
+            let mut s = self.conn.prepare("PRAGMA integrity_check")?;
+            s.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|m| m != "ok")
+                .collect()
+        };
+        let foreign_keys: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                    r.get(0)
+                })?;
+        let unbalanced = crate::repo::ledger::unbalanced_entries(&self.conn)?.len();
+        let stock_drift = match crate::repo::org::the_org(&self.conn)? {
+            Some(o) => crate::repo::stock::rebuild_balances(&self.conn, o.currency()?)?.len(),
+            None => 0,
+        };
+        let audit_broken_at = self.verify_audit_chain()?;
+        Ok(Health {
+            integrity,
+            foreign_keys: usize::try_from(foreign_keys).unwrap_or(usize::MAX),
+            unbalanced,
+            stock_drift,
+            audit_broken_at,
+        })
+    }
+
     pub fn connection(&self) -> &Connection {
         &self.conn
     }

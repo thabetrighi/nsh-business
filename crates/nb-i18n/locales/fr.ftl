@@ -1180,3 +1180,10 @@ error.doc.not_draft = Seul un brouillon se modifie.
 error.doc.wrong_state = Ce document ne le permet plus.
 error.invalid_date = Écrivez la date sous la forme AAAA-MM-JJ.
 doc.date_hint = AAAA-MM-JJ
+
+# Storage (M8.14)
+storage.unsound = Contrôle des données en échec
+error.storage.full = Le disque est plein : libérez de la place, puis réessayez.
+error.storage.busy = La base est occupée : réessayez dans un instant.
+error.storage.corrupt = Le fichier de données est endommagé : restaurez une sauvegarde.
+error.storage.io = Le fichier de données ne peut être écrit : vérifiez le disque et ses droits.

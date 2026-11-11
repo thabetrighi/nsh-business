@@ -18,5 +18,5 @@ pub mod uow;
 pub mod usecases;
 
 pub use error::{Error, Result};
-pub use store::{Device, Store, StoreOptions};
+pub use store::{Device, Health, Store, StoreOptions};
 pub use uow::{OpMeta, Reader, Writer};

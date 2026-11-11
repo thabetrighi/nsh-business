@@ -483,7 +483,18 @@ fn search_box(st: AppState) -> View {
 /// Local-first made visible: selling works offline, and pending work is counted.
 fn sync_status(st: AppState) -> View {
     view()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
         .pe(px(6.0))
+        .child(when(
+            move || st.unsound.get(),
+            move || {
+                badge(Status::Danger, Some(Icon::Alert), st.t("storage.unsound"))
+                    .test_id("storage-unsound")
+                    .into_element()
+            },
+        ))
         .label({
             let f = st.t("sync.offline");
             move || SharedString::from(f())
