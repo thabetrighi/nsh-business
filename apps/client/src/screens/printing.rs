@@ -600,6 +600,255 @@ pub fn print_dialog(st: AppState, number: String, close: impl Fn() + Clone + 'st
     )
 }
 
+// ------------------------------------------------- vouchers, schedules
+
+/// Draws a document on a paper (made off the interface's thread).
+pub type Maker = std::sync::Arc<dyn Fn(Paper) -> Doc + Send + Sync>;
+
+async fn shop_and_docs(st: AppState) -> Result<(PrintShop, DocSettings), String> {
+    st.db()
+        .call(|s| Ok((print_shop(s)?, document_settings(s)?)))
+        .await
+        .map_err(|e| error_text(st, e.codes.first().map_or("internal", |c| c.1)))
+}
+
+fn local_date(iso: &str) -> (i32, u32, u32) {
+    let mut it = iso.split('-').map(|p| p.parse::<u32>().unwrap_or(0));
+    let y = it.next().unwrap_or(0);
+    (
+        i32::try_from(y).unwrap_or(0),
+        it.next().unwrap_or(1),
+        it.next().unwrap_or(1),
+    )
+}
+
+/// A customer receipt's voucher.
+pub async fn voucher_maker(st: AppState, number: String) -> Result<Maker, String> {
+    use nb_docs::templates::{Voucher, voucher};
+    let (shop, docs) = shop_and_docs(st).await?;
+    let v = st
+        .db()
+        .call(move |s| nb_store::usecases::printing::print_voucher(s, &number))
+        .await
+        .map_err(|e| error_text(st, e.codes.first().map_or("internal", |c| c.1)))?;
+    let v = Voucher {
+        number: v.number,
+        when: local(v.created_at),
+        cashier: v.cashier,
+        customer: v.customer,
+        currency: currency(st),
+        method: v.method,
+        amount_minor: v.amount_minor,
+        reference: v.reference,
+        note: v.note,
+        invoices: v.invoices,
+        installments: v.installments,
+        unallocated_minor: v.unallocated_minor,
+    };
+    let (sh, o, lang) = (shop_of(&shop, &docs.footer), options(&docs), lang_of(&shop));
+    Ok(std::sync::Arc::new(move |paper| {
+        voucher(&sh, &v, lang, paper, &o)
+    }))
+}
+
+/// An instalment plan's schedule.
+pub async fn schedule_maker(
+    st: AppState,
+    plan: nb_store::usecases::installments::Plan,
+) -> Result<Maker, String> {
+    use nb_docs::templates::{Due, Schedule, schedule};
+    let (shop, docs) = shop_and_docs(st).await?;
+    let cid = plan.customer_id.clone();
+    let ids = st
+        .db()
+        .call(move |s| nb_store::usecases::customers::get_customer(s, &cid))
+        .await
+        .map(|c| {
+            [("NIF", c.nif), ("RC", c.rc)]
+                .into_iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        })
+        .unwrap_or_default();
+    let s = Schedule {
+        number: plan.number.clone(),
+        version: plan.version,
+        when: local(plan.created_at),
+        customer: (plan.customer_name.clone(), ids),
+        currency: currency(st),
+        sale_number: plan.sale_number.clone(),
+        total_minor: plan.total_minor,
+        down_minor: plan.down_minor,
+        financed_minor: plan.financed_minor,
+        dues: plan
+            .installments
+            .iter()
+            .map(|i| Due {
+                seq: i.seq,
+                date: local_date(&i.due_date),
+                amount_minor: i.amount_minor,
+                paid_minor: i.paid_minor,
+                state: i.state.clone(),
+            })
+            .collect(),
+    };
+    let (sh, o, lang) = (shop_of(&shop, &docs.footer), options(&docs), lang_of(&shop));
+    Ok(std::sync::Arc::new(move |paper| {
+        schedule(&sh, &s, lang, paper, &o)
+    }))
+}
+
+/// A document's print dialog: which printer, copies, the preview; print,
+/// or save as PDF. Without a printer: a sheet (A4/A5) or a roll.
+pub fn document_dialog<F, Fut>(
+    st: AppState,
+    title: String,
+    file_name: String,
+    role: Role,
+    load: F,
+    close: impl Fn() + Clone + 'static,
+) -> View
+where
+    F: Fn() -> Fut + 'static,
+    Fut: std::future::Future<Output = Result<Maker, String>> + 'static,
+{
+    let chosen = signal(default_printer(st, role));
+    let busy = signal(false);
+    let printer = move || st.biz.printers.get().get(chosen.get()).cloned();
+    let copies = signal(printer().map_or(1, |p| p.copies).to_string());
+    let sheet = signal(0usize); // a PDF alone: 0 = A4, 1 = A5, 2 = 80 mm
+    let paper = move || match printer().map(|p| p.sheet) {
+        Some(Sheet::Roll { print_mm, .. }) => Paper::roll_mm(print_mm),
+        Some(Sheet::A5) => Paper::A5,
+        Some(Sheet::A4) => Paper::A4,
+        _ => match sheet.get() {
+            1 => Paper::A5,
+            2 => Paper::ROLL80,
+            _ => Paper::A4,
+        },
+    };
+    let made = resource(move || Some(()), move |_, _| load());
+    let picture = resource(
+        move || Some((made.get()?, paper())),
+        move |(m, paper): (Maker, Paper), _| async move {
+            off_thread(move || preview(&m(paper)).map_err(|e| e.0))
+                .await
+                .unwrap_or_else(|| Err(String::new()))
+        },
+    );
+    let shown = dynamic(move || picture_view(st, picture.get(), made.error()));
+    let controls = view()
+        .flex_row()
+        .flex_wrap()
+        .items_end()
+        .gap(px(12.0))
+        .child(
+            view().min_w(px(200.0)).child(labelled(
+                st.t("print.printer_used"),
+                dropdown(
+                    move || printer_choices(st),
+                    chosen,
+                    Some(Icon::Printer),
+                    st.t("print.printer_used"),
+                    "doc-printer",
+                )
+                .w_full(),
+                None,
+            )),
+        )
+        .child(view().w(px(90.0)).child(field(
+            st.t("print.copies"),
+            copies,
+            || "1".to_owned(),
+            String::new,
+            KeyboardType::Number,
+            "doc-copies",
+        )))
+        .child(when(
+            move || printer().is_none(),
+            move || {
+                let sheets: Vec<(usize, Box<dyn Fn() -> String>)> = vec![
+                    (0, Box::new(|| "A4".to_owned())),
+                    (1, Box::new(|| "A5".to_owned())),
+                    (2, Box::new(|| "80 mm".to_owned())),
+                ];
+                labelled(
+                    st.t("print.paper"),
+                    segmented(sheets, sheet).test_id("doc-sheet"),
+                    None,
+                )
+            },
+        ));
+    let on_pdf = move || {
+        let Some(m) = made.get() else {
+            return;
+        };
+        let paper = paper();
+        save_pdf(st, file_name.clone(), move || m(paper), busy);
+    };
+    let print_now = {
+        let close = close.clone();
+        move || {
+            let (Some(m), Some(pr)) = (made.get(), printer()) else {
+                return;
+            };
+            if busy.get_untracked() {
+                return;
+            }
+            busy.set(true);
+            let (paper, n) = (paper(), copies_of(&copies.get_untracked()));
+            let close = close.clone();
+            let task = spawn(async move {
+                let r = off_thread(move || print_on(&pr, &m(paper), n, false))
+                    .await
+                    .unwrap_or_else(|| Err(String::new()));
+                busy.set(false);
+                if r.is_ok() {
+                    show_toast(st, st.tn("print.sent"));
+                    close();
+                } else {
+                    show_toast(st, st.tn("print.failed"));
+                }
+            });
+            drop(task); // runs to completion: tasks end with their owner, not their handle
+        }
+    };
+    let footer = view()
+        .child(
+            button(
+                Variant::Secondary,
+                Size::Md,
+                Some(Icon::FileText),
+                st.t("print.save_pdf"),
+                on_pdf,
+            )
+            .test_id("doc-pdf"),
+        )
+        .child(when(
+            move || printer().is_some(),
+            move || {
+                button(
+                    Variant::Primary,
+                    Size::Md,
+                    Some(Icon::Printer),
+                    st.t("print.print"),
+                    print_now.clone(),
+                )
+                .test_id("doc-send")
+            },
+        ));
+    dialog_frame(
+        st,
+        move || title.clone(),
+        st.t("print.subtitle"),
+        view().gap(px(16.0)).child(controls).child(shown),
+        footer,
+        close,
+    )
+}
+
 // ----------------------------------------------------------------- labels
 
 /// A product as its label shows it.

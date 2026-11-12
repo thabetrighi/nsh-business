@@ -37,6 +37,7 @@ use crate::ui::form::{field, labelled, row_input};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{
     Size, Variant, badge, button, checkbox, figure, icon_button, kbd, label, label_line, segmented,
+    switch,
 };
 use crate::ui::overlay::{dialog_frame, modal, show_toast};
 use crate::ui::popup::dropdown;
@@ -1953,6 +1954,8 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
             .map_or(0, |c| c.value_minor);
     let way = signal(Way::Cash);
     let given = signal(Money::from_minor(due.max(0), c).to_plain_string());
+    // By card or transfer, the older debt may be paid in the same payment.
+    let settle_too = signal(false);
     let error = signal(String::new());
     let busy = signal(false);
     // A supervisor's approval, when the sale needs one (a large discount,
@@ -1983,6 +1986,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
         let g = match (way.get(), given_minor()) {
             (Way::Cash, Some(g)) => g,
             (Way::Credit, _) => 0,
+            _ if settle_too.get() && has_customer => due.max(0) + owed.max(0),
             _ => due.max(0),
         };
         nb_domain::sale::bon_par_bon(due, g, if has_customer { owed } else { 0 })
@@ -2008,7 +2012,9 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                         return;
                     }
                 },
-                _ => due.max(0),
+                Way::Credit => due.max(0),
+                // The old balance too, when asked: it is the settlement.
+                _ => due.max(0) + bon.get_untracked().settle,
             };
             let method = match way.get_untracked() {
                 Way::Cash => "cash",
@@ -2048,7 +2054,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                 document_id: t.document.get_untracked().map(|d| d.0),
                 customer_id: t.customer.get_untracked().map(|c| c.id),
                 approval: approval.get_untracked(),
-                settle_minor: if way.get_untracked() == Way::Cash && has_customer {
+                settle_minor: if way.get_untracked() != Way::Credit && has_customer {
                     bon.get_untracked().settle
                 } else {
                     0
@@ -2380,7 +2386,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                 let paid = move || match way.get() {
                     Way::Cash => given_minor().unwrap_or(0),
                     Way::Credit => 0,
-                    _ => due.max(0),
+                    _ => due.max(0) + bon.get().settle,
                 };
                 view()
                     .gap(px(6.0))
@@ -2461,6 +2467,29 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
             None => view().into_element(),
         })
         .child(cash_part.style_when(move || way.get() != Way::Cash, |s| s.hidden()))
+        .child(when(
+            move || has_customer && owed > 0 && matches!(way.get(), Way::Card | Way::Transfer),
+            move || {
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        switch(settle_too, move || {
+                            tr_args(st.lang(), "pos.settle_too", &[("amount", &money(st, owed))])
+                        })
+                        .test_id("pay-settle-too"),
+                    )
+                    .child(label(
+                        move || {
+                            tr_args(st.lang(), "pos.settle_too", &[("amount", &money(st, owed))])
+                        },
+                        ty::SM,
+                        FontWeight::MEDIUM,
+                        Tone::Ink,
+                    ))
+            },
+        ))
         .child(error_line(error));
     let footer = view()
         .child(button(

@@ -190,8 +190,13 @@ pub fn sales_page(st: AppState, compact: bool) -> View {
                 .map(|m| method_text(st, m))
                 .collect::<Vec<_>>()
                 .join(" · ");
+            let who = r
+                .customer_name
+                .clone()
+                .map(|c| format!(" · {c}"))
+                .unwrap_or_default();
             let detail = format!(
-                "{} · {}",
+                "{}{who} · {}",
                 date_time(st, r.created_at),
                 tr_args(
                     st.lang(),
@@ -206,7 +211,27 @@ pub fn sales_page(st: AppState, compact: bool) -> View {
             if let Some(d) = r.document.clone() {
                 tail = tail.child(badge(Status::Info, Some(Icon::FileText), move || d.clone()));
             }
-            if r.returned_minor > 0 {
+            if let Some(n) = r.edited_into.clone() {
+                tail = tail.child(badge(Status::Warning, Some(Icon::Pencil), move || {
+                    tr_args(st.lang(), "pos.sale.corrected", &[("number", &n)])
+                }));
+            }
+            if let Some(n) = r.replaces.clone() {
+                tail = tail.child(badge(Status::Info, Some(Icon::Pencil), move || {
+                    tr_args(st.lang(), "sales.replaces", &[("number", &n)])
+                }));
+            }
+            if r.credit_minor > 0 {
+                let credit = r.credit_minor;
+                tail = tail.child(badge(Status::Danger, None, move || {
+                    tr_args(
+                        st.lang(),
+                        "pos.sale.on_account",
+                        &[("amount", &money(st, credit))],
+                    )
+                }));
+            }
+            if r.returned_minor > 0 && r.edited_into.is_none() {
                 let back = r.returned_minor;
                 tail = tail.child(badge(Status::Warning, Some(Icon::Undo), move || {
                     tr_args(st.lang(), "sales.returned", &[("amount", &money(st, back))])

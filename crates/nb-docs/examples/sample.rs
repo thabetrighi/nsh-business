@@ -78,6 +78,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             invoice(&shop(), &sale(6), Lang::Ar, Paper::A4, &Options::default()),
         ),
         (
+            "voucher-ar-80",
+            nb_docs::templates::voucher(
+                &shop(),
+                &nb_docs::templates::Voucher {
+                    number: "RC-01-26-A000007".into(),
+                    when: (2026, 11, 12, 10, 5),
+                    cashier: "عدلان".into(),
+                    customer: ("أبو القاسم".into(), "NIF: 000016001234567".into()),
+                    currency: nb_core::Currency::DZD,
+                    method: "cash".into(),
+                    amount_minor: 122_494_358,
+                    reference: String::new(),
+                    note: String::new(),
+                    invoices: vec![("FV-01-26-A000123".into(), 100_000_000)],
+                    installments: vec![("TQ-01-26-000002".into(), 3, 22_494_358)],
+                    unallocated_minor: 0,
+                },
+                Lang::Ar,
+                Paper::ROLL80,
+                &Options::default(),
+            ),
+        ),
+        (
+            "schedule-ar-a4",
+            nb_docs::templates::schedule(
+                &shop(),
+                &nb_docs::templates::Schedule {
+                    number: "TQ-01-26-000002".into(),
+                    version: 1,
+                    when: (2026, 11, 12, 10, 5),
+                    customer: ("أبو القاسم".into(), String::new()),
+                    currency: nb_core::Currency::DZD,
+                    sale_number: "FV-01-26-A000123".into(),
+                    total_minor: 35_700_000,
+                    down_minor: 5_700_000,
+                    financed_minor: 30_000_000,
+                    dues: (1..=6)
+                        .map(|i| nb_docs::templates::Due {
+                            seq: i,
+                            date: (2027, i, 12),
+                            amount_minor: 5_000_000,
+                            paid_minor: if i < 3 { 5_000_000 } else { 0 },
+                            state: if i < 3 {
+                                "paid".into()
+                            } else {
+                                "upcoming".into()
+                            },
+                        })
+                        .collect(),
+                },
+                Lang::Ar,
+                Paper::A4,
+                &Options::default(),
+            ),
+        ),
+        (
             "invoice-fr-a4",
             invoice(&shop(), &sale(6), Lang::Fr, Paper::A4, &Options::default()),
         ),

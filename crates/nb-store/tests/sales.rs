@@ -1060,3 +1060,41 @@ fn document_settings_and_logo_are_kept() -> R {
     );
     Ok(())
 }
+
+/// By card, the old balance is paid in the same payment.
+#[test]
+fn old_debt_paid_by_card_with_a_sale() -> R {
+    use nb_store::usecases::printing::print_sale;
+    let (mut s, setup) = store();
+    let reg = register(&s);
+    let oil = stocked(&mut s, &setup, "Huile", "10", 2_500, 3_570)?;
+    open_shift(&mut s, meta(&setup, "shift.open"), &reg, 0)?;
+    let c = customer(&mut s, &setup, "Abou El Kacem")?;
+    let mut first = sale(&setup, &reg, vec![(oil, "1")], vec![("cash", 1_000)]);
+    first.customer_id = Some(c.clone());
+    complete_sale(&mut s, meta(&setup, "sale"), first)?;
+    let mut today = sale(
+        &setup,
+        &reg,
+        vec![(oil, "1")],
+        vec![("card", 3_570 + 2_570)],
+    );
+    today.customer_id = Some(c.clone());
+    today.settle_minor = 2_570;
+    let r = complete_sale(&mut s, meta(&setup, "sale"), today)?;
+    assert_eq!(
+        (r.card_minor, r.change_minor, r.settled_minor),
+        (3_570, 0, 2_570)
+    );
+    assert_eq!(owes(&s, &c)?, 0);
+    let method: String = s.read(|r| {
+        Ok(r.conn()
+            .query_row("SELECT method FROM receipts", [], |x| x.get(0))?)
+    })?;
+    assert_eq!(method, "card");
+    assert_eq!(
+        print_sale(&s, &r.number)?.payments,
+        vec![("card".to_owned(), 6_140)]
+    );
+    healthy(&s)
+}

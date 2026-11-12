@@ -27,7 +27,8 @@ use crate::state::AppState;
 use crate::ui::form::{field, labelled, search_field};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{
-    Size, Variant, badge, button, checkbox, figure, label, label_line, segmented, switch,
+    Size, Variant, badge, button, checkbox, figure, icon_button, label, label_line, segmented,
+    switch,
 };
 use crate::ui::overlay::{dialog_frame, modal, show_toast};
 use crate::ui::popup::dropdown;
@@ -797,6 +798,8 @@ pub fn customer_card(
     let (planning, planning_open) = opener::<OpenInvoice>();
     let (paying, paying_open) = opener::<Plan>();
     let (moving, moving_open) = opener::<Plan>();
+    // A receipt's voucher or a plan's schedule, to print.
+    let (printout, printout_open) = opener::<Printout>();
     let adjusting = signal(false);
 
     let head = dynamic(move || {
@@ -1103,6 +1106,19 @@ pub fn customer_card(
                     )
                 }));
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let number = r.number.clone();
+                row = row.child(
+                    icon_button(
+                        || Icon::Printer,
+                        st.t("action.print"),
+                        Variant::Ghost,
+                        move || printout.set(Some(Printout::Voucher(number.clone()))),
+                    )
+                    .test_id(&format!("receipt-print-{}", r.number)),
+                );
+            }
             v = v.child(row.child(figure(
                 move || money(st, amount),
                 ty::SM,
@@ -1128,7 +1144,7 @@ pub fn customer_card(
             0 => statement(),
             1 => invoices(),
             2 => receipts(),
-            _ => plans_view(st, plans.get(), paying, moving).into_element(),
+            _ => plans_view(st, plans.get(), paying, moving, printout).into_element(),
         }));
     let footer = {
         let close = close.clone();
@@ -1233,6 +1249,65 @@ pub fn customer_card(
                 None => view().into_element(),
             }
         }))
+        .child(modal(printout_open, false, move || {
+            printout_dialog(st, printout.get_untracked(), move || {
+                printout_open.set(false)
+            })
+        }))
+}
+
+/// What the customer card prints.
+#[derive(Debug, Clone, PartialEq)]
+enum Printout {
+    Voucher(String),
+    Schedule(Box<Plan>),
+}
+
+fn printout_dialog(
+    st: AppState,
+    what: Option<Printout>,
+    close: impl Fn() + Clone + 'static,
+) -> AnyElement {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use crate::printers::Role;
+        use crate::screens::printing::{document_dialog, schedule_maker, voucher_maker};
+        match what {
+            Some(Printout::Voucher(n)) => {
+                let title = tr_args(st.lang(), "print.voucher_no", &[("number", &n)]);
+                let file = format!("{n}.pdf");
+                return document_dialog(
+                    st,
+                    title,
+                    file,
+                    Role::Receipt,
+                    move || voucher_maker(st, n.clone()),
+                    close,
+                )
+                .into_element();
+            }
+            Some(Printout::Schedule(p)) => {
+                let title = tr_args(
+                    st.lang(),
+                    "print.schedule_no",
+                    &[("number", &p.number), ("version", &p.version.to_string())],
+                );
+                let file = format!("{}.pdf", p.number);
+                return document_dialog(
+                    st,
+                    title,
+                    file,
+                    Role::Invoice,
+                    move || schedule_maker(st, (*p).clone()),
+                    close,
+                )
+                .into_element();
+            }
+            None => {}
+        }
+    }
+    let _ = (st, what, close);
+    view().into_element()
 }
 
 /// The till money is collected into: this branch's first till with an
@@ -1763,6 +1838,7 @@ fn plans_view(
     plans: Vec<Plan>,
     paying: Signal<Option<Plan>>,
     moving: Signal<Option<Plan>>,
+    printout: Signal<Option<Printout>>,
 ) -> View {
     if plans.is_empty() {
         return view().child(label(
@@ -1819,6 +1895,21 @@ fn plans_view(
             FontWeight::BOLD,
             || Tone::Ink,
         ));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let plan = p.clone();
+            head = head.child(
+                icon_button(
+                    || Icon::Printer,
+                    st.t("action.print"),
+                    Variant::Ghost,
+                    move || printout.set(Some(Printout::Schedule(Box::new(plan.clone())))),
+                )
+                .test_id(&format!("plan-print-{pi}")),
+            );
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = printout;
         let mut rows = view();
         for i in &p.installments {
             let due = i.due_date.clone();

@@ -169,7 +169,7 @@ fn a_plan_adds_up_and_is_paid_oldest_first() -> R {
     );
     assert_eq!(get_customer(&shop.s, &shop.customer)?.balance_minor, 25_000);
     // Any receipt given to the invoice pays its instalments too.
-    collect(
+    let rc = collect(
         &mut shop.s,
         meta(&shop.setup, "receipt"),
         ReceiptInput {
@@ -188,6 +188,17 @@ fn a_plan_adds_up_and_is_paid_oldest_first() -> R {
         ),
         ("paid", 0)
     );
+    // Its voucher: who paid, how, and what it paid (the invoice, the
+    // instalments).
+    let v = nb_store::usecases::printing::print_voucher(&shop.s, &rc.number)?;
+    assert_eq!(
+        v,
+        nb_store::usecases::printing::print_voucher(&shop.s, &rc.id)?
+    );
+    assert_eq!((v.amount_minor, v.method.as_str()), (3_572, "cash"));
+    assert_eq!(v.invoices, [(sale.number.clone(), 3_572)]);
+    assert_eq!(v.installments, [(plan.number.clone(), 2, 3_572)]);
+    assert!(!v.customer.0.is_empty());
     assert_eq!(plan.open_minor(), 30_000 - 8_572);
 
     // Two months on, the third is late and listed.

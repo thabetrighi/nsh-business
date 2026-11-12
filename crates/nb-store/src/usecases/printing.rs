@@ -367,3 +367,100 @@ pub fn save_document_settings(
         })
     })
 }
+
+/// A customer receipt as its voucher shows it (سند القبض).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrintVoucher {
+    pub number: String,
+    pub created_at: i64,
+    pub cashier: String,
+    /// The customer's name and tax numbers.
+    pub customer: (String, String),
+    pub method: String,
+    pub amount_minor: i64,
+    pub reference: String,
+    pub note: String,
+    /// What it paid: (sale number, amount).
+    pub invoices: Vec<(String, i64)>,
+    /// Instalments it paid: (plan number, instalment, amount).
+    pub installments: Vec<(String, u32, i64)>,
+    /// Left as an advance.
+    pub unallocated_minor: i64,
+}
+
+fn customer_ids(nif: String, rc: String) -> String {
+    [("NIF", nif), ("RC", rc)]
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// A receipt by its number or id.
+pub fn print_voucher(store: &Store, number: &str) -> Result<PrintVoucher> {
+    store.read(|r| {
+        let c = r.conn();
+        let (org, _) = the_org(c)?;
+        type Head = (String, String, i64, Option<String>, String, String, String, i64, String, String, i64);
+        let h: Head = c
+            .query_row(
+                "SELECT r.id, r.number, r.created_at, u.name, cu.name, cu.nif, cu.rc, r.amount_minor,
+                        r.method, r.reference || CASE WHEN r.note = '' THEN '' ELSE char(10) || r.note END,
+                        r.unallocated_minor
+                 FROM receipts r JOIN customers cu ON cu.id = r.customer_id
+                 LEFT JOIN users u ON u.id = r.created_by
+                 WHERE r.org_id = ?1 AND (r.number = ?2 OR r.id = ?2)",
+                params![org.to_string(), number.trim()],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(Error::NotFound("receipt"))?;
+        let (reference, note) = match h.9.split_once('\n') {
+            Some((a, b)) => (a.to_owned(), b.to_owned()),
+            None => (h.9.clone(), String::new()),
+        };
+        let mut s = c.prepare(
+            "SELECT s.number, a.amount_minor FROM payment_allocations a JOIN sales s ON s.id = a.sale_id
+             WHERE a.receipt_id = ?1 ORDER BY s.created_at",
+        )?;
+        let invoices = s
+            .query_map([&h.0], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut s = c.prepare(
+            "SELECT p.number, ip.seq, ip.amount_minor FROM installment_payments ip
+             JOIN installment_plans p ON p.id = ip.plan_id
+             WHERE ip.receipt_id = ?1 ORDER BY p.number, ip.seq",
+        )?;
+        let installments = s
+            .query_map([&h.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(PrintVoucher {
+            number: h.1,
+            created_at: h.2,
+            cashier: h.3.unwrap_or_default(),
+            customer: (h.4, customer_ids(h.5, h.6)),
+            amount_minor: h.7,
+            method: h.8,
+            reference,
+            note,
+            invoices,
+            installments,
+            unallocated_minor: h.10,
+        })
+    })
+}

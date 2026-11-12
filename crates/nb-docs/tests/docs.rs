@@ -240,3 +240,81 @@ fn a_shelf_label_prints_as_tspl() -> Result<(), nb_docs::DocError> {
     assert!(pdf(&doc)?.starts_with(b"%PDF"));
     Ok(())
 }
+
+/// A receipt voucher and an instalment schedule, on a roll and a sheet.
+#[test]
+fn vouchers_and_schedules() -> Result<(), nb_docs::DocError> {
+    use nb_docs::templates::{Due, Schedule, Voucher, schedule, voucher};
+    let v = Voucher {
+        number: "RC-01-26-A000007".into(),
+        when: (2026, 11, 12, 10, 5),
+        cashier: "Adlane".into(),
+        customer: ("Abou El Kacem".into(), "NIF: 1234".into()),
+        currency: Currency::DZD,
+        method: "cash".into(),
+        amount_minor: 122_494_358,
+        reference: String::new(),
+        note: String::new(),
+        invoices: vec![("FV-01-26-A000123".into(), 100_000_000)],
+        installments: vec![("TQ-01-26-000002".into(), 3, 22_494_358)],
+        unallocated_minor: 0,
+    };
+    let text = voucher(&shop(), &v, Lang::Fr, Paper::ROLL80, &Options::default()).plain_text();
+    for want in [
+        "Bon de versement",
+        "Abou El Kacem",
+        "FV-01-26-A000123",
+        "échéance",
+        "Signature",
+    ] {
+        assert!(text.contains(want), "{want} in {text}");
+    }
+    assert!(
+        escpos(
+            &voucher(&shop(), &v, Lang::Ar, Paper::ROLL58, &Options::default()),
+            false
+        )
+        .is_ok()
+    );
+    let s = Schedule {
+        number: "TQ-01-26-000002".into(),
+        version: 1,
+        when: (2026, 11, 12, 10, 5),
+        customer: ("Abou El Kacem".into(), String::new()),
+        currency: Currency::DZD,
+        sale_number: "FV-01-26-A000123".into(),
+        total_minor: 35_700,
+        down_minor: 5_700,
+        financed_minor: 30_000,
+        dues: (1..=3)
+            .map(|i| Due {
+                seq: i,
+                date: (2026, 11 + i, 12),
+                amount_minor: 10_000,
+                paid_minor: if i == 1 { 10_000 } else { 0 },
+                state: if i == 1 {
+                    "paid".into()
+                } else {
+                    "upcoming".into()
+                },
+            })
+            .collect(),
+    };
+    let doc = schedule(&shop(), &s, Lang::Ar, Paper::A4, &Options::default());
+    let text = doc.plain_text();
+    for want in ["جدول الأقساط", "الباقي", "دفوع"] {
+        assert!(text.contains(want), "{want} in {text}");
+    }
+    assert!(pdf(&doc)?.starts_with(b"%PDF"));
+    assert!(
+        preview(&schedule(
+            &shop(),
+            &s,
+            Lang::Fr,
+            Paper::ROLL80,
+            &Options::default()
+        ))
+        .is_ok()
+    );
+    Ok(())
+}

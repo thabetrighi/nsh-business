@@ -697,3 +697,372 @@ pub fn shelf_label(l: &ShelfLabel, lang: Lang, paper: Paper, shop: Option<&str>)
         blocks: b,
     }
 }
+
+/// A customer receipt (سند القبض / bon de versement).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Voucher {
+    pub number: String,
+    pub when: (i32, u32, u32, u32, u32),
+    pub cashier: String,
+    /// Name and tax numbers.
+    pub customer: (String, String),
+    pub currency: Currency,
+    pub method: String,
+    pub amount_minor: i64,
+    pub reference: String,
+    pub note: String,
+    /// (sale number, amount).
+    pub invoices: Vec<(String, i64)>,
+    /// (plan number, instalment, amount).
+    pub installments: Vec<(String, u32, i64)>,
+    pub unallocated_minor: i64,
+}
+
+fn when_of(c: &Ctx, (y, m, d, h, mi): (i32, u32, u32, u32, u32)) -> String {
+    let plain =
+        nb_i18n::bidi::strip_controls(&format!("{} {}", c.f.date(y, m, d), c.f.time(h, mi)));
+    nb_i18n::bidi::isolate_ltr(&unbroken(&plain))
+}
+
+/// A receipt voucher, on a roll or a sheet: who paid, how much, how, and
+/// what it paid.
+pub fn voucher(shop: &Shop, v: &Voucher, lang: Lang, paper: Paper, o: &Options) -> Doc {
+    let c = Ctx::new(lang, v.currency);
+    let sheet = !paper.is_thermal();
+    let (big, body, small) = if sheet {
+        (18.0, 11.0, 9.0)
+    } else if paper.is_narrow() {
+        (13.0, 9.0, 8.0)
+    } else {
+        (15.0, 10.0, 9.0)
+    };
+    let (pw, _) = paper.sheet();
+    let mut b = header(
+        &c,
+        shop,
+        o,
+        big,
+        small,
+        if sheet { 120.0 } else { pw * 0.6 },
+    );
+    b.push(Block::Line);
+    b.push(Block::text(
+        c.t("print.voucher.title"),
+        big - 2.0,
+        true,
+        Place::Center,
+    ));
+    b.push(Block::pair(
+        tr_args(lang, "print.voucher_no", &[("number", &v.number)]),
+        when_of(&c, v.when),
+        small,
+        false,
+    ));
+    if o.cashier && !v.cashier.is_empty() {
+        b.push(Block::text(
+            tr_args(lang, "print.cashier", &[("name", &v.cashier)]),
+            small,
+            false,
+            Place::Start,
+        ));
+    }
+    b.push(Block::Rule);
+    b.push(Block::text(
+        tr_args(lang, "print.voucher.from", &[("name", &v.customer.0)]),
+        body,
+        true,
+        Place::Start,
+    ));
+    if !v.customer.1.is_empty() {
+        b.push(Block::text(
+            v.customer.1.clone(),
+            small,
+            false,
+            Place::Start,
+        ));
+    }
+    b.push(Block::Gap(4.0));
+    // The amount on its own line, large: it is what the voucher is for.
+    b.push(Block::text(
+        c.t("print.voucher.amount"),
+        small,
+        false,
+        Place::Center,
+    ));
+    b.push(Block::text(
+        c.m(v.amount_minor),
+        body + 6.0,
+        true,
+        Place::Center,
+    ));
+    b.push(Block::pair(
+        c.t("print.voucher.method"),
+        c.method(&v.method),
+        body,
+        false,
+    ));
+    if !v.reference.is_empty() {
+        b.push(Block::pair(
+            c.t("print.voucher.reference"),
+            v.reference.clone(),
+            small,
+            false,
+        ));
+    }
+    if !v.invoices.is_empty() || !v.installments.is_empty() {
+        b.push(Block::Rule);
+        b.push(Block::text(
+            c.t("print.voucher.for"),
+            small,
+            true,
+            Place::Start,
+        ));
+        for (n, a) in &v.invoices {
+            b.push(Block::pair(n.clone(), c.m(*a), small, false));
+        }
+        for (plan, seq, a) in &v.installments {
+            b.push(Block::pair(
+                tr_args(
+                    lang,
+                    "print.voucher.installment",
+                    &[
+                        ("plan", &nb_i18n::bidi::isolate_ltr(plan)),
+                        ("seq", &nb_i18n::bidi::isolate_ltr(&c.n(i64::from(*seq)))),
+                    ],
+                ),
+                c.m(*a),
+                small,
+                false,
+            ));
+        }
+    }
+    if v.unallocated_minor > 0 {
+        b.push(Block::pair(
+            c.t("print.voucher.advance"),
+            c.m(v.unallocated_minor),
+            small,
+            false,
+        ));
+    }
+    if !v.note.is_empty() {
+        b.push(Block::text(v.note.clone(), small, false, Place::Start));
+    }
+    b.push(Block::Gap(if sheet { 36.0 } else { 18.0 }));
+    b.push(Block::pair(
+        c.t("print.voucher.sign_customer"),
+        c.t("print.voucher.sign_shop"),
+        small,
+        false,
+    ));
+    b.push(Block::Gap(if sheet { 48.0 } else { 24.0 }));
+    if o.barcode
+        && let Some(modules) = crate::barcode::code128(&v.number)
+    {
+        b.push(Block::Bars {
+            modules,
+            width: if sheet { 160.0 } else { pw * 0.8 },
+            height: 24.0,
+            caption: Some(v.number.clone()),
+        });
+    }
+    Doc {
+        paper,
+        rtl: lang == Lang::Ar,
+        blocks: b,
+    }
+}
+
+/// An instalment of a schedule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Due {
+    pub seq: u32,
+    pub date: (i32, u32, u32),
+    pub amount_minor: i64,
+    pub paid_minor: i64,
+    /// `upcoming`, `due`, `partial`, `paid`, `late`.
+    pub state: String,
+}
+
+/// An instalment schedule (جدول الأقساط).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Schedule {
+    pub number: String,
+    pub version: u32,
+    pub when: (i32, u32, u32, u32, u32),
+    pub customer: (String, String),
+    pub currency: Currency,
+    pub sale_number: String,
+    pub total_minor: i64,
+    pub down_minor: i64,
+    pub financed_minor: i64,
+    pub dues: Vec<Due>,
+}
+
+/// An instalment schedule on a sheet (or a roll): the plan, every
+/// instalment with what is paid, the signatures.
+pub fn schedule(shop: &Shop, s: &Schedule, lang: Lang, paper: Paper, o: &Options) -> Doc {
+    let c = Ctx::new(lang, s.currency);
+    let sheet = !paper.is_thermal();
+    let (big, body, small) = if sheet {
+        (18.0, 10.0, 9.0)
+    } else {
+        (14.0, 9.0, 8.0)
+    };
+    let (pw, _) = paper.sheet();
+    let legal = Options {
+        legal_ids: true,
+        ..o.clone()
+    };
+    let mut b = header(
+        &c,
+        shop,
+        &legal,
+        big,
+        small,
+        if sheet { 120.0 } else { pw * 0.6 },
+    );
+    b.push(Block::Line);
+    b.push(Block::text(
+        c.t("print.schedule.title"),
+        big - 2.0,
+        true,
+        Place::Center,
+    ));
+    b.push(Block::pair(
+        tr_args(
+            lang,
+            "print.schedule_no",
+            &[
+                ("number", &nb_i18n::bidi::isolate_ltr(&s.number)),
+                (
+                    "version",
+                    &nb_i18n::bidi::isolate_ltr(&c.n(i64::from(s.version))),
+                ),
+            ],
+        ),
+        when_of(&c, s.when),
+        small,
+        false,
+    ));
+    b.push(Block::text(
+        tr_args(lang, "print.customer", &[("name", &s.customer.0)]),
+        body,
+        true,
+        Place::Start,
+    ));
+    if !s.customer.1.is_empty() {
+        b.push(Block::text(
+            s.customer.1.clone(),
+            small,
+            false,
+            Place::Start,
+        ));
+    }
+    b.push(Block::Gap(4.0));
+    b.push(Block::pair(
+        tr_args(lang, "print.schedule.sale", &[("number", &s.sale_number)]),
+        c.m(s.total_minor),
+        small,
+        false,
+    ));
+    if s.down_minor > 0 {
+        b.push(Block::pair(
+            c.t("print.schedule.down"),
+            c.m(s.down_minor),
+            small,
+            false,
+        ));
+    }
+    b.push(Block::pair(
+        c.t("print.schedule.financed"),
+        c.m(s.financed_minor),
+        body,
+        true,
+    ));
+    b.push(Block::Gap(6.0));
+    let shares: &[f32] = if sheet {
+        &[0.08, 0.27, 0.22, 0.22, 0.21]
+    } else {
+        &[0.10, 0.30, 0.30, 0.30]
+    };
+    let mut heads = vec![
+        Cell::new("#", shares[0], Place::Start),
+        Cell::new(c.t("print.schedule.due"), shares[1], Place::Start),
+        Cell::new(c.t("print.col.amount"), shares[2], Place::End),
+        Cell::new(c.t("print.schedule.paid"), shares[3], Place::End),
+    ];
+    if sheet {
+        heads.push(Cell::new(
+            c.t("print.schedule.state"),
+            shares[4],
+            Place::End,
+        ));
+    }
+    b.push(Block::Line);
+    b.push(Block::Row {
+        cells: heads,
+        size: small,
+        bold: true,
+    });
+    b.push(Block::Line);
+    for d in &s.dues {
+        let (y, m, dd) = d.date;
+        let mut cells = vec![
+            Cell::new(
+                nb_i18n::bidi::isolate_ltr(&c.n(i64::from(d.seq))),
+                shares[0],
+                Place::Start,
+            ),
+            Cell::new(
+                nb_i18n::bidi::isolate_ltr(&c.f.date(y, m, dd)),
+                shares[1],
+                Place::Start,
+            ),
+            Cell::new(c.a(d.amount_minor), shares[2], Place::End),
+            Cell::new(c.a(d.paid_minor), shares[3], Place::End),
+        ];
+        if sheet {
+            cells.push(Cell::new(
+                c.t(&format!("plans.state.{}", d.state)),
+                shares[4],
+                Place::End,
+            ));
+        }
+        b.push(Block::Row {
+            cells,
+            size: body,
+            bold: false,
+        });
+    }
+    b.push(Block::Line);
+    let paid: i64 = s.dues.iter().map(|d| d.paid_minor).sum();
+    b.push(Block::pair(
+        c.t("print.schedule.paid_total"),
+        c.m(paid),
+        body,
+        false,
+    ));
+    b.push(Block::pair(
+        c.t("print.schedule.left"),
+        c.m((s.financed_minor - paid).max(0)),
+        body + 2.0,
+        true,
+    ));
+    if !o.notice.is_empty() {
+        b.push(Block::Gap(6.0));
+        b.push(Block::text(&o.notice, small, false, Place::Start));
+    }
+    b.push(Block::Gap(if sheet { 36.0 } else { 18.0 }));
+    b.push(Block::pair(
+        c.t("print.voucher.sign_customer"),
+        c.t("print.voucher.sign_shop"),
+        small,
+        false,
+    ));
+    b.push(Block::Gap(24.0));
+    Doc {
+        paper,
+        rtl: lang == Lang::Ar,
+        blocks: b,
+    }
+}
