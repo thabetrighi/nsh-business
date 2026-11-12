@@ -926,18 +926,20 @@ pub fn return_purchase(
                 warehouse.policy(),
                 may_go_negative,
             )?;
+            let (unit_cost, line_value) =
+                stock::issue_cost(w.tx(), product_id, wh, base_qty, before.avg_cost)?;
             let movement = stock::append(
                 w,
                 product_id,
                 wh,
                 MovementKind::PurchaseReturn,
                 base_qty,
-                Some(before.avg_cost),
+                Some(unit_cost),
                 Some(&number),
                 Some(input.reason.trim()),
                 after,
             )?;
-            let line_value = base_qty.times_price(before.avg_cost)?.minor();
+            let line_value = line_value.minor();
             net += line.net.minor();
             tax += line.tax.minor();
             value += line_value;

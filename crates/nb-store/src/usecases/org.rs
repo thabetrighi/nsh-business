@@ -524,3 +524,33 @@ pub fn register_branch(conn: &Connection, register: RegisterId) -> Result<Branch
         .ok_or(Error::NotFound("register"))?;
     parse_id(&b)
 }
+
+/// How stock issues are costed (M6.10): `average` or `fifo`.
+pub fn valuation(store: &Store) -> Result<String> {
+    store.read(|r| Ok(crate::repo::stock::method(r.conn())?.code().to_owned()))
+}
+
+/// Changes the valuation method: what goes out from now on is costed by
+/// it. The FIFO layers are always kept, so either works at once.
+pub fn set_valuation(store: &mut Store, meta: OpMeta, code: &str) -> Result<String> {
+    let m = nb_domain::valuation::Method::from_code(code)?;
+    store.write(meta, |w| {
+        let id = the_org(w.tx())?;
+        w.require(
+            nb_domain::access::Permission::SettingsEdit,
+            &nb_domain::access::Target::org(),
+        )?;
+        w.tx().execute(
+            "UPDATE organizations SET valuation = ?2 WHERE id = ?1",
+            params![id.to_string(), m.code()],
+        )?;
+        w.event(
+            "org.valuation_changed",
+            "organization",
+            &id.to_string(),
+            &m.code(),
+        )?;
+        w.audit("set_valuation", "organization", &id.to_string(), &m.code())?;
+        Ok(m.code().to_owned())
+    })
+}

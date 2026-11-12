@@ -1905,3 +1905,10 @@ setup.required = أدخل اسم المتجر واسمك.
 setup.back = رجوع
 setup.next = التالي
 setup.finish = فتح متجري
+
+# Stock valuation (M6.10)
+valuation.title = تقييم المخزون
+valuation.method = طريقة التكلفة
+valuation.method.help = تكلفة البضاعة عند خروجها (البيع، التلف، التحويل). FIFO: الأقدم أولاً بتكلفته.
+valuation.average = المتوسط المرجّح
+valuation.fifo = الوارد أولاً يُصرف أولاً (FIFO)

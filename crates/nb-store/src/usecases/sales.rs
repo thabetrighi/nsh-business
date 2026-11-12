@@ -735,13 +735,16 @@ pub(crate) fn sale_in(
                 warehouse.policy(),
                 may_go_negative,
             )?;
+            // What the goods cost: the average, or the oldest layers (FIFO).
+            let (unit_cost, line_cost) =
+                stock::issue_cost(w.tx(), product_id, warehouse_id, *base_qty, before.avg_cost)?;
             let movement = stock::append(
                 w,
                 product_id,
                 warehouse_id,
                 MovementKind::Sale,
                 *base_qty,
-                Some(before.avg_cost),
+                Some(unit_cost),
                 Some(&number),
                 None,
                 after,
@@ -756,9 +759,8 @@ pub(crate) fn sale_in(
                 &l.tracked,
                 false,
             )?;
-            let line_cost = base_qty.times_price(before.avg_cost)?;
             cost = cost.checked_add(line_cost)?;
-            costs.push(before.avg_cost);
+            costs.push(unit_cost);
             movements.push(Some(movement.to_string()));
         }
 

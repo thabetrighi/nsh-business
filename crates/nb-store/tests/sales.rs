@@ -1098,3 +1098,59 @@ fn old_debt_paid_by_card_with_a_sale() -> R {
     );
     healthy(&s)
 }
+
+/// FIFO (M6.10): what came in first goes out first, at its cost; the
+/// stock left is worth its layers. The average stays the default.
+#[test]
+fn fifo_costs_the_oldest_stock_first() -> R {
+    use nb_store::usecases::org::{set_valuation, valuation};
+    use nb_store::usecases::reports::stock_report;
+    use nb_store::usecases::stock::{AdjustInput, adjust_stock};
+    let (mut s, setup) = store();
+    let reg = register(&s);
+    // 10 at 100.00, then 10 more at 120.00 (an adjustment keeps the
+    // average at 100.00; the layer keeps its own cost).
+    let oil = stocked(&mut s, &setup, "Huile", "10", 10_000, 20_000)?;
+    adjust_stock(
+        &mut s,
+        meta(&setup, "adjust"),
+        AdjustInput {
+            product_id: oil.to_string(),
+            warehouse_id: setup.warehouse.to_string(),
+            kind: "adjust_in".into(),
+            qty: "10".into(),
+            unit: "pc".into(),
+            unit_cost_minor: Some(12_000),
+            reason: "arrivage".into(),
+            may_go_negative: false,
+            approval: None,
+            tracked: Default::default(),
+        },
+    )?;
+    assert_eq!(valuation(&s)?, "average");
+    open_shift(&mut s, meta(&setup, "shift.open"), &reg, 0)?;
+    let avg = complete_sale(
+        &mut s,
+        meta(&setup, "sale"),
+        sale(&setup, &reg, vec![(oil, "1")], vec![("cash", 20_000)]),
+    )?;
+    assert_eq!(avg.cost_minor, 10_000);
+    // FIFO from now: 14 out = the 9 left at 100.00 + 5 at 120.00.
+    set_valuation(&mut s, meta(&setup, "valuation"), "fifo")?;
+    assert_eq!(valuation(&s)?, "fifo");
+    let fifo = complete_sale(
+        &mut s,
+        meta(&setup, "sale"),
+        sale(&setup, &reg, vec![(oil, "14")], vec![("cash", 280_000)]),
+    )?;
+    assert_eq!(fifo.cost_minor, 9 * 10_000 + 5 * 12_000);
+    // Left: 5 at 120.00.
+    let row = stock_report(&s, 30)?
+        .rows
+        .into_iter()
+        .find(|r| r.name == "Huile")
+        .map(|r| r.value_minor);
+    assert_eq!(row, Some(5 * 12_000));
+    assert!(set_valuation(&mut s, meta(&setup, "valuation"), "lifo").is_err());
+    healthy(&s)
+}

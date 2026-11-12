@@ -839,6 +839,69 @@ fn store(st: AppState, compact: bool) -> View {
         .child(profile)
         .child(legal_card)
         .child(modules(st, compact))
+        .child(valuation_card(st, compact))
+}
+
+/// How stock going out is costed (M6.10): saved at once.
+fn valuation_card(st: AppState, compact: bool) -> View {
+    // 0 = weighted average, 1 = FIFO.
+    let method = signal(0usize);
+    let loaded = signal(false);
+    let task = spawn(async move {
+        if let Ok(code) = st.db().call(|s| org_usecases::valuation(s)).await {
+            method.set(usize::from(code == "fifo"));
+        }
+        loaded.set(true);
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
+    effect(move || {
+        let m = method.get();
+        if !loaded.get_untracked() {
+            return;
+        }
+        let Some(session) = st.session.get_untracked() else {
+            return;
+        };
+        let code = if m == 1 { "fifo" } else { "average" };
+        let task = spawn(async move {
+            match st
+                .db()
+                .call(move |s| org_usecases::set_valuation(s, session.meta("org.valuation"), code))
+                .await
+            {
+                Ok(_) => show_toast(st, st.tn("settings.saved")),
+                Err(e) => show_toast(
+                    st,
+                    crate::screens::forms::error_text(
+                        st,
+                        e.codes.first().map_or("internal", |c| c.1),
+                    ),
+                ),
+            }
+        });
+        drop(task); // runs to completion: tasks end with their owner, not their handle
+    });
+    group_card(
+        st,
+        Some((Icon::Package, "valuation.title")),
+        vec![row(
+            st,
+            "valuation.method",
+            "valuation.method.help",
+            segmented(
+                vec![
+                    (
+                        0,
+                        Box::new(st.t("valuation.average")) as Box<dyn Fn() -> String>,
+                    ),
+                    (1, Box::new(st.t("valuation.fifo"))),
+                ],
+                method,
+            )
+            .test_id("valuation-method"),
+            compact,
+        )],
+    )
 }
 
 /// The optional modules, switched on by the activity; each can be changed.

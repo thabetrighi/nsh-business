@@ -91,10 +91,17 @@ pub fn adjust_stock(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Resu
         let may_go_negative =
             input.may_go_negative && w.allowed(Permission::StockNegative, &target)?;
         let before = stock::balance(w.tx(), product_id, warehouse_id, currency)?;
-        let cost = Money::from_minor(
-            input.unit_cost_minor.unwrap_or(before.avg_cost.minor()),
-            currency,
-        );
+        // Out: costed as any issue (FIFO or the average); in: as priced.
+        let (cost, value) = match input.unit_cost_minor {
+            Some(c) => {
+                let c = Money::from_minor(c, currency);
+                (c, qty.times_price(c)?)
+            }
+            None if kind.sign() < 0 => {
+                stock::issue_cost(w.tx(), product_id, warehouse_id, qty, before.avg_cost)?
+            }
+            None => (before.avg_cost, qty.times_price(before.avg_cost)?),
+        };
         // Adjustments in carry a cost but do not change the average unless priced.
         let after = before.apply(kind, qty, None, warehouse.policy(), may_go_negative)?;
         let number = w.next_number(DocKind::Adjustment, &branch.id, &branch.code)?;
@@ -119,7 +126,6 @@ pub fn adjust_stock(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Resu
             &input.tracked,
             true,
         )?;
-        let value = qty.times_price(cost)?;
         if !value.is_zero() {
             let op = operation(kind, value).ok_or(RuleError::new("invalid_value"))?;
             let memo = format!("{number} {} — {}", product.name, input.reason.trim());

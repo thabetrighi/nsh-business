@@ -457,11 +457,12 @@ pub fn send_transfer(store: &mut Store, meta: OpMeta, input: TransferInput) -> R
             let base = p.unit_set()?.to_base(*q, if unit.is_empty() { &p.units[0].code } else { unit })?;
             let before = stock::balance(w.tx(), *product, from, currency)?;
             let after = before.apply(MovementKind::TransferOut, base, None, src.policy(), may_negative)?;
-            let movement = stock::append(w, *product, from, MovementKind::TransferOut, base, Some(before.avg_cost), Some(&number), None, after)?;
+            let (unit_cost, _) = stock::issue_cost(w.tx(), *product, from, base, before.avg_cost)?;
+            let movement = stock::append(w, *product, from, MovementKind::TransferOut, base, Some(unit_cost), Some(&number), None, after)?;
             crate::usecases::tracked::record(w, movement, *product, from, MovementKind::TransferOut, base, tracked, false)?;
             w.tx().execute(
                 "INSERT INTO transfer_lines (transfer_id, position, product_id, qty_sent_milli, unit_cost_minor, out_movement_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, i64::try_from(i).unwrap_or(0), product.to_string(), to_milli(base)?, before.avg_cost.minor(), movement.to_string()],
+                params![id, i64::try_from(i).unwrap_or(0), product.to_string(), to_milli(base)?, unit_cost.minor(), movement.to_string()],
             )?;
         }
         let row = transfer_of(w.tx(), &id)?;
@@ -751,14 +752,19 @@ pub fn close_count(
                 continue;
             };
             let after = before.apply(kind, q, None, warehouse.policy(), true)?;
-            let movement = stock::append(w, product, wh, kind, q, Some(before.avg_cost), Some(&c.number), None, after)?;
+            // A loss is costed as any issue; a gain at the average.
+            let (unit_cost, value) = if kind == MovementKind::CountGain {
+                (before.avg_cost, q.times_price(before.avg_cost)?)
+            } else {
+                stock::issue_cost(w.tx(), product, wh, q, before.avg_cost)?
+            };
+            let movement = stock::append(w, product, wh, kind, q, Some(unit_cost), Some(&c.number), None, after)?;
             // Found units go to a lot named after the count; missing ones
             // leave the expired lots first.
             if crate::repo::tracking::tracking(w.tx(), product)? == crate::repo::tracking::Tracking::Lot {
                 let tracked = crate::usecases::tracked::Tracked { lot: (kind == MovementKind::CountGain).then(|| c.number.clone()), ..Default::default() };
                 crate::usecases::tracked::record(w, movement, product, wh, kind, q, &tracked, true)?;
             }
-            let value = q.times_price(before.avg_cost)?;
             if kind == MovementKind::CountGain {
                 gains = gains.checked_add(value)?;
             } else {

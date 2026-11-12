@@ -1905,3 +1905,10 @@ setup.required = Enter the shop's name and yours.
 setup.back = Back
 setup.next = Next
 setup.finish = Open my shop
+
+# Stock valuation (M6.10)
+valuation.title = Stock valuation
+valuation.method = Costing method
+valuation.method.help = What goods cost when they go out (sales, losses, transfers). FIFO: the oldest stock first, at what it cost.
+valuation.average = Weighted average
+valuation.fifo = FIFO

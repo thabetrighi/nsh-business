@@ -97,6 +97,10 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0026_documents_balances_edits",
         include_str!("../migrations/0026_documents_balances_edits.sql"),
     ),
+    (
+        "0027_fifo_layers",
+        include_str!("../migrations/0027_fifo_layers.sql"),
+    ),
 ];
 
 pub fn latest() -> u32 {

@@ -85,6 +85,25 @@ pub fn append(
         ],
     )?;
     let seq = w.tx().last_insert_rowid();
+    // FIFO layers follow every movement (whatever the method: switching
+    // to FIFO then starts from the right layers).
+    let before: i64 = w
+        .tx()
+        .query_row(
+            "SELECT on_hand_milli FROM stock_balances WHERE product_id = ?1 AND warehouse_id = ?2",
+            params![product.to_string(), warehouse.to_string()],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    let mut l = layers(w.tx(), product, warehouse)?;
+    if signed > 0 {
+        let cost = unit_cost.map_or(new_balance.avg_cost.minor(), |c| c.minor());
+        nb_domain::valuation::receive(&mut l, before, seq, signed, cost);
+    } else {
+        nb_domain::valuation::issue(&mut l, -signed);
+    }
+    store_layers(w.tx(), product, warehouse, &l)?;
     w.tx().execute(
         "INSERT INTO stock_balances (product_id, warehouse_id, on_hand_milli, avg_cost_minor, last_seq) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT (product_id, warehouse_id) DO UPDATE SET on_hand_milli = ?3, avg_cost_minor = ?4, last_seq = ?5",
@@ -97,6 +116,142 @@ pub fn append(
         ],
     )?;
     Ok(id)
+}
+
+/// What is left of each receipt of a product in a warehouse, oldest first.
+pub fn layers(
+    conn: &Connection,
+    product: ProductId,
+    warehouse: WarehouseId,
+) -> Result<Vec<nb_domain::valuation::Layer>> {
+    let mut s = conn.prepare_cached(
+        "SELECT seq, qty_milli, unit_cost_minor FROM stock_layers
+         WHERE product_id = ?1 AND warehouse_id = ?2 ORDER BY seq",
+    )?;
+    let rows = s.query_map(params![product.to_string(), warehouse.to_string()], |r| {
+        Ok(nb_domain::valuation::Layer {
+            seq: r.get(0)?,
+            qty_milli: r.get(1)?,
+            unit_cost: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+fn store_layers(
+    conn: &Connection,
+    product: ProductId,
+    warehouse: WarehouseId,
+    l: &[nb_domain::valuation::Layer],
+) -> Result<()> {
+    store_layers_text(conn, &product.to_string(), &warehouse.to_string(), l)
+}
+
+fn store_layers_text(
+    conn: &Connection,
+    product: &str,
+    warehouse: &str,
+    l: &[nb_domain::valuation::Layer],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM stock_layers WHERE product_id = ?1 AND warehouse_id = ?2",
+        params![product, warehouse],
+    )?;
+    let mut s = conn.prepare_cached(
+        "INSERT INTO stock_layers (product_id, warehouse_id, seq, qty_milli, unit_cost_minor)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for x in l {
+        s.execute(params![product, warehouse, x.seq, x.qty_milli, x.unit_cost])?;
+    }
+    Ok(())
+}
+
+/// The organization's valuation method.
+pub fn method(conn: &Connection) -> Result<nb_domain::valuation::Method> {
+    let code: Option<String> = conn
+        .query_row("SELECT valuation FROM organizations LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(code
+        .and_then(|c| nb_domain::valuation::Method::from_code(&c).ok())
+        .unwrap_or_default())
+}
+
+/// What taking `qty` of a product out of a warehouse costs, under the
+/// organization's method: (unit cost, total). The average as it stands,
+/// or the oldest layers' cost; the total is exact (what the books carry).
+pub fn issue_cost(
+    conn: &Connection,
+    product: ProductId,
+    warehouse: WarehouseId,
+    qty: Quantity,
+    average: Money,
+) -> Result<(Money, Money)> {
+    let m = method(conn)?;
+    let currency = average.currency();
+    if m == nb_domain::valuation::Method::Average {
+        return Ok((average, qty.times_price(average)?));
+    }
+    let l = layers(conn, product, warehouse)?;
+    let (unit, total) = nb_domain::valuation::issue_cost(m, &l, to_milli(qty)?, average.minor());
+    Ok((
+        Money::from_minor(unit, currency),
+        Money::from_minor(total, currency),
+    ))
+}
+
+/// Recomputes every cost layer from the movements.
+fn rebuild_layers(conn: &Connection, currency: Currency) -> Result<()> {
+    let mut s = conn.prepare(
+        "SELECT seq, product_id, warehouse_id, kind, qty_milli, unit_cost_minor FROM stock_movements
+         ORDER BY product_id, warehouse_id, seq",
+    )?;
+    let mut rows = s.query([])?;
+    let mut key: Option<(String, String)> = None;
+    let mut l: Vec<nb_domain::valuation::Layer> = Vec::new();
+    let mut bal = Balance::empty(Money::zero(currency));
+    conn.execute("DELETE FROM stock_layers", [])?;
+    while let Some(r) = rows.next()? {
+        let (seq, p, wh): (i64, String, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
+        let kind: String = r.get(3)?;
+        let qty: i64 = r.get(4)?;
+        let cost: Option<i64> = r.get(5)?;
+        if key.as_ref() != Some(&(p.clone(), wh.clone())) {
+            if let Some((kp, kw)) = key.take() {
+                store_layers_text(conn, &kp, &kw, &l)?;
+            }
+            key = Some((p.clone(), wh.clone()));
+            l.clear();
+            bal = Balance::empty(Money::zero(currency));
+        }
+        let kind = MovementKind::from_code(&kind)
+            .ok_or_else(|| Error::Corrupt(format!("movement kind {kind}")))?;
+        let before = to_milli(bal.on_hand)?;
+        bal = bal.apply(
+            kind,
+            from_milli(qty.abs()),
+            cost.map(|c| Money::from_minor(c, currency)),
+            nb_domain::stock::NegativeStock::Allow,
+            true,
+        )?;
+        if qty > 0 {
+            nb_domain::valuation::receive(
+                &mut l,
+                before,
+                seq,
+                qty,
+                cost.unwrap_or(bal.avg_cost.minor()),
+            );
+        } else {
+            nb_domain::valuation::issue(&mut l, -qty);
+        }
+    }
+    if let Some((kp, kw)) = key {
+        store_layers_text(conn, &kp, &kw, &l)?;
+    }
+    Ok(())
 }
 
 /// The movements of a product, newest first.
@@ -156,6 +311,7 @@ pub fn rebuild_balances(conn: &Connection, currency: Currency) -> Result<Vec<(St
             last.2 = next;
         }
     }
+    rebuild_layers(conn, currency)?;
     let mut differing = Vec::new();
     for (p, wh, b) in computed {
         let stored: Option<(i64, i64)> = conn

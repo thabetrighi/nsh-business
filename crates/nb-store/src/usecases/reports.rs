@@ -408,18 +408,25 @@ pub struct StockReport {
     pub idle_value_minor: i64,
 }
 
-/// Every stocked product: what is there, its value at average cost, what
+/// Every stocked product: what is there, its value (average or FIFO), what
 /// sold over the last `days` days.
 pub fn stock_report(store: &Store, days: u32) -> Result<StockReport> {
     let since = store.now_ms() - i64::from(days.clamp(1, 3_650)) * 86_400_000;
     store.read(|r| {
         let conn = r.conn();
         let (org, _) = the_org(conn)?;
+        // FIFO: what the layers left are worth; else on hand at the average.
+        let fifo = i64::from(
+            crate::repo::stock::method(conn)? == nb_domain::valuation::Method::Fifo,
+        );
         let mut s = conn.prepare(
             "SELECT p.id, p.name, p.sku, COALESCE(c.name, ''),
                     COALESCE((SELECT u.code FROM product_units u WHERE u.product_id = p.id ORDER BY u.position LIMIT 1), ''),
                     COALESCE(SUM(b.on_hand_milli), 0),
-                    COALESCE(SUM((b.on_hand_milli * b.avg_cost_minor + 500) / 1000), 0),
+                    CASE WHEN ?3 = 1
+                         THEN COALESCE((SELECT SUM((y.qty_milli * y.unit_cost_minor + 500) / 1000)
+                                        FROM stock_layers y WHERE y.product_id = p.id), 0)
+                         ELSE COALESCE(SUM((b.on_hand_milli * b.avg_cost_minor + 500) / 1000), 0) END,
                     p.min_stock_milli, COALESCE(x.sold, 0), x.last
              FROM products p
              LEFT JOIN categories c ON c.id = p.category_id
@@ -435,7 +442,7 @@ pub fn stock_report(store: &Store, days: u32) -> Result<StockReport> {
              GROUP BY p.id ORDER BY 7 DESC, p.name",
         )?;
         let rows: Vec<StockRow> = s
-            .query_map(params![org.to_string(), since], |r| {
+            .query_map(params![org.to_string(), since, fifo], |r| {
                 Ok(StockRow {
                     product_id: r.get(0)?,
                     name: r.get(1)?,

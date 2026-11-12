@@ -1905,3 +1905,10 @@ setup.required = Saisissez le nom du magasin et le vôtre.
 setup.back = Retour
 setup.next = Suivant
 setup.finish = Ouvrir mon magasin
+
+# Stock valuation (M6.10)
+valuation.title = Valorisation du stock
+valuation.method = Méthode de coût
+valuation.method.help = Le coût des marchandises qui sortent (ventes, pertes, transferts). FIFO : le stock le plus ancien d'abord, à son coût.
+valuation.average = Coût moyen pondéré
+valuation.fifo = FIFO (premier entré, premier sorti)

@@ -20,6 +20,7 @@ pub mod sale;
 pub mod stock;
 pub mod tax;
 pub mod units;
+pub mod valuation;
 
 pub use ids::*;
 
