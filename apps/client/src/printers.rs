@@ -218,12 +218,26 @@ pub mod send {
         s.flush()
     }
 
-    /// Writes `bytes` to a device or a shared printer.
+    /// The path a device is opened by: a Windows serial port (`COM7`, a
+    /// Bluetooth printer's outgoing port) as `\\.\COM7`.
+    pub fn device_path(path: &str) -> String {
+        let p = path.trim();
+        let upper = p.to_ascii_uppercase();
+        match upper.strip_prefix("COM") {
+            Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+                format!(r"\\.\{upper}")
+            }
+            _ => p.to_owned(),
+        }
+    }
+
+    /// Writes `bytes` to a device, a serial or Bluetooth port, or a shared
+    /// printer.
     pub fn device(path: &str, bytes: &[u8]) -> std::io::Result<()> {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(false)
-            .open(path.trim())?;
+            .open(device_path(path))?;
         f.write_all(bytes)?;
         f.flush()
     }
@@ -374,6 +388,9 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap_or_default(), b"\x1b@hello");
         let (cmd, args) =
             send::system_command("HP_LaserJet", std::path::Path::new("/tmp/a.pdf"), 2);
+        assert_eq!(send::device_path(" com7 "), r"\\.\COM7");
+        assert_eq!(send::device_path("/dev/rfcomm0"), "/dev/rfcomm0");
+        assert_eq!(send::device_path("COMPTOIR"), "COMPTOIR");
         if !cfg!(target_os = "windows") {
             assert_eq!(cmd, "lp");
             assert_eq!(args, ["-d", "HP_LaserJet", "-n", "2", "/tmp/a.pdf"]);

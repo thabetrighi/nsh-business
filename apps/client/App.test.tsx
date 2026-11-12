@@ -1003,7 +1003,7 @@ test("a sale's receipt and invoice are previewed, and the printer is set", async
   // A label printer on a 40 × 30 mm roll of labels.
   await app.press("id:printer-add");
   await app.type("id:printer-name", "Zebra");
-  await app.press("text:USB / partagée");
+  await app.press("text:USB / Bluetooth / partagée");
   await app.type("id:printer-path", "/tmp/nb-no-such-printer");
   await app.press("text:Rouleau d'étiquettes");
   await app.waitFor("id:printer-label-w");
