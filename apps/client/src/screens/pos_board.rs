@@ -260,6 +260,14 @@ pub(super) fn board_view(st: AppState, t: Till, parts: BoardParts) -> View {
         if pr.sku.get_untracked() != l.sku {
             pr.sku.set(l.sku);
         }
+        // While editing the title stays (its tools edit the layout).
+        let head = l.head || editing;
+        if pr.head.get_untracked() != head {
+            pr.head.set(head);
+        }
+        if pr.big_lines.get_untracked() != l.big_lines {
+            pr.big_lines.set(l.big_lines);
+        }
         let gap = f32::from(l.gap);
         let n = l.columns.len();
         let mut row = view()
@@ -782,18 +790,24 @@ fn edit_bar(st: AppState, b: Board) -> View {
     let stock = signal(b.draft.get_untracked().stock);
     let sku = signal(b.draft.get_untracked().sku);
     let gap = signal(b.draft.get_untracked().gap);
+    let head = signal(b.draft.get_untracked().head);
+    let big = signal(b.draft.get_untracked().big_lines);
     effect(move || {
-        let (a, s, k, g) = (tile.get(), stock.get(), sku.get(), gap.get());
+        let now = (
+            tile.get(),
+            stock.get(),
+            sku.get(),
+            gap.get(),
+            head.get(),
+            big.get(),
+        );
         // Only a change rebuilds the board (which builds this bar again).
         let same = b
             .draft
-            .with_untracked(|l| (l.tile, l.stock, l.sku, l.gap) == (a, s, k, g));
+            .with_untracked(|l| (l.tile, l.stock, l.sku, l.gap, l.head, l.big_lines) == now);
         if !same {
             b.draft.update(|l| {
-                l.tile = a;
-                l.stock = s;
-                l.sku = k;
-                l.gap = g;
+                (l.tile, l.stock, l.sku, l.gap, l.head, l.big_lines) = now;
             });
         }
     });
@@ -816,6 +830,8 @@ fn edit_bar(st: AppState, b: Board) -> View {
                     stock.set(l.stock);
                     sku.set(l.sku);
                     gap.set(l.gap);
+                    head.set(l.head);
+                    big.set(l.big_lines);
                     b.draft.set(l.clone());
                 })
             })
@@ -869,6 +885,8 @@ fn edit_bar(st: AppState, b: Board) -> View {
         .child(segmented(gaps, gap).test_id("pos-edit-gap"))
         .child(toggle("pos.show.stock", stock, "pos-edit-stock"))
         .child(toggle("pos.show.sku", sku, "pos-edit-sku"))
+        .child(toggle("pos.show.head", head, "pos-edit-head"))
+        .child(toggle("pos.show.big_lines", big, "pos-edit-big-lines"))
         .child(view().flex_1())
         .child(
             label(

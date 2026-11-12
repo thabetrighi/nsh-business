@@ -136,6 +136,10 @@ fn page_of(st: AppState, route: Route, compact: bool) -> AnyElement {
             .flex_1()
             .child(crate::screens::reports::shifts_page(st, compact))
             .into_element(),
+        Route::PartyReports => scroll()
+            .flex_1()
+            .child(crate::screens::reports::party_reports_page(st, compact))
+            .into_element(),
         Route::PurchaseOrders => scroll()
             .flex_1()
             .child(crate::screens::purchases::orders_page(st, compact))
@@ -247,7 +251,133 @@ fn store_switcher(st: AppState) -> View {
         .child(icon(Icon::ChevronsUpDown, 14.0, || Tone::Faint))
 }
 
+/// The sidebar: full, or icons only (a section's pages in a menu).
 fn sidebar(st: AppState) -> View {
+    view().child(dynamic(move || {
+        if st.biz.sidebar_narrow.get() {
+            narrow_sidebar(st).into_element()
+        } else {
+            full_sidebar(st).into_element()
+        }
+    }))
+}
+
+/// Icons only: the top pages, each section as its icon (its pages in a
+/// menu), settings at the bottom.
+fn narrow_sidebar(st: AppState) -> View {
+    let item = move |r: Route| {
+        let active = computed(move || st.route.get() == r);
+        view()
+            .test_id(&format!("nav-{}", r.code()))
+            .w(px(40.0))
+            .h(px(40.0))
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::md()))
+            .cursor_pointer()
+            .style_when(active, |s| s.bg(Tone::Hover.color()))
+            .hover(|s| s.bg(Tone::Hover.color()))
+            .label(move || SharedString::from(st.tn(r.key())))
+            .on_press(move || st.route.set(r))
+            .child(dynamic(move || {
+                icon(r.icon(), 18.0, move || {
+                    if active.get() {
+                        Tone::Primary
+                    } else {
+                        Tone::Muted
+                    }
+                })
+                .into_element()
+            }))
+    };
+    let mut nav = view().gap(px(4.0)).items_center();
+    for &r in TOP {
+        nav = nav.child(item(r));
+    }
+    nav = nav.child(
+        view()
+            .w(px(28.0))
+            .h(px(1.0))
+            .my(px(6.0))
+            .bg(Tone::Border.color()),
+    );
+    for (i, section) in SECTIONS.iter().enumerate() {
+        let holds = computed(move || section.routes.contains(&st.route.get()));
+        nav = nav.child(when(
+            move || section.routes.iter().any(|r| st.shows(*r)),
+            move || {
+                view()
+                    .test_id(&format!("section-{i}"))
+                    .w(px(40.0))
+                    .h(px(40.0))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(radius::md()))
+                    .cursor_pointer()
+                    .style_when(holds, |s| s.bg(Tone::Hover.color()))
+                    .hover(|s| s.bg(Tone::Hover.color()))
+                    .label(move || SharedString::from(st.tn(section.key)))
+                    .on_press(move || {
+                        use nsh_core::element::desktop::{MenuItem, popup_menu};
+                        let items = section
+                            .routes
+                            .iter()
+                            .filter(|r| st.shows(**r))
+                            .map(|&r| {
+                                MenuItem::new(st.tn(r.key()))
+                                    .checked(st.route.get_untracked() == r)
+                                    .on_select(move || st.route.set(r))
+                            })
+                            .collect();
+                        drop(popup_menu(items));
+                    })
+                    .child(dynamic(move || {
+                        icon(section.icon, 18.0, move || {
+                            if holds.get() {
+                                Tone::Primary
+                            } else {
+                                Tone::Muted
+                            }
+                        })
+                        .into_element()
+                    }))
+                    .into_element()
+            },
+        ));
+    }
+    view()
+        .flex_1()
+        .min_h(px(0.0))
+        .w(px(64.0))
+        .bg(Tone::Sidebar.color())
+        .border_e(px(1.0))
+        .border_e_color(Tone::Border.color())
+        .py(px(10.0))
+        .gap(px(10.0))
+        .items_center()
+        .child(
+            view()
+                .w(px(36.0))
+                .h(px(36.0))
+                .rounded(px(radius::md()))
+                .items_center()
+                .justify_center()
+                .bg(Tone::Primary.color())
+                .child(icon(Icon::Store, 18.0, || Tone::OnPrimary)),
+        )
+        .child(scroll().flex_1().child(nav.pb(px(12.0))))
+        .child(
+            view()
+                .gap(px(4.0))
+                .pt(px(8.0))
+                .border_t_1()
+                .border_color(Tone::Border.color())
+                .child(item(Route::Design))
+                .child(item(Route::Settings)),
+        )
+}
+
+fn full_sidebar(st: AppState) -> View {
     // The section of the open page is expanded when the page changes.
     effect(move || {
         if let Some((i, _)) = st.route.get().section() {
@@ -274,7 +404,10 @@ fn sidebar(st: AppState) -> View {
             move || section_group(st, i, section).into_element(),
         ));
     }
+    // The wrapper in `sidebar` is a column: this fills its height.
     view()
+        .flex_1()
+        .min_h(px(0.0))
         .w(px(SIDEBAR_W))
         .bg(Tone::Sidebar.color())
         .border_e(px(1.0))
@@ -297,12 +430,8 @@ fn sidebar(st: AppState) -> View {
 }
 
 /// Pages with something waiting, shown as a count beside their name.
-fn nav_count(r: Route) -> Option<(i64, Status)> {
-    match r {
-        Route::Debts => Some((14, Status::Warning)),
-        Route::Inventory => Some((72, Status::Danger)),
-        _ => None,
-    }
+fn nav_count(_r: Route) -> Option<(i64, Status)> {
+    None
 }
 
 /// A sidebar section: a header that expands to its pages.
@@ -387,9 +516,10 @@ fn nav_item(st: AppState, r: Route, nested: bool) -> View {
         .style_when(active, |s| s.bg(Tone::Hover.color()))
         .hover(|s| s.bg(Tone::Hover.color()))
         .on_press(move || st.route.set(r));
-    if !nested {
+    {
+        let size = if nested { 14.0 } else { 16.0 };
         item = item.child(dynamic(move || {
-            icon(r.icon(), 16.0, move || {
+            icon(r.icon(), size, move || {
                 if active.get() {
                     Tone::Primary
                 } else {
@@ -442,6 +572,15 @@ fn top_bar(st: AppState) -> View {
         .px(px(page_pad(false)))
         .border_b_1()
         .border_color(Tone::Border.color())
+        .child(
+            icon_button(
+                || Icon::PanelStart,
+                st.t("action.toggle_sidebar"),
+                Variant::Ghost,
+                move || st.biz.sidebar_narrow.update(|v| *v = !*v),
+            )
+            .test_id("toggle-sidebar"),
+        )
         .child(search_box(st))
         .child(spacer())
         .child(sync_status(st))

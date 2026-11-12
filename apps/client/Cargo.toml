@@ -21,6 +21,8 @@ env_logger = "0.11"
 log = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+calamine = { version = "0.38", default-features = false }
+rust_xlsxwriter = { version = "0.102", default-features = false }
 nb-docs.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -178,6 +178,8 @@ pub struct BizPrefs {
     pub scanner: Signal<bool>,
     /// How the till looks on this device ([`PosPrefs`]).
     pub pos: PosPrefs,
+    /// The sidebar shows icons only.
+    pub sidebar_narrow: Signal<bool>,
 }
 
 /// The till's screen, as this device's cashier arranged it.
@@ -189,6 +191,10 @@ pub struct PosPrefs {
     /// The total in a large band.
     pub big_total: Signal<bool>,
     pub sku: Signal<bool>,
+    /// The page's title shown above the till (a layout may leave it out).
+    pub head: Signal<bool>,
+    /// The cart's lines in large type.
+    pub big_lines: Signal<bool>,
     /// The till's layouts kept on this device (`pos_layout::Kept`, JSON).
     pub layouts: Signal<String>,
 }
@@ -221,11 +227,14 @@ impl BizPrefs {
             preview_first: persisted_flag("nb.print.preview", false),
             scale: persisted_index("nb.device.scale", 0),
             scanner: persisted_flag("nb.device.scanner", true),
+            sidebar_narrow: persisted_flag("nb.app.sidebar_narrow", false),
             pos: PosPrefs {
                 tile: persisted_index("nb.pos.tile", 1),
                 stock: persisted_flag("nb.pos.stock", true),
                 big_total: persisted_flag("nb.pos.big_total", true),
                 sku: persisted_flag("nb.pos.sku", false),
+                head: persisted_flag("nb.pos.head", true),
+                big_lines: persisted_flag("nb.pos.big_lines", false),
                 layouts: persisted_text("nb.pos.layouts"),
             },
         }
@@ -404,6 +413,9 @@ impl AppState {
                     // Then checked end to end (after a crash, a disk fault),
                     // once the shop can already work: it is told, nothing
                     // is changed.
+                    // Later: the screen's own first reads (the dashboard)
+                    // go first on the database's thread.
+                    timer(std::time::Duration::from_secs(6)).await;
                     match db.call(|store| store.health()).await {
                         Ok(h) if !h.is_sound() => {
                             log::error!("database check: {h:?}");

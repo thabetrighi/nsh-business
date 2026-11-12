@@ -34,7 +34,7 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{
     Size, Variant, badge, button, figure, icon_button, label, label_line, segmented,
 };
-use crate::ui::overlay::{dialog_frame, modal, show_toast};
+use crate::ui::overlay::{dialog_frame, modal, show_toast, wide_modal};
 use crate::ui::popup::dropdown;
 use crate::ui::surface::{card, empty_state};
 use crate::ui::table::{Paging, pager};
@@ -357,7 +357,7 @@ pub fn suppliers_page(st: AppState, compact: bool) -> View {
         .child(modal(showing_open, compact, move || {
             supplier_card(st, showing, editing, move || showing_open.set(false)).into_element()
         }))
-        .child(modal(importing, compact, move || {
+        .child(wide_modal(importing, compact, move || {
             crate::screens::import::import_dialog(
                 st,
                 nb_domain::import::Kind::Suppliers,

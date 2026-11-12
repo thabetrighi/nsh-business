@@ -604,122 +604,124 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         }
     });
 
-    let actions = view().child(dynamic(move || match state.get() {
-        Some((_, Some(shift))) => view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap(px(8.0))
-            .child(badge(Status::Success, Some(Icon::Wallet), move || {
-                tr_args(st.lang(), "pos.till_open", &[("number", &shift.number)])
-            }))
-            // Phones: the actions as icons, beside the till's badge.
-            .child(dynamic(move || {
-                let n = t.held.get().len();
-                if n == 0 {
-                    return view().into_element();
-                }
-                let caption = move || {
-                    tr_args(
-                        st.lang(),
-                        "pos.held.count",
-                        &[("count", &st.fmt().integer(n as i64))],
-                    )
-                };
-                if compact {
-                    icon_button(
-                        || Icon::Clock,
-                        caption,
-                        Variant::Secondary,
-                        move || t.recalling.set(true),
-                    )
-                } else {
-                    button(
-                        Variant::Secondary,
-                        Size::Md,
-                        Some(Icon::Clock),
-                        caption,
-                        move || t.recalling.set(true),
-                    )
-                }
-                .test_id("pos-held")
-                .into_element()
-            }))
-            // The sales made: reprint or correct one (F1).
-            // An icon: the bar stays on one line beside the till's badge.
-            .child(
-                icon_button(
-                    || Icon::Receipt,
-                    st.t("pos.sales"),
-                    Variant::Secondary,
-                    move || t.sales_open.set(true),
-                )
-                .test_id("pos-sales"),
-            )
-            // A cashier may ask a supervisor for a return.
-            .child(when(
-                move || st.can("sales.return") || st.can("sales.sell"),
-                move || {
+    let actions = move || {
+        view().child(dynamic(move || match state.get() {
+            Some((_, Some(shift))) => view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap(px(8.0))
+                .child(badge(Status::Success, Some(Icon::Wallet), move || {
+                    tr_args(st.lang(), "pos.till_open", &[("number", &shift.number)])
+                }))
+                // Phones: the actions as icons, beside the till's badge.
+                .child(dynamic(move || {
+                    let n = t.held.get().len();
+                    if n == 0 {
+                        return view().into_element();
+                    }
+                    let caption = move || {
+                        tr_args(
+                            st.lang(),
+                            "pos.held.count",
+                            &[("count", &st.fmt().integer(n as i64))],
+                        )
+                    };
                     if compact {
                         icon_button(
-                            || Icon::Undo,
-                            st.t("pos.return"),
+                            || Icon::Clock,
+                            caption,
                             Variant::Secondary,
-                            move || t.returning.set(true),
+                            move || t.recalling.set(true),
                         )
                     } else {
                         button(
                             Variant::Secondary,
                             Size::Md,
-                            Some(Icon::Undo),
-                            st.t("pos.return"),
-                            move || t.returning.set(true),
+                            Some(Icon::Clock),
+                            caption,
+                            move || t.recalling.set(true),
                         )
                     }
-                    .test_id("pos-return")
+                    .test_id("pos-held")
                     .into_element()
-                },
-            ))
-            .child(if compact {
-                icon_button(
-                    || Icon::PackagePlus,
-                    st.t("pos.free"),
-                    Variant::Secondary,
-                    move || t.free_open.set(true),
+                }))
+                // The sales made: reprint or correct one (F1).
+                // An icon: the bar stays on one line beside the till's badge.
+                .child(
+                    icon_button(
+                        || Icon::Receipt,
+                        st.t("pos.sales"),
+                        Variant::Secondary,
+                        move || t.sales_open.set(true),
+                    )
+                    .test_id("pos-sales"),
                 )
-                .test_id("pos-free")
-            } else {
-                button(
-                    Variant::Secondary,
-                    Size::Md,
-                    Some(Icon::PackagePlus),
-                    st.t("pos.free"),
-                    move || t.free_open.set(true),
-                )
-                .test_id("pos-free")
-            })
-            .child(head_tools(t, st))
-            .child(if compact {
-                icon_button(
-                    || Icon::Lock,
-                    st.t("pos.close_till"),
-                    Variant::Secondary,
-                    move || closing.set(true),
-                )
-                .test_id("till-close")
-            } else {
-                button(
-                    Variant::Secondary,
-                    Size::Md,
-                    Some(Icon::Lock),
-                    st.t("pos.close_till"),
-                    move || closing.set(true),
-                )
-                .test_id("till-close")
-            })
-            .into_element(),
-        _ => view().into_element(),
-    }));
+                // A cashier may ask a supervisor for a return.
+                .child(when(
+                    move || st.can("sales.return") || st.can("sales.sell"),
+                    move || {
+                        if compact {
+                            icon_button(
+                                || Icon::Undo,
+                                st.t("pos.return"),
+                                Variant::Secondary,
+                                move || t.returning.set(true),
+                            )
+                        } else {
+                            button(
+                                Variant::Secondary,
+                                Size::Md,
+                                Some(Icon::Undo),
+                                st.t("pos.return"),
+                                move || t.returning.set(true),
+                            )
+                        }
+                        .test_id("pos-return")
+                        .into_element()
+                    },
+                ))
+                .child(if compact {
+                    icon_button(
+                        || Icon::PackagePlus,
+                        st.t("pos.free"),
+                        Variant::Secondary,
+                        move || t.free_open.set(true),
+                    )
+                    .test_id("pos-free")
+                } else {
+                    button(
+                        Variant::Secondary,
+                        Size::Md,
+                        Some(Icon::PackagePlus),
+                        st.t("pos.free"),
+                        move || t.free_open.set(true),
+                    )
+                    .test_id("pos-free")
+                })
+                .child(head_tools(t, st))
+                .child(if compact {
+                    icon_button(
+                        || Icon::Lock,
+                        st.t("pos.close_till"),
+                        Variant::Secondary,
+                        move || closing.set(true),
+                    )
+                    .test_id("till-close")
+                } else {
+                    button(
+                        Variant::Secondary,
+                        Size::Md,
+                        Some(Icon::Lock),
+                        st.t("pos.close_till"),
+                        move || closing.set(true),
+                    )
+                    .test_id("till-close")
+                })
+                .into_element(),
+            _ => view().into_element(),
+        }))
+    };
 
     let body = dynamic(move || match state.get() {
         None => card()
@@ -740,13 +742,20 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         .min_h(px(0.0))
         .p(px(page_pad(compact)))
         .gap(px(if compact { 12.0 } else { 16.0 }))
-        .child(page_head(
-            st,
-            Route::Sell,
-            Some("pos.subtitle"),
-            actions,
-            compact,
-        ))
+        // A layout may leave the title out (more room to sell): the
+        // actions stay, on one line.
+        .child(dynamic(move || {
+            if compact || st.biz.pos.head.get() {
+                page_head(st, Route::Sell, Some("pos.subtitle"), actions(), compact).into_element()
+            } else {
+                view()
+                    .test_id("pos-slim-head")
+                    .flex_row()
+                    .justify_end()
+                    .child(actions())
+                    .into_element()
+            }
+        }))
         .child(view().flex_1().min_h(px(0.0)).child(body))
         .child(modal(t.paying, compact, move || {
             match state.get_untracked() {
@@ -1258,6 +1267,7 @@ fn cart_lines(st: AppState, t: Till) -> View {
     let totals = computed(move || t.totals(currency(st)));
     view().child(dynamic(move || {
         let items = t.cart.get();
+        let _ = st.biz.pos.big_lines.get();
         if items.is_empty() {
             return view()
                 .flex_1()
@@ -1571,6 +1581,12 @@ fn stepper(
 
 fn cart_line(st: AppState, t: Till, i: usize, it: Item, line_total: i64) -> View {
     let selected = computed(move || t.selected.get() == Some(i));
+    // A layout may show the lines large (touch screens).
+    let (main, small) = if st.biz.pos.big_lines.get_untracked() {
+        (ty::XL, ty::MD)
+    } else {
+        (ty::SM, ty::XS)
+    };
     let name = it.name.clone();
     let unit = it.unit.clone();
     let (qty, price, discount, edited, free) = (
@@ -1621,15 +1637,15 @@ fn cart_line(st: AppState, t: Till, i: usize, it: Item, line_total: i64) -> View
                         .gap(px(2.0))
                         .child(label(
                             move || name.clone(),
-                            ty::SM,
+                            main,
                             FontWeight::SEMIBOLD,
                             Tone::Ink,
                         ))
-                        .child(label_line(detail, ty::XS, FontWeight::NORMAL, Tone::Muted)),
+                        .child(label_line(detail, small, FontWeight::NORMAL, Tone::Muted)),
                 )
                 .child(figure(
                     move || money(st, line_total),
-                    ty::SM,
+                    main,
                     FontWeight::BOLD,
                     || Tone::Ink,
                 )),
@@ -1664,7 +1680,7 @@ fn cart_line(st: AppState, t: Till, i: usize, it: Item, line_total: i64) -> View
                         .on_press(move || t.quick(i, Quick::Qty))
                         .child(label_line(
                             move || format!("{} {unit}", qty_text(st, qty)),
-                            ty::SM,
+                            main,
                             FontWeight::SEMIBOLD,
                             Tone::Ink,
                         )),

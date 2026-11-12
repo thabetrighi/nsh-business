@@ -82,6 +82,7 @@ routes! {
     Reports => "reports", ChartLine;
     StockReports => "stock_reports", ChartPie;
     FinanceReports => "finance_reports", FileChart;
+    PartyReports => "party_reports", Users;
     // System
     Settings => "settings", Settings;
     Design => "design", Palette;
@@ -161,7 +162,12 @@ pub const SECTIONS: &[Section] = &[
     Section {
         key: "nav.sec.reports",
         icon: Icon::Chart,
-        routes: &[Route::Reports, Route::StockReports, Route::FinanceReports],
+        routes: &[
+            Route::Reports,
+            Route::StockReports,
+            Route::FinanceReports,
+            Route::PartyReports,
+        ],
     },
 ];
 
@@ -194,7 +200,9 @@ impl Route {
             Route::Tours => F::Routes,
             Route::Vans => F::Vehicles,
             Route::FieldOrders => F::SalesReps,
-            Route::Reports | Route::StockReports | Route::FinanceReports => F::Reports,
+            Route::Reports | Route::StockReports | Route::FinanceReports | Route::PartyReports => {
+                F::Reports
+            }
             Route::Home | Route::Settings | Route::Design => return None,
         })
     }
@@ -206,7 +214,9 @@ impl Route {
             Route::Journal | Route::Accounts | Route::Ledger | Route::TrialBalance => {
                 "accounting.view"
             }
-            Route::Reports | Route::StockReports | Route::FinanceReports => "reports.view",
+            Route::Reports | Route::StockReports | Route::FinanceReports | Route::PartyReports => {
+                "reports.view"
+            }
             Route::Purchases | Route::PurchaseOrders => "purchases.order",
             _ => return None,
         })

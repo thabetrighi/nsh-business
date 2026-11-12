@@ -14,6 +14,8 @@ pub mod db;
 mod nav;
 pub mod printers;
 mod screens;
+#[cfg(not(target_arch = "wasm32"))]
+mod sheets;
 mod shell;
 mod state;
 mod ui;

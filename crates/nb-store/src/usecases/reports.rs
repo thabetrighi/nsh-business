@@ -143,6 +143,115 @@ fn groups(conn: &Connection, sql: &str, p: &(i64, i64, i32, String)) -> Result<V
     Ok(rows)
 }
 
+/// The span as instants (from, to excluded), so the time indexes serve.
+fn instants(store: &Store, span: &Span) -> Result<(i64, i64)> {
+    let (a, b) = span.dates()?;
+    let epoch = Date {
+        y: 1970,
+        m: 1,
+        d: 1,
+    };
+    let off_ms = i64::from(store.utc_offset_min) * 60_000;
+    Ok((
+        days_between(epoch, a) * 86_400_000 - off_ms,
+        (days_between(epoch, b) + 1) * 86_400_000 - off_ms,
+    ))
+}
+
+/// A line of a grouped report: who or what, how many, how much, and a
+/// second amount (on account, VAT, overdue…).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PartyRow {
+    pub key: String,
+    pub name: String,
+    pub count: i64,
+    pub total_minor: i64,
+    pub other_minor: i64,
+}
+
+fn party_rows(conn: &Connection, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<PartyRow>> {
+    let mut s = conn.prepare(sql)?;
+    let rows = s
+        .query_map(p, |r| {
+            Ok(PartyRow {
+                key: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                name: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                count: r.get(2)?,
+                total_minor: r.get(3)?,
+                other_minor: r.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// Sales by customer over a span (counter sales as one line): how many,
+/// how much, how much on account.
+pub fn sales_by_customer(store: &Store, span: &Span) -> Result<Vec<PartyRow>> {
+    let (from, to) = instants(store, span)?;
+    store.read(|r| {
+        let (org, _) = the_org(r.conn())?;
+        party_rows(
+            r.conn(),
+            "SELECT s.customer_id, c.name, COUNT(*), SUM(s.total_minor), SUM(s.credit_minor)
+             FROM sales s LEFT JOIN customers c ON c.id = s.customer_id
+             WHERE s.org_id = ?1 AND s.created_at >= ?2 AND s.created_at < ?3
+             GROUP BY s.customer_id ORDER BY SUM(s.total_minor) DESC",
+            &[&org.to_string(), &from, &to],
+        )
+    })
+}
+
+/// Sales by who sold them over a span: how many, how much, the discounts.
+pub fn sales_by_cashier(store: &Store, span: &Span) -> Result<Vec<PartyRow>> {
+    let (from, to) = instants(store, span)?;
+    store.read(|r| {
+        let (org, _) = the_org(r.conn())?;
+        party_rows(
+            r.conn(),
+            "SELECT s.created_by, u.name, COUNT(*), SUM(s.total_minor), SUM(s.discount_minor)
+             FROM sales s LEFT JOIN users u ON u.id = s.created_by
+             WHERE s.org_id = ?1 AND s.created_at >= ?2 AND s.created_at < ?3
+             GROUP BY s.created_by ORDER BY SUM(s.total_minor) DESC",
+            &[&org.to_string(), &from, &to],
+        )
+    })
+}
+
+/// Expenses (or other income) by category over a span: how many, the
+/// total, the VAT in it.
+pub fn expenses_by_category(store: &Store, span: &Span, kind: &str) -> Result<Vec<PartyRow>> {
+    let (from, to) = instants(store, span)?;
+    store.read(|r| {
+        let (org, _) = the_org(r.conn())?;
+        party_rows(
+            r.conn(),
+            "SELECT e.category_id, c.name, COUNT(*), SUM(e.total_minor), SUM(e.vat_minor)
+             FROM expenses e JOIN expense_categories c ON c.id = e.category_id
+             WHERE e.org_id = ?1 AND e.kind = ?4 AND e.created_at >= ?2 AND e.created_at < ?3
+             GROUP BY e.category_id ORDER BY SUM(e.total_minor) DESC",
+            &[&org.to_string(), &from, &to, &kind],
+        )
+    })
+}
+
+/// What is owed to suppliers now: each one with a balance, the largest
+/// first (the count is its open invoices).
+pub fn payables(store: &Store) -> Result<Vec<PartyRow>> {
+    store.read(|r| {
+        let (org, _) = the_org(r.conn())?;
+        party_rows(
+            r.conn(),
+            "SELECT p.id, p.name,
+                    (SELECT COUNT(*) FROM purchases x WHERE x.supplier_id = p.id AND x.credit_minor > 0),
+                    p.balance_minor, 0
+             FROM suppliers p WHERE p.org_id = ?1 AND p.balance_minor <> 0
+             ORDER BY p.balance_minor DESC",
+            &[&org.to_string()],
+        )
+    })
+}
+
 /// Sales over a span of business days.
 pub fn sales_report(store: &Store, span: &Span) -> Result<SalesReport> {
     report_of(store, span, Parts::All)

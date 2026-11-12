@@ -30,7 +30,7 @@ use crate::ui::kit::{
     Size, Variant, badge, button, checkbox, figure, icon_button, label, label_line, segmented,
     switch,
 };
-use crate::ui::overlay::{dialog_frame, modal, show_toast};
+use crate::ui::overlay::{dialog_frame, modal, show_toast, wide_modal};
 use crate::ui::popup::dropdown;
 use crate::ui::surface::{card, empty_state};
 use crate::ui::table::{Paging, pager};
@@ -225,6 +225,16 @@ pub fn customers_page(st: AppState, compact: bool) -> View {
                 )
                 .child(
                     button(
+                        Variant::Secondary,
+                        Size::Md,
+                        Some(Icon::Download),
+                        st.t("action.export"),
+                        move || export_customers(st, text.get_untracked(), filter.get_untracked()),
+                    )
+                    .test_id("customers-export"),
+                )
+                .child(
+                    button(
                         Variant::Primary,
                         Size::Md,
                         Some(Icon::Plus),
@@ -254,7 +264,7 @@ pub fn customers_page(st: AppState, compact: bool) -> View {
                 None => view().into_element(),
             }
         }))
-        .child(modal(importing, compact, move || {
+        .child(wide_modal(importing, compact, move || {
             crate::screens::import::import_dialog(
                 st,
                 nb_domain::import::Kind::Customers,
@@ -2926,4 +2936,63 @@ fn adjust_dialog(st: AppState, c: CustomerRow, close: impl Fn() + Clone + 'stati
                 None => view().into_element(),
             }
         }))
+}
+
+/// Exports the customers the list finds (all its pages), in the columns
+/// the import reads: the file goes back in as it came out.
+fn export_customers(st: AppState, search: String, filter: usize) {
+    let db = st.db();
+    let task = spawn(async move {
+        let q = CustomerQuery {
+            search,
+            filter: FILTERS[filter].into(),
+            limit: 100_000,
+            offset: 0,
+        };
+        let Ok(page) = db.call(move |s| list_customers(s, &q)).await else {
+            show_toast(st, st.tn("reports.export_failed"));
+            return;
+        };
+        let cur = currency(st);
+        let plain = move |v: i64| Money::from_minor(v, cur).to_plain_string();
+        let keys = [
+            "name",
+            "kind",
+            "phone",
+            "email",
+            "city",
+            "address",
+            "nif",
+            "nis",
+            "rc",
+            "ai",
+            "credit_limit",
+            "payment_days",
+            "balance",
+        ];
+        let mut rows = vec![
+            keys.iter()
+                .map(|k| st.tn(&format!("import.field.{k}")))
+                .collect::<Vec<_>>(),
+        ];
+        for c in &page.rows {
+            rows.push(vec![
+                c.name.clone(),
+                c.kind.clone(),
+                c.phone.clone(),
+                c.email.clone(),
+                c.city.clone(),
+                c.address.clone(),
+                c.nif.clone(),
+                c.nis.clone(),
+                c.rc.clone(),
+                c.ai.clone(),
+                plain(c.credit_limit_minor),
+                c.payment_days.to_string(),
+                plain(c.balance_minor),
+            ]);
+        }
+        crate::screens::reports::export(st, st.tn("nav.customers"), rows);
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
 }

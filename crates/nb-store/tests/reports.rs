@@ -252,5 +252,24 @@ fn sales_profit_and_stock_add_up() -> R {
         (y.labels.first().map(String::as_str), y.current[11]),
         (Some("2025-12-01"), 3_570 + 8_330 - 1_190)
     );
+    // By customer (all at the counter) and by cashier (the owner).
+    let month = span("2026-11-01", "2026-11-30");
+    let by_customer = sales_by_customer(&s, &month)?;
+    assert_eq!(
+        by_customer
+            .iter()
+            .map(|r| (r.count, r.total_minor))
+            .collect::<Vec<_>>(),
+        [(3, 11_900)]
+    );
+    let by_cashier = sales_by_cashier(&s, &month)?;
+    assert_eq!(by_cashier.len(), 1);
+    assert_eq!(
+        (by_cashier[0].count, by_cashier[0].total_minor),
+        (3, 11_900)
+    );
+    // No expenses yet; nothing owed to suppliers.
+    assert!(expenses_by_category(&s, &month, "expense")?.is_empty());
+    assert!(payables(&s)?.is_empty());
     Ok(())
 }

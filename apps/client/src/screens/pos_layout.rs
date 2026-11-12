@@ -140,6 +140,12 @@ pub struct Layout {
     /// Space between panels, in points.
     #[serde(default = "gap")]
     pub gap: u8,
+    /// The page's title above the till.
+    #[serde(default = "yes")]
+    pub head: bool,
+    /// The cart's lines in large type (touch screens, a customer display).
+    #[serde(default)]
+    pub big_lines: bool,
 }
 
 fn medium() -> u8 {
@@ -166,6 +172,8 @@ impl Layout {
             stock: true,
             sku: false,
             gap: 14,
+            head: true,
+            big_lines: false,
         }
     }
 
@@ -336,6 +344,7 @@ pub fn builtin() -> Vec<Layout> {
         // A supermarket: scanning first, the cart as a table.
         Layout {
             stock: false,
+            head: false,
             ..Layout::of(
                 "supermarket",
                 vec![
@@ -369,6 +378,8 @@ pub fn builtin() -> Vec<Layout> {
         // A touch screen: large tiles, a keypad beside the cart.
         Layout {
             tile: 1,
+            head: false,
+            big_lines: true,
             ..Layout::of(
                 "touch",
                 vec![

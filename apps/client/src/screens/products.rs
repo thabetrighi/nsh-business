@@ -20,7 +20,7 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{
     Size, Variant, badge, button, figure, icon_button, label, label_line, menu_button, spacer,
 };
-use crate::ui::overlay::{modal, show_toast};
+use crate::ui::overlay::{modal, show_toast, wide_modal};
 use crate::ui::popup::{Action, dropdown, row_menu};
 use crate::ui::surface::{card, empty_state, page_pad};
 use crate::ui::table::{Column, Paging, Selection, Sort, Width, pager, table};
@@ -1154,7 +1154,7 @@ pub fn products(st: AppState, compact: bool) -> View {
                 )
                 .child(pager(st, paging, move || total.get(), compact)),
         )
-        .child(modal(importing, compact, move || {
+        .child(wide_modal(importing, compact, move || {
             crate::screens::import::import_dialog(
                 st,
                 nb_domain::import::Kind::Products,

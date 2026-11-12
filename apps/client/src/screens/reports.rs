@@ -111,8 +111,52 @@ fn span_picker(
     (from, to, filters)
 }
 
-/// Saves `rows` as a CSV file the person chooses.
+/// Offers the export formats (Excel or CSV) at the pointer; `name` is the
+/// file's name without its extension.
 pub(crate) fn export(st: AppState, name: String, rows: Vec<Vec<String>>) {
+    use nsh_core::element::desktop::{MenuItem, popup_menu};
+    let name = name.trim_end_matches(".csv").to_owned();
+    let (n1, r1) = (name.clone(), rows.clone());
+    let items = vec![
+        MenuItem::new(st.tn("export.xlsx"))
+            .on_select(move || export_xlsx(st, n1.clone(), r1.clone())),
+        MenuItem::new(st.tn("export.csv"))
+            .on_select(move || export_csv(st, format!("{name}.csv"), rows.clone())),
+    ];
+    // Off desktops no menu shows: CSV, which every device reads.
+    let shown = popup_menu(items);
+    drop(shown);
+}
+
+/// Saves `rows` as an Excel workbook the person names.
+pub(crate) fn export_xlsx(st: AppState, name: String, rows: Vec<Vec<String>>) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let rtl = st.lang().direction() == nb_i18n::Direction::Rtl;
+        let task = spawn(async move {
+            let dialog = nsh_core::file_dialog::SaveDialog::new()
+                .file_name(format!("{name}.xlsx"))
+                .title(st.tn("reports.export"));
+            let Ok(Some(path)) = pick_save_path(dialog).await else {
+                return;
+            };
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::sheets::write_xlsx(&path, &name, &rows, rtl));
+            });
+            match rx.await {
+                Ok(Ok(())) => show_toast(st, st.tn("reports.exported")),
+                _ => show_toast(st, st.tn("reports.export_failed")),
+            }
+        });
+        drop(task); // runs to completion: tasks end with their owner, not their handle
+    }
+    #[cfg(target_arch = "wasm32")]
+    export_csv(st, format!("{name}.csv"), rows);
+}
+
+/// Saves `rows` as a CSV file the person chooses.
+pub(crate) fn export_csv(st: AppState, name: String, rows: Vec<Vec<String>>) {
     let text = to_csv(&rows);
     let task = spawn(async move {
         let dialog = nsh_core::file_dialog::SaveDialog::new()
@@ -204,7 +248,7 @@ pub(crate) fn export_buttons(
         let make = make.clone();
         move || {
             if let Some((name, _, _, rows)) = make() {
-                export(st, format!("{name}.csv"), rows);
+                export(st, name, rows);
             }
         }
     };
@@ -1331,4 +1375,331 @@ fn finance(st: AppState, compact: bool, route: Route, first: Book) -> View {
         .child(tiles)
         .child(card().child(tabs).child(content));
     page(st, route, subtitle, view(), body, compact)
+}
+
+/// The reports of a party or a kind (owner notes): what customers owe and
+/// how old it is, what is owed to suppliers, expenses and other income by
+/// category, sales by customer and by cashier.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Party {
+    Debts,
+    Payables,
+    Expenses,
+    Income,
+    Customers,
+    Cashiers,
+}
+
+pub fn party_reports_page(st: AppState, compact: bool) -> View {
+    use nb_store::usecases::debts::{Ageing, ageing};
+    use nb_store::usecases::reports::{
+        PartyRow, expenses_by_category, payables, sales_by_cashier, sales_by_customer,
+    };
+    type Data = (
+        Ageing,
+        Vec<PartyRow>,
+        Vec<PartyRow>,
+        Vec<PartyRow>,
+        Vec<PartyRow>,
+        Vec<PartyRow>,
+    );
+    let (from, to, filters) = span_picker(st, ("party-from", "party-to"));
+    let which = signal(Party::Debts);
+    let data = resource(
+        move || {
+            st.session.get()?;
+            Some((from.get(), to.get(), st.data_rev.get()))
+        },
+        move |(a, b, _), _| {
+            let db = st.db();
+            async move {
+                db.call(move |s| {
+                    let span = Span {
+                        from: a.trim().to_owned(),
+                        to: b.trim().to_owned(),
+                    };
+                    Ok((
+                        ageing(s)?,
+                        payables(s)?,
+                        expenses_by_category(s, &span, "expense")?,
+                        expenses_by_category(s, &span, "income")?,
+                        sales_by_customer(s, &span)?,
+                        sales_by_cashier(s, &span)?,
+                    ))
+                })
+                .await
+            }
+        },
+    );
+    let books = computed(move || data.with(|r: Option<&Data>| r.cloned()));
+    let failed = computed(move || data.error());
+    let m = move |v: i64, plain: bool| {
+        if plain {
+            plain_money(st, v)
+        } else {
+            money(st, v)
+        }
+    };
+    let n = move |v: i64| st.fmt().integer(v);
+    let rows_of = move |p: Party, plain: bool| -> Option<(Vec<String>, Vec<Vec<String>>)> {
+        let (age, pay, exp, inc, cust, cash) = books.get_untracked()?;
+        let t = |k: &str| st.tn(k);
+        Some(match p {
+            Party::Debts => (
+                vec![
+                    t("reports.col.customer"),
+                    t("reports.col.balance"),
+                    t("debts.bucket.0"),
+                    t("debts.bucket.1"),
+                    t("debts.bucket.2"),
+                    t("debts.bucket.3"),
+                    t("reports.col.overdue"),
+                ],
+                age.rows
+                    .iter()
+                    .map(|r| {
+                        vec![
+                            r.name.clone(),
+                            m(r.balance_minor, plain),
+                            m(r.buckets[0], plain),
+                            m(r.buckets[1], plain),
+                            m(r.buckets[2], plain),
+                            m(r.buckets[3], plain),
+                            m(r.overdue_minor, plain),
+                        ]
+                    })
+                    .collect(),
+            ),
+            Party::Payables => (
+                vec![
+                    t("reports.col.supplier"),
+                    t("reports.col.open_invoices"),
+                    t("reports.col.owed"),
+                ],
+                pay.iter()
+                    .map(|r| vec![r.name.clone(), n(r.count), m(r.total_minor, plain)])
+                    .collect(),
+            ),
+            Party::Expenses | Party::Income => (
+                vec![
+                    t("reports.col.category"),
+                    t("reports.col.count"),
+                    t("reports.col.total"),
+                    t("reports.col.vat"),
+                ],
+                (if p == Party::Expenses { exp } else { inc })
+                    .iter()
+                    .map(|r| {
+                        vec![
+                            r.name.clone(),
+                            n(r.count),
+                            m(r.total_minor, plain),
+                            m(r.other_minor, plain),
+                        ]
+                    })
+                    .collect(),
+            ),
+            Party::Customers => (
+                vec![
+                    t("reports.col.customer"),
+                    t("reports.col.count"),
+                    t("reports.col.total"),
+                    t("reports.col.on_account"),
+                ],
+                cust.iter()
+                    .map(|r| {
+                        let name = if r.key.is_empty() {
+                            t("reports.counter")
+                        } else {
+                            r.name.clone()
+                        };
+                        vec![
+                            name,
+                            n(r.count),
+                            m(r.total_minor, plain),
+                            m(r.other_minor, plain),
+                        ]
+                    })
+                    .collect(),
+            ),
+            Party::Cashiers => (
+                vec![
+                    t("reports.col.cashier"),
+                    t("reports.col.count"),
+                    t("reports.col.total"),
+                    t("reports.col.discounts"),
+                ],
+                cash.iter()
+                    .map(|r| {
+                        vec![
+                            r.name.clone(),
+                            n(r.count),
+                            m(r.total_minor, plain),
+                            m(r.other_minor, plain),
+                        ]
+                    })
+                    .collect(),
+            ),
+        })
+    };
+    let tiles = dynamic(move || {
+        let Some((age, pay, exp, inc, cust, cash)) = books.get().filter(|_| failed.get().is_none())
+        else {
+            return view().into_element();
+        };
+        let sum = |v: &[PartyRow]| v.iter().map(|r| r.total_minor).sum::<i64>();
+        let count = |v: &[PartyRow]| v.iter().map(|r| r.count).sum::<i64>();
+        let (a, b, c) = match which.get() {
+            Party::Debts => (
+                ("reports.col.balance", age.balance_minor, Tone::Ink),
+                ("reports.col.overdue", age.overdue_minor, Tone::Danger),
+                (
+                    "reports.customers_owing",
+                    i64::try_from(age.rows.len()).unwrap_or(0),
+                    Tone::Ink,
+                ),
+            ),
+            Party::Payables => (
+                ("reports.col.owed", sum(&pay), Tone::Ink),
+                ("reports.col.open_invoices", count(&pay), Tone::Ink),
+                (
+                    "reports.suppliers_owed",
+                    i64::try_from(pay.len()).unwrap_or(0),
+                    Tone::Ink,
+                ),
+            ),
+            Party::Expenses | Party::Income => {
+                let v = if which.get() == Party::Expenses {
+                    exp
+                } else {
+                    inc
+                };
+                (
+                    ("reports.col.total", sum(&v), Tone::Ink),
+                    (
+                        "reports.col.vat",
+                        v.iter().map(|r| r.other_minor).sum(),
+                        Tone::Ink,
+                    ),
+                    ("reports.col.count", count(&v), Tone::Ink),
+                )
+            }
+            Party::Customers => (
+                ("reports.col.total", sum(&cust), Tone::Ink),
+                (
+                    "reports.col.on_account",
+                    cust.iter().map(|r| r.other_minor).sum(),
+                    Tone::Danger,
+                ),
+                ("reports.col.count", count(&cust), Tone::Ink),
+            ),
+            Party::Cashiers => (
+                ("reports.col.total", sum(&cash), Tone::Ink),
+                (
+                    "reports.col.discounts",
+                    cash.iter().map(|r| r.other_minor).sum(),
+                    Tone::Ink,
+                ),
+                ("reports.col.count", count(&cash), Tone::Ink),
+            ),
+        };
+        let money_tile = |(k, v, tone): (&'static str, i64, Tone), id: &'static str| {
+            tile(st, k, move || whole(st, v), tone, id)
+        };
+        view()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(12.0))
+            .child(money_tile(a, "party-a"))
+            .child(money_tile(b, "party-b"))
+            .child(tile(st, c.0, move || st.fmt().integer(c.1), c.2, "party-c"))
+            .into_element()
+    });
+    let content = dynamic(move || {
+        if let Some(e) = failed.get() {
+            let text = error_text(st, e.codes.first().map_or("internal", |c| c.1));
+            return label(
+                move || text.clone(),
+                ty::SM,
+                FontWeight::MEDIUM,
+                Tone::Danger,
+            )
+            .into_element();
+        }
+        books.with(|_| ());
+        let Some((heads, rows)) = rows_of(which.get(), false) else {
+            return view().into_element();
+        };
+        if rows.is_empty() {
+            return empty_state(
+                Icon::ChartLine,
+                st.t("reports.nothing"),
+                st.t("reports.empty.body"),
+                None,
+            )
+            .into_element();
+        }
+        table(heads, rows, "party-row", compact)
+    });
+    let tabs = view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap(px(10.0))
+        .p(px(12.0))
+        .child(
+            view().flex_1().child(
+                scroll().horizontal().child(
+                    segmented(
+                        vec![
+                            (Party::Debts, Box::new(st.t("reports.party.debts"))),
+                            (Party::Payables, Box::new(st.t("reports.party.payables"))),
+                            (Party::Expenses, Box::new(st.t("reports.party.expenses"))),
+                            (Party::Income, Box::new(st.t("reports.party.income"))),
+                            (Party::Customers, Box::new(st.t("reports.party.customers"))),
+                            (Party::Cashiers, Box::new(st.t("reports.party.cashiers"))),
+                        ],
+                        which,
+                    )
+                    .test_id("party-tabs"),
+                ),
+            ),
+        )
+        .child(export_buttons(
+            st,
+            ("party-export", "party-pdf"),
+            move || {
+                let p = which.get_untracked();
+                let (heads, mut rows) = rows_of(p, true)?;
+                rows.insert(0, heads);
+                let key = match p {
+                    Party::Debts => "reports.party.debts",
+                    Party::Payables => "reports.party.payables",
+                    Party::Expenses => "reports.party.expenses",
+                    Party::Income => "reports.party.income",
+                    Party::Customers => "reports.party.customers",
+                    Party::Cashiers => "reports.party.cashiers",
+                };
+                let (f, t) = (from.get_untracked(), to.get_untracked());
+                Some((
+                    format!("{}-{f}-{t}", st.tn(key)),
+                    st.tn(key),
+                    tr_args(st.lang(), "reports.span", &[("from", &f), ("to", &t)]),
+                    rows,
+                ))
+            },
+        ));
+    let body = view()
+        .gap(px(16.0))
+        .child(card().child(filters))
+        .child(tiles)
+        .child(card().child(tabs).child(content));
+    page(
+        st,
+        Route::PartyReports,
+        "reports.party.subtitle",
+        view(),
+        body,
+        compact,
+    )
 }

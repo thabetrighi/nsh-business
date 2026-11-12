@@ -141,6 +141,23 @@ fn expenses_come_out_of_the_till_or_the_bank() -> R {
         page.by_category[0],
         ("Loyer".into(), "expense".into(), 300_000)
     );
+    // The expenses report: by category over the month, VAT apart.
+    let (y, m, _) = nb_store::time::civil_date(s.now_ms(), 60);
+    let month = nb_store::usecases::reports::Span {
+        from: format!("{y:04}-{m:02}-01"),
+        to: format!("{y:04}-{m:02}-28"),
+    };
+    let report = nb_store::usecases::reports::expenses_by_category(&s, &month, "expense")?;
+    assert_eq!(
+        report
+            .iter()
+            .map(|r| (r.name.as_str(), r.count, r.total_minor, r.other_minor))
+            .collect::<Vec<_>>(),
+        [
+            ("Loyer", 1, 300_000, 0),
+            ("Électricité, eau et gaz", 1, 5_950, 950)
+        ]
+    );
     // A new category, only on a charge account that takes entries.
     assert_eq!(
         err(create_category(

@@ -270,13 +270,21 @@ test("importing products checks every line before writing", async () => {
   await app.clear("id:import-text");
   await app.paste("id:import-text", { text: "Nom;Prix;Catégorie\nCafé moulu;450;Épicerie\nThé;abc;\n" });
   await app.press("id:import-run");
+  // The faulty line is marked in the preview, with why; nothing is written.
   await app.waitUntil(() =>
-    app.texts().some((t) => plain(t) === "Ligne 3 : Saisissez le prix en chiffres, par exemple 120 ou 120,50."),
+    app.texts().some((t) => plain(t).includes("Saisissez le prix en chiffres, par exemple 120 ou 120,50.")),
   );
-  await app.clear("id:import-text");
-  await app.paste("id:import-text", { text: "Nom;Prix;Catégorie\nCafé moulu;450;Épicerie\nThé vert;220;Épicerie\n" });
+  await app.waitFor("id:import-errors");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1 en erreur"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1 valides"));
+  // The good lines only, when asked.
+  await app.press("id:import-skip-bad");
   await app.press("id:import-run");
-  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 2 002"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 2 001"));
+  await app.press("id:products-import");
+  await app.paste("id:import-text", { text: "Nom;Prix;Catégorie\nThé vert;220;Épicerie\nThé noir;240;Épicerie\n" });
+  await app.press("id:import-run");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 2 003"));
 });
 
 test("tax classes and scale labels are the store's settings", async () => {
@@ -950,8 +958,10 @@ test("customers are imported with their balances after a check", async () => {
   await app.press("id:customers-import");
   await app.waitFor("id:import-text");
   await app.paste("id:import-text", { text: "Nom;Téléphone;Solde\nAhmed Import;0555;1200\nKarim Import;0666;\n" });
-  // The columns are guessed; the first rows show as they will be read.
-  await app.waitUntil(() => app.texts().some((t) => plain(t) === "Ahmed Import · 0555 · 1200"));
+  // The columns are guessed, with samples; the rows show as they will be read.
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "Ahmed Import · Karim Import"));
+  await app.waitFor("id:import-row-1");
+  expect(app.texts()).toContain("Ahmed Import");
   await app.press("id:import-check");
   await app.waitFor("id:import-ready");
   await app.press("id:import-run");
@@ -1143,4 +1153,20 @@ test("the till is arranged for scanning: quantity in one press, pay and print", 
   await app.press("id:pos-customize");
   await app.press("id:pos-layout-use-0");
   await app.press("id:pos-customize-done");
+});
+
+test("the sidebar narrows to icons, and the debts and expenses reports open", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:toggle-sidebar");
+  await app.waitUntil(() => !app.texts().includes("Catalogue"));
+  await app.press("id:toggle-sidebar");
+  await app.waitFor("text:Catalogue");
+  await app.press("text:Rapports");
+  await app.press("id:nav-party_reports");
+  await app.waitFor("text:Clients débiteurs");
+  await app.press("text:Dû aux fournisseurs");
+  await app.waitFor("text:Fournisseurs créanciers");
+  await app.press("text:Dépenses");
+  await app.waitFor("id:party-tabs");
 });
