@@ -51,6 +51,66 @@ fn month_start() -> String {
     format!("{}-01", today.get(..7).unwrap_or("2026-01"))
 }
 
+fn year_start() -> String {
+    let today = iso_days_ago(0);
+    format!("{}-01-01", today.get(..4).unwrap_or("2026"))
+}
+
+/// The days a report covers: ready choices, or two dates typed.
+fn span_picker(
+    st: AppState,
+    ids: (&'static str, &'static str),
+) -> (Signal<String>, Signal<String>, View) {
+    let from = signal(month_start());
+    let to = signal(iso_days_ago(0));
+    // 0: today, 1: 7 days, 2: this month, 3: 30 days, 4: this year.
+    let preset = signal(2usize);
+    effect(move || {
+        let (a, b) = match preset.get() {
+            0 => (iso_days_ago(0), iso_days_ago(0)),
+            1 => (iso_days_ago(6), iso_days_ago(0)),
+            3 => (iso_days_ago(29), iso_days_ago(0)),
+            4 => (year_start(), iso_days_ago(0)),
+            _ => (month_start(), iso_days_ago(0)),
+        };
+        from.set(a);
+        to.set(b);
+    });
+    let filters = view()
+        .flex_row()
+        .flex_wrap()
+        .items_end()
+        .gap(px(12.0))
+        .p(px(12.0))
+        .child(segmented(
+            vec![
+                (0, Box::new(st.t("period.today"))),
+                (1, Box::new(st.t("period.7d"))),
+                (2, Box::new(st.t("reports.this_month"))),
+                (3, Box::new(st.t("period.30d"))),
+                (4, Box::new(st.t("reports.this_year"))),
+            ],
+            preset,
+        ))
+        .child(view().w(px(150.0)).child(field(
+            st.t("reports.from"),
+            from,
+            || "2026-11-01".to_owned(),
+            String::new,
+            KeyboardType::Default,
+            ids.0,
+        )))
+        .child(view().w(px(150.0)).child(field(
+            st.t("reports.to"),
+            to,
+            || "2026-11-30".to_owned(),
+            String::new,
+            KeyboardType::Default,
+            ids.1,
+        )));
+    (from, to, filters)
+}
+
 /// Saves `rows` as a CSV file the person chooses.
 fn export(st: AppState, name: String, rows: Vec<Vec<String>>) {
     let text = to_csv(&rows);
@@ -318,21 +378,7 @@ fn breakdown(
 }
 
 pub fn reports_page(st: AppState, compact: bool) -> View {
-    let from = signal(month_start());
-    let to = signal(iso_days_ago(0));
-    // 0: today, 1: 7 days, 2: this month, 3: 30 days.
-    let preset = signal(2usize);
-    effect(move || {
-        let p = preset.get();
-        let (a, b) = match p {
-            0 => (iso_days_ago(0), iso_days_ago(0)),
-            1 => (iso_days_ago(6), iso_days_ago(0)),
-            3 => (iso_days_ago(29), iso_days_ago(0)),
-            _ => (month_start(), iso_days_ago(0)),
-        };
-        from.set(a);
-        to.set(b);
-    });
+    let (from, to, filters) = span_picker(st, ("rep-from", "rep-to"));
     let by = signal(By::Day);
     let paging = Paging::new(25);
     effect(move || {
@@ -498,37 +544,6 @@ pub fn reports_page(st: AppState, compact: bool) -> View {
             .collect();
         table(heads, rows, "rep-row", compact)
     });
-    let filters = view()
-        .flex_row()
-        .flex_wrap()
-        .items_end()
-        .gap(px(12.0))
-        .p(px(12.0))
-        .child(segmented(
-            vec![
-                (0, Box::new(st.t("period.today"))),
-                (1, Box::new(st.t("period.7d"))),
-                (2, Box::new(st.t("reports.this_month"))),
-                (3, Box::new(st.t("period.30d"))),
-            ],
-            preset,
-        ))
-        .child(view().w(px(150.0)).child(field(
-            st.t("reports.from"),
-            from,
-            || "2026-11-01".to_owned(),
-            String::new,
-            KeyboardType::Default,
-            "rep-from",
-        )))
-        .child(view().w(px(150.0)).child(field(
-            st.t("reports.to"),
-            to,
-            || "2026-11-30".to_owned(),
-            String::new,
-            KeyboardType::Default,
-            "rep-to",
-        )));
     let tabs = view()
         .flex_row()
         .flex_wrap()
@@ -838,4 +853,394 @@ pub fn stock_reports_page(st: AppState, compact: bool) -> View {
         body,
         compact,
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Book {
+    Result,
+    Vat,
+    Shifts,
+}
+
+fn result_rows(
+    st: AppState,
+    r: &nb_store::usecases::reports::IncomeStatement,
+    plain: bool,
+) -> (Vec<String>, Vec<Vec<String>>) {
+    let m = |v: i64| {
+        if plain {
+            plain_money(st, v)
+        } else {
+            money(st, v)
+        }
+    };
+    let heads = [
+        "reports.col.account",
+        "reports.col.name",
+        "reports.col.amount",
+    ]
+    .map(|k| st.tn(k))
+    .to_vec();
+    let mut rows = Vec::new();
+    rows.push(vec![
+        String::new(),
+        st.tn("reports.revenue"),
+        m(r.revenue_minor),
+    ]);
+    for l in &r.revenue {
+        rows.push(vec![l.code.clone(), l.name.clone(), m(l.amount_minor)]);
+    }
+    rows.push(vec![
+        String::new(),
+        st.tn("reports.expenses"),
+        m(r.expenses_minor),
+    ]);
+    for l in &r.expenses {
+        rows.push(vec![l.code.clone(), l.name.clone(), m(l.amount_minor)]);
+    }
+    rows.push(vec![
+        String::new(),
+        st.tn(if r.result_minor() < 0 {
+            "reports.loss"
+        } else {
+            "reports.result"
+        }),
+        m(r.result_minor()),
+    ]);
+    (heads, rows)
+}
+
+fn vat_rows(
+    st: AppState,
+    r: &nb_store::usecases::reports::VatReport,
+    plain: bool,
+) -> (Vec<String>, Vec<Vec<String>>) {
+    let m = |v: i64| {
+        if plain {
+            plain_money(st, v)
+        } else {
+            money(st, v)
+        }
+    };
+    let heads = [
+        "reports.col.month",
+        "reports.vat.collected",
+        "reports.vat.deductible",
+        "reports.vat.due",
+    ]
+    .map(|k| st.tn(k))
+    .to_vec();
+    let rows = r
+        .months
+        .iter()
+        .map(|v| {
+            vec![
+                v.month.clone(),
+                m(v.collected_minor),
+                m(v.deductible_minor),
+                m(v.due_minor()),
+            ]
+        })
+        .collect();
+    (heads, rows)
+}
+
+fn shift_rows(
+    st: AppState,
+    r: &nb_store::usecases::reports::ShiftReport,
+    plain: bool,
+) -> (Vec<String>, Vec<Vec<String>>) {
+    let m = |v: i64| {
+        if plain {
+            plain_money(st, v)
+        } else {
+            money(st, v)
+        }
+    };
+    let opt = |v: Option<i64>| v.map_or_else(|| "—".to_owned(), m);
+    let heads = [
+        "reports.col.shift",
+        "reports.col.opened",
+        "reports.col.cashier",
+        "reports.col.sales",
+        "reports.col.total",
+        "reports.col.expected",
+        "reports.col.counted",
+        "reports.col.difference",
+    ]
+    .map(|k| st.tn(k))
+    .to_vec();
+    let rows = r
+        .rows
+        .iter()
+        .map(|h| {
+            let mut v = vec![
+                format!("{} · {}", h.number, h.register),
+                if plain {
+                    nb_store::time::iso_date(h.opened_at, 60)
+                } else {
+                    date_time(st, h.opened_at)
+                },
+                if h.cashier.is_empty() {
+                    "—".to_owned()
+                } else {
+                    h.cashier.clone()
+                },
+                st.fmt().integer(i64::from(h.sales)),
+                m(h.sales_minor),
+                opt(h.expected_minor),
+                opt(h.counted_minor),
+                if h.status == "open" {
+                    st.tn("reports.shift_open")
+                } else {
+                    opt(h.difference_minor)
+                },
+            ];
+            if plain {
+                for c in v.iter_mut() {
+                    *c = nb_i18n::bidi::strip_controls(c).replace('\u{a0}', "");
+                }
+            }
+            v
+        })
+        .collect();
+    (heads, rows)
+}
+
+/// Finance reports: the result over the days chosen, VAT month by month,
+/// till sessions with their differences.
+pub fn finance_reports_page(st: AppState, compact: bool) -> View {
+    finance(st, compact, Route::FinanceReports, Book::Result)
+}
+
+/// Till sessions (the same report, opened on its own page).
+pub fn shifts_page(st: AppState, compact: bool) -> View {
+    finance(st, compact, Route::Shifts, Book::Shifts)
+}
+
+fn finance(st: AppState, compact: bool, route: Route, first: Book) -> View {
+    use nb_store::usecases::reports::{income_statement, shift_report, vat_report};
+    type Books = (
+        nb_store::usecases::reports::IncomeStatement,
+        nb_store::usecases::reports::VatReport,
+        nb_store::usecases::reports::ShiftReport,
+    );
+    let (from, to, filters) = span_picker(st, ("fin-from", "fin-to"));
+    let book = signal(first);
+    let data = resource(
+        move || {
+            st.session.get()?;
+            Some((from.get(), to.get(), st.data_rev.get()))
+        },
+        move |(a, b, _), _| {
+            let db = st.db();
+            async move {
+                db.call(move |s| {
+                    let span = Span {
+                        from: a.trim().to_owned(),
+                        to: b.trim().to_owned(),
+                    };
+                    Ok((
+                        income_statement(s, &span)?,
+                        vat_report(s, &span)?,
+                        shift_report(s, &span)?,
+                    ))
+                })
+                .await
+            }
+        },
+    );
+    let books = computed(move || data.with(|r: Option<&Books>| r.cloned()));
+    let failed = computed(move || data.error());
+    let profit = move || st.can("reports.profit");
+    let tiles = dynamic(move || {
+        let Some((pl, vat, sh)) = books.get().filter(|_| failed.get().is_none()) else {
+            return view().into_element();
+        };
+        let mut v = view().flex_row().flex_wrap().gap(px(12.0));
+        match book.get() {
+            Book::Result if profit() => {
+                let (rev, exp, res) = (pl.revenue_minor, pl.expenses_minor, pl.result_minor());
+                v = v
+                    .child(tile(
+                        st,
+                        "reports.revenue",
+                        move || whole(st, rev),
+                        Tone::Ink,
+                        "fin-revenue",
+                    ))
+                    .child(tile(
+                        st,
+                        "reports.expenses",
+                        move || whole(st, exp),
+                        Tone::Ink,
+                        "fin-expenses",
+                    ))
+                    .child(tile(
+                        st,
+                        if res < 0 {
+                            "reports.loss"
+                        } else {
+                            "reports.result"
+                        },
+                        move || whole(st, res),
+                        if res < 0 { Tone::Danger } else { Tone::Success },
+                        "fin-result",
+                    ));
+            }
+            Book::Vat => {
+                let (c, d, due) = (vat.collected_minor, vat.deductible_minor, vat.due_minor());
+                v = v
+                    .child(tile(
+                        st,
+                        "reports.vat.collected",
+                        move || whole(st, c),
+                        Tone::Ink,
+                        "fin-vat-out",
+                    ))
+                    .child(tile(
+                        st,
+                        "reports.vat.deductible",
+                        move || whole(st, d),
+                        Tone::Ink,
+                        "fin-vat-in",
+                    ))
+                    .child(tile(
+                        st,
+                        if due < 0 {
+                            "reports.vat.credit"
+                        } else {
+                            "reports.vat.due"
+                        },
+                        move || whole(st, due.abs()),
+                        Tone::Ink,
+                        "fin-vat-due",
+                    ));
+            }
+            Book::Shifts => {
+                let (n, over, short) = (sh.rows.len(), sh.over_minor, sh.short_minor);
+                v = v
+                    .child(tile(
+                        st,
+                        "reports.shifts",
+                        move || st.fmt().integer(i64::try_from(n).unwrap_or(0)),
+                        Tone::Ink,
+                        "fin-shifts",
+                    ))
+                    .child(tile(
+                        st,
+                        "reports.over",
+                        move || whole(st, over),
+                        Tone::Ink,
+                        "fin-over",
+                    ))
+                    .child(tile(
+                        st,
+                        "reports.short",
+                        move || whole(st, short),
+                        if short > 0 { Tone::Danger } else { Tone::Ink },
+                        "fin-short",
+                    ));
+            }
+            Book::Result => {}
+        }
+        v.into_element()
+    });
+    let rows_of = move |b: Book, plain: bool| -> Option<(Vec<String>, Vec<Vec<String>>)> {
+        let (pl, vat, sh) = books.get_untracked()?;
+        Some(match b {
+            Book::Result => result_rows(st, &pl, plain),
+            Book::Vat => vat_rows(st, &vat, plain),
+            Book::Shifts => shift_rows(st, &sh, plain),
+        })
+    };
+    let content = dynamic(move || {
+        if let Some(e) = failed.get() {
+            let text = error_text(st, e.codes.first().map_or("internal", |c| c.1));
+            return label(
+                move || text.clone(),
+                ty::SM,
+                FontWeight::MEDIUM,
+                Tone::Danger,
+            )
+            .into_element();
+        }
+        books.with(|_| ());
+        let b = book.get();
+        if b == Book::Result && !profit() {
+            return label(
+                st.t("reports.no_right"),
+                ty::SM,
+                FontWeight::NORMAL,
+                Tone::Muted,
+            )
+            .into_element();
+        }
+        let Some((heads, rows)) = rows_of(b, false) else {
+            return view().into_element();
+        };
+        if rows.is_empty() {
+            return empty_state(
+                Icon::ChartLine,
+                st.t("reports.nothing"),
+                st.t("reports.empty.body"),
+                None,
+            )
+            .into_element();
+        }
+        table(heads, rows, "fin-row", compact)
+    });
+    let tabs = view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap(px(10.0))
+        .p(px(12.0))
+        .child(view().flex_1().child(segmented(
+            vec![
+                (Book::Result, Box::new(st.t("reports.book.result"))),
+                (Book::Vat, Box::new(st.t("reports.book.vat"))),
+                (Book::Shifts, Box::new(st.t("reports.book.shifts"))),
+            ],
+            book,
+        )))
+        .child(
+            button(
+                Variant::Secondary,
+                Size::Md,
+                Some(Icon::Download),
+                st.t("reports.export"),
+                move || {
+                    let b = book.get_untracked();
+                    if b == Book::Result && !profit() {
+                        return;
+                    }
+                    if let Some((heads, mut rows)) = rows_of(b, true) {
+                        rows.insert(0, heads);
+                        let name = match b {
+                            Book::Result => "resultat",
+                            Book::Vat => "tva",
+                            Book::Shifts => "sessions",
+                        };
+                        export(
+                            st,
+                            format!("{name}-{}-{}.csv", from.get_untracked(), to.get_untracked()),
+                            rows,
+                        );
+                    }
+                },
+            )
+            .test_id("fin-export"),
+        );
+    let subtitle = if route == Route::Shifts {
+        "reports.shifts.subtitle"
+    } else {
+        "reports.finance.subtitle"
+    };
+    let body = view()
+        .gap(px(16.0))
+        .child(card().child(filters))
+        .child(tiles)
+        .child(card().child(tabs).child(content));
+    page(st, route, subtitle, view(), body, compact)
 }

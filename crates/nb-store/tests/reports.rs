@@ -56,7 +56,7 @@ fn sales_profit_and_stock_add_up() -> R {
         })?
         .remove(0)
         .id;
-    open_shift(&mut s, meta(&setup, "shift"), &reg, 0)?;
+    let shift = open_shift(&mut s, meta(&setup, "shift"), &reg, 0)?;
     let sell = |s: &mut Store, lines: Vec<(&str, &str)>, method: &str, amount: i64| {
         complete_sale(
             s,
@@ -185,6 +185,45 @@ fn sales_profit_and_stock_add_up() -> R {
         (1, 0, 1, 400)
     );
     let _ = salt;
+
+    // The books say the same: revenue less returns, less the cost of sales.
+    let pl = income_statement(&s, &span("2026-11-01", "2026-11-30"))?;
+    assert_eq!(
+        (pl.revenue_minor, pl.expenses_minor, pl.result_minor()),
+        (9_000, 7_400, r.profit_minor())
+    );
+    assert!(
+        pl.revenue
+            .iter()
+            .any(|l| l.code == "709" && l.amount_minor == -1_000)
+    );
+    // VAT collected, less what the return gave back; nothing bought.
+    let vat = vat_report(&s, &span("2026-11-01", "2026-11-30"))?;
+    assert_eq!(
+        (vat.collected_minor, vat.deductible_minor, vat.due_minor()),
+        (1_900 - 190, 0, 1_710)
+    );
+    assert_eq!(vat.months.len(), 1);
+    assert_eq!(vat.months[0].month, "2026-11");
+    // The till session: three sales, still open.
+    let sh = shift_report(&s, &span("2026-11-01", "2026-11-30"))?;
+    assert_eq!(sh.rows.len(), 1);
+    assert_eq!(
+        (
+            sh.rows[0].status.as_str(),
+            sh.rows[0].sales,
+            sh.rows[0].sales_minor
+        ),
+        ("open", 3, 11_900)
+    );
+    assert_eq!(sh.rows[0].difference_minor, None);
+    // Closed 5.00 short: cash taken 35.70 + 47.60, 11.90 given back.
+    close_shift(&mut s, meta(&setup, "close"), &shift.id, 7_140 - 500, "")?;
+    let sh = shift_report(&s, &span("2026-11-01", "2026-11-30"))?;
+    assert_eq!(
+        (sh.rows[0].difference_minor, sh.short_minor, sh.over_minor),
+        (Some(-500), 500, 0)
+    );
 
     // The dashboard: the last 7 days, today last.
     let d = dashboard(&s, Period::Week)?;

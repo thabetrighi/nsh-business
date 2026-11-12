@@ -535,6 +535,220 @@ pub fn dashboard(store: &Store, period: Period) -> Result<Dashboard> {
     Ok(out)
 }
 
+/// An account's amount over a span: revenue credit less debit, expenses
+/// debit less credit.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ResultLine {
+    pub code: String,
+    pub name: String,
+    pub amount_minor: i64,
+}
+
+/// What the business earned over a span (classes 7 and 6 of the chart).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct IncomeStatement {
+    pub span: Span,
+    pub revenue: Vec<ResultLine>,
+    pub expenses: Vec<ResultLine>,
+    pub revenue_minor: i64,
+    pub expenses_minor: i64,
+}
+
+impl IncomeStatement {
+    /// Profit when positive, loss when negative.
+    pub fn result_minor(&self) -> i64 {
+        self.revenue_minor - self.expenses_minor
+    }
+}
+
+/// Revenue and expenses posted over a span, account by account.
+pub fn income_statement(store: &Store, span: &Span) -> Result<IncomeStatement> {
+    span.dates()?;
+    let tb = crate::usecases::accounting::trial_balance(store, Some(&span.from), Some(&span.to))?;
+    let mut out = IncomeStatement {
+        span: span.clone(),
+        ..Default::default()
+    };
+    for r in tb.rows.into_iter().filter(|r| !r.is_group) {
+        let line = |amount_minor| ResultLine {
+            code: r.code.clone(),
+            name: r.name.clone(),
+            amount_minor,
+        };
+        if r.code.starts_with('7') {
+            let l = line(r.credit_minor - r.debit_minor);
+            out.revenue_minor += l.amount_minor;
+            if l.amount_minor != 0 {
+                out.revenue.push(l);
+            }
+        } else if r.code.starts_with('6') {
+            let l = line(r.debit_minor - r.credit_minor);
+            out.expenses_minor += l.amount_minor;
+            if l.amount_minor != 0 {
+                out.expenses.push(l);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// VAT over a month: collected on sales, deductible on purchases.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VatMonth {
+    /// `YYYY-MM`.
+    pub month: String,
+    pub collected_minor: i64,
+    pub deductible_minor: i64,
+}
+
+impl VatMonth {
+    /// To pay when positive, to carry forward when negative.
+    pub fn due_minor(&self) -> i64 {
+        self.collected_minor - self.deductible_minor
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VatReport {
+    pub span: Span,
+    pub months: Vec<VatMonth>,
+    pub collected_minor: i64,
+    pub deductible_minor: i64,
+}
+
+impl VatReport {
+    pub fn due_minor(&self) -> i64 {
+        self.collected_minor - self.deductible_minor
+    }
+}
+
+/// VAT posted over a span, month by month, from the accounts the
+/// `vat_out` and `vat_in` roles name.
+pub fn vat_report(store: &Store, span: &Span) -> Result<VatReport> {
+    span.dates()?;
+    store.read(|r| {
+        let conn = r.conn();
+        let (org, _) = the_org(conn)?;
+        let role = |name: &str| -> Result<String> {
+            Ok(conn.query_row(
+                "SELECT account_code FROM account_roles WHERE org_id = ?1 AND role = ?2",
+                params![org.to_string(), name],
+                |r| r.get(0),
+            )?)
+        };
+        let (out_code, in_code) = (role("vat_out")?, role("vat_in")?);
+        let mut s = conn.prepare(
+            "SELECT substr(e.date, 1, 7),
+                    COALESCE(SUM(CASE WHEN l.account_code = ?4 THEN l.credit_minor - l.debit_minor END), 0),
+                    COALESCE(SUM(CASE WHEN l.account_code = ?5 THEN l.debit_minor - l.credit_minor END), 0)
+             FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id
+             WHERE e.org_id = ?1 AND e.date BETWEEN ?2 AND ?3 AND l.account_code IN (?4, ?5)
+             GROUP BY 1 ORDER BY 1",
+        )?;
+        let months: Vec<VatMonth> = s
+            .query_map(
+                params![org.to_string(), span.from, span.to, out_code, in_code],
+                |r| {
+                    Ok(VatMonth {
+                        month: r.get(0)?,
+                        collected_minor: r.get(1)?,
+                        deductible_minor: r.get(2)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(VatReport {
+            span: span.clone(),
+            collected_minor: months.iter().map(|m| m.collected_minor).sum(),
+            deductible_minor: months.iter().map(|m| m.deductible_minor).sum(),
+            months,
+        })
+    })
+}
+
+/// A till session in a list.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ShiftLine {
+    pub id: String,
+    pub number: String,
+    pub register: String,
+    pub status: String,
+    pub opened_at: i64,
+    pub closed_at: Option<i64>,
+    /// Who opened it.
+    pub cashier: String,
+    pub sales: u32,
+    pub sales_minor: i64,
+    pub expected_minor: Option<i64>,
+    pub counted_minor: Option<i64>,
+    /// Counted less expected: over when positive, short when negative.
+    pub difference_minor: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ShiftReport {
+    pub span: Span,
+    pub rows: Vec<ShiftLine>,
+    pub over_minor: i64,
+    pub short_minor: i64,
+}
+
+/// Till sessions opened over a span, newest first.
+pub fn shift_report(store: &Store, span: &Span) -> Result<ShiftReport> {
+    span.dates()?;
+    store.read(|r| {
+        let conn = r.conn();
+        let (org, _) = the_org(conn)?;
+        let mut s = conn.prepare(&format!(
+            "SELECT h.id, h.number, COALESCE(c.name, ''), h.status, h.opened_at, h.closed_at,
+                    COALESCE(u.name, ''),
+                    (SELECT COUNT(*) FROM sales s WHERE s.shift_id = h.id),
+                    (SELECT COALESCE(SUM(total_minor), 0) FROM sales s WHERE s.shift_id = h.id),
+                    h.expected_minor, h.counted_minor, h.difference_minor
+             FROM shifts h
+             LEFT JOIN cash_registers c ON c.id = h.register_id
+             LEFT JOIN users u ON u.id = h.opened_by
+             WHERE h.org_id = ?4 AND {} BETWEEN ?1 AND ?2
+             ORDER BY h.opened_at DESC",
+            day("h.opened_at")
+        ))?;
+        let rows: Vec<ShiftLine> = s
+            .query_map(
+                params![span.from, span.to, r.utc_offset_min, org.to_string()],
+                |r| {
+                    Ok(ShiftLine {
+                        id: r.get(0)?,
+                        number: r.get(1)?,
+                        register: r.get(2)?,
+                        status: r.get(3)?,
+                        opened_at: r.get(4)?,
+                        closed_at: r.get(5)?,
+                        cashier: r.get(6)?,
+                        sales: r.get(7)?,
+                        sales_minor: r.get(8)?,
+                        expected_minor: r.get(9)?,
+                        counted_minor: r.get(10)?,
+                        difference_minor: r.get(11)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut out = ShiftReport {
+            span: span.clone(),
+            ..Default::default()
+        };
+        for d in rows.iter().filter_map(|r| r.difference_minor) {
+            if d > 0 {
+                out.over_minor += d;
+            } else {
+                out.short_minor -= d;
+            }
+        }
+        out.rows = rows;
+        Ok(out)
+    })
+}
+
 /// Rows as CSV for a spreadsheet (UTF-8 with its mark, fields quoted when
 /// they need it, CRLF lines).
 pub fn to_csv(rows: &[Vec<String>]) -> String {

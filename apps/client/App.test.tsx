@@ -889,3 +889,27 @@ test("a sale shows on the dashboard and in the reports", async () => {
   await app.waitFor("id:stk-value");
   await app.waitFor("id:stk-row-0");
 });
+
+test("the finance reports show the result, the VAT and the till sessions", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-confirm");
+  await app.press("id:pay-confirm");
+  await app.waitUntil(() => app.texts().some((t) => /^Vente FV-/.test(plain(t))));
+  await app.press("text:Rapports");
+  await app.press("id:nav-finance_reports");
+  await app.waitFor("id:fin-result");
+  await app.waitFor("id:fin-row-0");
+  await app.press("text:TVA");
+  await app.waitFor("id:fin-vat-due");
+  await app.press("text:Sessions de caisse");
+  await app.waitFor("id:fin-shifts");
+  await app.waitFor("text:Ouverte");
+});
