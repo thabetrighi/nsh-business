@@ -93,6 +93,39 @@ pub fn App() -> impl IntoElement {
     });
     drop(lock_timer); // runs while the root lives: tasks end with their owner
 
+    // Scheduled backups (M14.1), from the root so that no screen ends them:
+    // a check soon after the start, then every ten minutes.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let check = move || {
+            if st.session.get_untracked().is_none() {
+                return;
+            }
+            let db = st.db();
+            let task = spawn(async move {
+                let r = db
+                    .call(|s| {
+                        if nb_store::usecases::backups::backup_due(s)? {
+                            nb_store::usecases::backups::backup_now(s, None).map(Some)
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                    .await;
+                match r {
+                    Ok(Some(p)) => log::info!("backup: {}", p.display()),
+                    Ok(None) => {}
+                    Err(e) => log::error!("backup: {}", e.message),
+                }
+            });
+            drop(task); // runs to completion: tasks end with their owner, not their handle
+        };
+        let first = set_timeout(std::time::Duration::from_secs(60), check);
+        drop(first); // runs while the root lives
+        let every = set_interval(std::time::Duration::from_secs(600), check);
+        drop(every); // runs while the root lives
+    }
+
     let look = computed(move || st.prefs.look());
     view()
         .flex_1()

@@ -913,3 +913,30 @@ test("the finance reports show the result, the VAT and the till sessions", async
   await app.waitFor("id:fin-shifts");
   await app.waitFor("text:Ouverte");
 });
+
+test("a sealed backup is made, checked and restored", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-settings");
+  await app.press("id:settings-sync");
+  await app.waitFor("text:Non configurées");
+  await app.type("id:bk-pass", "correct horse battery");
+  await app.type("id:bk-pass2", "correct horse battery");
+  await app.clear("id:bk-dir");
+  await app.type("id:bk-dir", `/tmp/nb-ui-backups-${Date.now()}`);
+  await app.press("id:bk-save");
+  await app.waitFor("text:Réglages des sauvegardes enregistrés.");
+  await app.waitFor("id:bk-now");
+  await app.press("id:bk-now");
+  await seen(/^Sauvegarde faite : nsh-business-\d{8}-\d{6}\.nbk$/);
+  await app.waitFor("id:bk-file-0");
+  await seen(/^Dernière sauvegarde : /);
+  await app.press("id:bk-check-0");
+  await seen(/ s'ouvre et est saine\.$/);
+  await app.press("id:bk-restore-0");
+  await app.waitFor("id:bk-restore-confirm");
+  await app.press("id:bk-restore-confirm");
+  await app.waitFor("text:Données restaurées.");
+  await app.waitFor("text:Ventes brutes");
+});

@@ -7,6 +7,8 @@
 //! - [`repo`]: reading and writing rows; [`usecases`]: the operations the
 //!   app runs (they call the rules of `nb-domain`).
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod backup;
 pub mod demo;
 pub mod error;
 pub mod migrate;

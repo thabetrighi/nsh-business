@@ -1102,20 +1102,6 @@ fn sync(st: AppState, compact: bool) -> View {
                 .border_t_1()
                 .border_color(Tone::Border.color())
                 .child(button(
-                    Variant::Secondary,
-                    Size::Md,
-                    Some(Icon::Upload),
-                    st.t("action.restore"),
-                    || {},
-                ))
-                .child(button(
-                    Variant::Secondary,
-                    Size::Md,
-                    Some(Icon::HardDrive),
-                    st.t("action.backup"),
-                    || {},
-                ))
-                .child(button(
                     Variant::Primary,
                     Size::Md,
                     Some(Icon::Refresh),
@@ -1123,8 +1109,16 @@ fn sync(st: AppState, compact: bool) -> View {
                     || {},
                 )),
         );
-    let _ = compact;
-    status
+    let mut v = view().gap(px(20.0)).child(status);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        v = v.child(crate::screens::backup::backup_card(st, compact));
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = compact;
+    }
+    v
 }
 
 fn about(st: AppState, compact: bool) -> View {

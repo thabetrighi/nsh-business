@@ -2,6 +2,8 @@
 
 pub mod accounting;
 pub mod approval;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod backup;
 pub mod catalog;
 pub mod common;
 pub mod customers;

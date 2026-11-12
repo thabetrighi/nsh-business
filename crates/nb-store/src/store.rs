@@ -208,4 +208,158 @@ impl Store {
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
+
+    /// The schema version of the open database.
+    pub fn schema_version(&self) -> Result<u32> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn scratch_file() -> PathBuf {
+    let tag: String = nb_core::random_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    std::env::temp_dir().join(format!("nb-{tag}.db"))
+}
+
+/// What a restore found once the database was back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restored {
+    /// The schema the backup had; the store migrated it to the latest.
+    pub from_schema: u32,
+    /// Stock balances that did not match their movements (rebuilt).
+    pub stock_fixed: usize,
+    pub health: Health,
+    /// The database as it was before, kept next to its file.
+    pub previous: Option<PathBuf>,
+}
+
+/// Checks a database file before it replaces the store's: a sound SQLite
+/// file of this app, of a schema it knows. Returns that schema.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn checked_schema(file: &Path) -> Result<u32> {
+    let bad = || Error::from(nb_domain::RuleError::on("backup", "backup.damaged"));
+    let src = Connection::open_with_flags(file, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| bad())?;
+    let ok: String = src
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .map_err(|_| bad())?;
+    if ok != "ok" {
+        return Err(bad());
+    }
+    let v: u32 = src
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|_| bad())?;
+    let has_org: i64 = src
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'organizations'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|_| bad())?;
+    if has_org == 0 || v == 0 {
+        return Err(bad());
+    }
+    if v > migrate::latest() {
+        return Err(nb_domain::RuleError::on("backup", "backup.too_new").into());
+    }
+    Ok(v)
+}
+
+/// Checks a snapshot's bytes as [`checked_schema`] does.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn check_snapshot(db: &[u8]) -> Result<u32> {
+    let tmp = scratch_file();
+    std::fs::write(&tmp, db).map_err(|e| Error::Backup(e.to_string()))?;
+    let r = checked_schema(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    r
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Store {
+    /// A consistent, compact copy of the database's file (`VACUUM INTO`),
+    /// taken between operations.
+    pub fn snapshot(&self) -> Result<Vec<u8>> {
+        let tmp = scratch_file();
+        let path = tmp
+            .to_str()
+            .ok_or_else(|| Error::Backup("temporary path is not UTF-8".into()))?;
+        self.conn.execute("VACUUM INTO ?1", [path])?;
+        let bytes = std::fs::read(&tmp).map_err(|e| Error::Backup(e.to_string()));
+        let _ = std::fs::remove_file(&tmp);
+        bytes
+    }
+
+    /// Replaces the whole database with `db` (a snapshot's bytes), in
+    /// place: checked first (a sound SQLite file of a schema this app
+    /// knows), the current one kept next to its file, then migrated, the
+    /// device reread, the stock projection rebuilt and everything checked.
+    pub fn restore_snapshot(&mut self, db: &[u8]) -> Result<Restored> {
+        let tmp = scratch_file();
+        std::fs::write(&tmp, db).map_err(|e| Error::Backup(e.to_string()))?;
+        let result = self.restore_from(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        result
+    }
+
+    fn restore_from(&mut self, file: &Path) -> Result<Restored> {
+        let from_schema = checked_schema(file)?;
+        let previous = match &self.path {
+            Some(p) => {
+                let name = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or_else(|| Error::Backup("database path has no file name".into()))?;
+                let keep = p.with_file_name(format!("{name}.before-restore"));
+                if keep.exists() {
+                    std::fs::remove_file(&keep).map_err(|e| Error::Backup(e.to_string()))?;
+                }
+                let k = keep
+                    .to_str()
+                    .ok_or_else(|| Error::Backup("path is not UTF-8".into()))?;
+                self.conn.execute("VACUUM INTO ?1", [k])?;
+                Some(keep)
+            }
+            None => None,
+        };
+        self.conn.restore(
+            rusqlite::MAIN_DB,
+            file,
+            None::<fn(rusqlite::backup::Progress)>,
+        )?;
+        migrate::migrate_to(&mut self.conn, migrate::latest(), None)?;
+        let (id, prefix): (String, String) =
+            self.conn
+                .query_row("SELECT id, prefix FROM device LIMIT 1", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?;
+        self.device = Device {
+            id: id
+                .parse()
+                .map_err(|_| Error::Corrupt(format!("device id {id}")))?,
+            prefix,
+        };
+        let node = u64::from_be_bytes(
+            self.device.id.uuid().as_bytes()[8..16]
+                .try_into()
+                .map_err(|_| Error::Corrupt("device id".into()))?,
+        );
+        self.hlc = Hlc::new(node);
+        let stock_fixed = match crate::repo::org::the_org(&self.conn)? {
+            Some(o) => crate::repo::stock::rebuild_balances(&self.conn, o.currency()?)?.len(),
+            None => 0,
+        };
+        crate::repo::tracking::rebuild_lot_balances(&self.conn)?;
+        Ok(Restored {
+            from_schema,
+            stock_fixed,
+            health: self.health()?,
+            previous,
+        })
+    }
 }

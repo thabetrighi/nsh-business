@@ -98,23 +98,9 @@ impl Session {
     }
 }
 
-/// Opens the store and makes sure an organization exists (a demo one on a
-/// first start, in the interface's language).
-fn open(lang: DemoLang) -> Result<(Store, Session), Error> {
-    let opts = StoreOptions {
-        device_name: "client".into(),
-        ..StoreOptions::default()
-    };
-    let mut store = match PATH.get().cloned().or_else(packaged_path) {
-        Some(p) => {
-            if let Some(dir) = p.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| Error::Backup(e.to_string()))?;
-            }
-            Store::open(&p, opts)?
-        }
-        None => Store::open_in_memory(opts)?,
-    };
-    let existing = store.read(|r| {
+/// The organization this database works for, if it has one.
+fn read_session(store: &Store) -> Result<Option<Session>, Error> {
+    store.read(|r| {
         let Some(o) = nb_store::repo::org::the_org(r.conn())? else {
             return Ok(None);
         };
@@ -143,7 +129,26 @@ fn open(lang: DemoLang) -> Result<(Store, Session), Error> {
             currency: o.currency()?,
             actor: owner,
         }))
-    })?;
+    })
+}
+
+/// Opens the store and makes sure an organization exists (a demo one on a
+/// first start, in the interface's language).
+fn open(lang: DemoLang) -> Result<(Store, Session), Error> {
+    let opts = StoreOptions {
+        device_name: "client".into(),
+        ..StoreOptions::default()
+    };
+    let mut store = match PATH.get().cloned().or_else(packaged_path) {
+        Some(p) => {
+            if let Some(dir) = p.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| Error::Backup(e.to_string()))?;
+            }
+            Store::open(&p, opts)?
+        }
+        None => Store::open_in_memory(opts)?,
+    };
+    let existing = read_session(&store)?;
     let session = match existing {
         Some(s) => s,
         None => {
@@ -274,6 +279,27 @@ impl Db {
                 None => Err(stopped()),
             })
         }
+    }
+
+    /// Replaces the data with a backup's, then reads the organization
+    /// again (a backup from another device brings its own).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn restore(
+        &self,
+        meta: OpMeta,
+        path: PathBuf,
+        passphrase: String,
+    ) -> Result<nb_store::store::Restored, DbError> {
+        self.run(move |state| {
+            let store = state.store.as_mut().ok_or_else(stopped)?;
+            let r = nb_store::usecases::backups::restore_backup(store, meta, &path, &passphrase)
+                .map_err(DbError::from)?;
+            if let Ok(Some(s)) = read_session(store) {
+                state.session = Ok(s);
+            }
+            Ok(r)
+        })
+        .await
     }
 
     /// The organization this device works for, once the store is open.

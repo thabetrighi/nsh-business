@@ -4,6 +4,8 @@
 
 pub mod access;
 pub mod accounting;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod backups;
 pub mod catalog;
 pub mod customers;
 pub mod debts;
