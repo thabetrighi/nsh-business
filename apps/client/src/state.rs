@@ -139,6 +139,13 @@ pub fn persisted_index(key: &'static str, default: usize) -> Signal<usize> {
     s
 }
 
+/// A text setting saved on the device.
+pub fn persisted_text(key: &'static str) -> Signal<String> {
+    let s = signal(stored(key, |v| Some(v.to_owned())).unwrap_or_default());
+    effect(move || save(key, &s.get()));
+    s
+}
+
 /// An on/off setting saved on the device.
 pub fn persisted_flag(key: &'static str, default: bool) -> Signal<bool> {
     let s = signal(stored(key, |v| v.parse().ok()).unwrap_or(default));
@@ -158,7 +165,10 @@ pub struct BizPrefs {
     pub tax_on_receipt: Signal<bool>,
     pub receipt_width: Signal<usize>,
     pub printer: Signal<usize>,
-    pub print_logo: Signal<bool>,
+    /// The network printer's address (`host` or `host:port`, 9100 by default).
+    pub printer_addr: Signal<String>,
+    /// Invoices: 0 = A4, 1 = A5.
+    pub invoice_paper: Signal<usize>,
     pub auto_print: Signal<bool>,
     pub copies: Signal<usize>,
     pub scale: Signal<usize>,
@@ -177,7 +187,8 @@ impl BizPrefs {
             tax_on_receipt: persisted_flag("nb.tax.on_receipt", true),
             receipt_width: persisted_index("nb.print.width", 1),
             printer: persisted_index("nb.print.printer", 0),
-            print_logo: persisted_flag("nb.print.logo", true),
+            printer_addr: persisted_text("nb.print.addr"),
+            invoice_paper: persisted_index("nb.print.invoice", 0),
             auto_print: persisted_flag("nb.print.auto", false),
             copies: persisted_index("nb.print.copies", 0),
             scale: persisted_index("nb.device.scale", 0),
@@ -223,6 +234,9 @@ pub struct AppState {
     pub features: Signal<Option<FeatureSet>>,
     /// Last time someone touched the app (ms), for the automatic lock.
     pub last_active: Stored<i64>,
+    /// The app's root: work that must outlive the screen or window that
+    /// started it (printing after a sale) runs under it.
+    pub root: Owner,
 }
 
 impl AppState {
@@ -254,6 +268,7 @@ impl AppState {
             needs_sign_in: signal(false),
             features: signal(None),
             last_active: nsh_core::prelude::stored(now_ms()),
+            root: Owner::current(),
         };
         if st.biz.start_page.get_untracked() == 1 {
             st.route.set(Route::Sell);

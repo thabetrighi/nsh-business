@@ -2015,6 +2015,15 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                             tr_args(st.lang(), "pos.sold", &[("number", &r.number)])
                         };
                         show_toast(st, text);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if st.biz.auto_print.get_untracked() {
+                            // The drawer opens when cash came in.
+                            crate::screens::printing::print_receipt(
+                                st,
+                                r.number.clone(),
+                                r.cash_minor > 0,
+                            );
+                        }
                         t.search.focus();
                     }
                     Err(e) => {

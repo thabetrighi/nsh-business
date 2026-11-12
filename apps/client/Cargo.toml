@@ -20,6 +20,9 @@ nsh-base = "=0.4.0"
 env_logger = "0.11"
 log = "0.4"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+nb-docs.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 nsh-platform-linux = { version = "=0.4.0", default-features = false }
 

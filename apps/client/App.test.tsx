@@ -957,3 +957,44 @@ test("customers are imported with their balances after a check", async () => {
   await app.press("id:import-run");
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 client(s) importé(s)"));
 });
+
+test("a sale's receipt and invoice are previewed, and the printer is set", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-confirm");
+  await app.press("id:pay-confirm");
+  await seen(/^Vente FV-01-\d\d-A\d+ enregistrée/);
+  await app.press("text:Ventes");
+  await app.press("id:nav-sales");
+  await app.waitFor("id:sale-print-0");
+  await app.press("id:sale-print-0");
+  // No printer yet: a PDF only.
+  await seen(/^Imprimer la vente FV-01-/);
+  await app.waitFor("text:Aucune imprimante de tickets : vous pouvez enregistrer un PDF.");
+  await app.waitFor("id:print-preview");
+  await app.waitFor("id:print-pdf");
+  expect(app.texts()).not.toContain("Imprimer");
+  await app.press("text:Facture");
+  await app.waitFor("id:print-sheet");
+  await app.waitFor("id:print-preview");
+  await app.press("id:dialog-close");
+  // A network printer, its address.
+  await app.press("id:nav-settings");
+  await app.press("id:settings-printing");
+  await app.waitFor("id:printer-select");
+  expect(app.texts()).not.toContain("Adresse de l'imprimante");
+  await app.press("id:printer-select");
+  await app.press("text:Imprimante réseau (ESC/POS)");
+  await app.waitFor("id:printer-addr");
+  await app.type("id:printer-addr", "127.0.0.1:1");
+  await app.press("id:printer-test");
+  await app.waitFor("text:Impression impossible. Vérifiez que l'imprimante est allumée et son adresse.");
+});

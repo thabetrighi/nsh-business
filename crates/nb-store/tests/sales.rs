@@ -755,3 +755,40 @@ fn an_exchange_is_paid_up_and_never_empties_the_drawer() -> R {
     healthy(&s)?;
     Ok(())
 }
+
+/// What a printed receipt shows: the lines as sold, VAT by rate, the cash
+/// handed over and the change, the cashier and till, the customer.
+#[test]
+fn a_sale_as_printed() -> R {
+    use nb_store::usecases::printing::{print_sale, print_shop};
+    let (mut s, setup) = store();
+    let milk = stocked(&mut s, &setup, "Lait", "10", 800, 1_190)?;
+    let reg = register(&s);
+    open_shift(&mut s, meta(&setup, "shift.open"), &reg, 0)?;
+    let r = complete_sale(
+        &mut s,
+        meta(&setup, "sale"),
+        sale(&setup, &reg, vec![(milk, "3")], vec![("cash", 5_000)]),
+    )?;
+    let p = print_sale(&s, &r.number)?;
+    assert_eq!(p, print_sale(&s, &r.id)?);
+    assert_eq!(p.number, r.number);
+    assert_eq!(p.lines.len(), 1);
+    assert_eq!(
+        (
+            p.lines[0].name.as_str(),
+            p.lines[0].qty_milli,
+            p.lines[0].amount_minor
+        ),
+        ("Lait", 3_000, 3_570)
+    );
+    assert_eq!(p.total_minor, 3_570);
+    assert_eq!(p.taxes, vec![(1_900, 3_000, 570)]);
+    assert_eq!(p.payments, vec![("cash".to_owned(), 5_000)]);
+    assert_eq!((p.change_minor, p.owed_minor), (1_430, 0));
+    assert!(!p.cashier.is_empty() && !p.register.is_empty());
+    assert!(p.customer.is_none());
+    assert!(!print_shop(&s)?.name.is_empty());
+    assert!(matches!(print_sale(&s, "FV-nope"), Err(Error::NotFound(_))));
+    Ok(())
+}

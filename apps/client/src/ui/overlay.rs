@@ -110,12 +110,15 @@ pub fn dialog_frame(
                         .child(label(title, ty::XL, FontWeight::BOLD, Tone::Ink))
                         .child(label(description, ty::SM, FontWeight::NORMAL, Tone::Muted)),
                 )
-                .child(icon_button(
-                    || Icon::Close,
-                    st.t("action.close"),
-                    Variant::Ghost,
-                    on_close,
-                )),
+                .child(
+                    icon_button(
+                        || Icon::Close,
+                        st.t("action.close"),
+                        Variant::Ghost,
+                        on_close,
+                    )
+                    .test_id("dialog-close"),
+                ),
         )
         .child(
             scroll()

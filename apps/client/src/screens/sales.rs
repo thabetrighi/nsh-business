@@ -142,6 +142,9 @@ fn summary_bar(st: AppState, count_key: &'static str, count: Memo<u32>, sum: Mem
 
 pub fn sales_page(st: AppState, compact: bool) -> View {
     let text = signal(String::new());
+    // The sale whose print dialog is open.
+    let printing: Signal<Option<String>> = signal(None);
+    let printing_open = signal(false);
     let paging = Paging::new(25);
     effect(move || {
         text.with(|_| ());
@@ -216,6 +219,22 @@ pub fn sales_page(st: AppState, compact: bool) -> View {
                 FontWeight::BOLD,
                 || Tone::Ink,
             ));
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let number = r.number.clone();
+                tail = tail.child(
+                    icon_button(
+                        || Icon::Printer,
+                        st.t("action.print"),
+                        Variant::Ghost,
+                        move || {
+                            printing.set(Some(number.clone()));
+                            printing_open.set(true);
+                        },
+                    )
+                    .test_id(&format!("sale-print-{i}")),
+                );
+            }
             v = v.child(list_row(
                 format!("sale-{i}"),
                 r.number,
@@ -247,7 +266,26 @@ pub fn sales_page(st: AppState, compact: bool) -> View {
         )
         .test_id("sales-till"),
     );
-    page(st, Route::Sales, "sales.subtitle", actions, body, compact)
+    let dialog = modal(printing_open, compact, move || {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(number) = printing.get_untracked() {
+            return crate::screens::printing::print_dialog(st, number, move || {
+                printing_open.set(false)
+            })
+            .into_element();
+        }
+        view().into_element()
+    });
+    view()
+        .child(page(
+            st,
+            Route::Sales,
+            "sales.subtitle",
+            actions,
+            body,
+            compact,
+        ))
+        .child(dialog)
 }
 
 // ----------------------------------------------------------------- returns

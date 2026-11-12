@@ -935,6 +935,24 @@ fn taxes(st: AppState, compact: bool) -> View {
 
 fn printing(st: AppState, compact: bool) -> View {
     let b = st.biz;
+    let test = move || {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let addr = b.printer_addr.get_untracked().trim().to_owned();
+            if b.printer.get_untracked() == 0 || addr.is_empty() {
+                show_toast(st, st.tn("print.no_address"));
+                return;
+            }
+            let roll = if b.receipt_width.get_untracked() == 0 {
+                nb_docs::Paper::Roll58
+            } else {
+                nb_docs::Paper::Roll80
+            };
+            crate::screens::printing::test_print(st, addr, roll);
+        }
+        #[cfg(target_arch = "wasm32")]
+        show_toast(st, st.tn("print.unavailable"));
+    };
     view().gap(px(20.0)).child(group_card(
         st,
         None,
@@ -943,21 +961,34 @@ fn printing(st: AppState, compact: bool) -> View {
                 st,
                 "print.printer",
                 "print.printer.help",
-                dropdown(
-                    move || {
-                        vec![
-                            (0usize, st.tn("print.none")),
-                            (1, "XPrinter XP-58 · USB".to_owned()),
-                            (2, "Sunmi V2 · Bluetooth".to_owned()),
-                            (3, "Epson TM-T20 · 192.168.1.50".to_owned()),
-                        ]
-                    },
-                    b.printer,
-                    Some(Icon::Printer),
-                    st.t("print.printer"),
-                    "printer-select",
-                )
-                .w_full(),
+                view()
+                    .w_full()
+                    .gap(px(8.0))
+                    .child(
+                        dropdown(
+                            move || {
+                                vec![(0usize, st.tn("print.none")), (1, st.tn("print.network"))]
+                            },
+                            b.printer,
+                            Some(Icon::Printer),
+                            st.t("print.printer"),
+                            "printer-select",
+                        )
+                        .w_full(),
+                    )
+                    .child(when(
+                        move || b.printer.get() > 0,
+                        move || {
+                            field(
+                                st.t("print.addr"),
+                                b.printer_addr,
+                                || "192.168.1.50:9100".to_owned(),
+                                String::new,
+                                KeyboardType::Default,
+                                "printer-addr",
+                            )
+                        },
+                    )),
                 compact,
             ),
             row(
@@ -976,16 +1007,16 @@ fn printing(st: AppState, compact: bool) -> View {
             ),
             row(
                 st,
-                "print.logo",
-                "print.logo.help",
-                switch(b.print_logo, st.t("print.logo")),
+                "print.auto",
+                "print.auto.help",
+                switch(b.auto_print, st.t("print.auto")),
                 compact,
             ),
             row(
                 st,
-                "print.auto",
-                "print.auto.help",
-                switch(b.auto_print, st.t("print.auto")),
+                "print.invoice_paper",
+                "print.invoice_paper.help",
+                segmented(plain_choices(&["A4", "A5"]), b.invoice_paper),
                 compact,
             ),
             view()
@@ -993,13 +1024,16 @@ fn printing(st: AppState, compact: bool) -> View {
                 .py(px(14.0))
                 .flex_row()
                 .justify_end()
-                .child(button(
-                    Variant::Secondary,
-                    Size::Md,
-                    Some(Icon::Printer),
-                    st.t("action.test_print"),
-                    || {},
-                )),
+                .child(
+                    button(
+                        Variant::Secondary,
+                        Size::Md,
+                        Some(Icon::Printer),
+                        st.t("action.test_print"),
+                        test,
+                    )
+                    .test_id("printer-test"),
+                ),
         ],
     ))
 }
