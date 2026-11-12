@@ -221,6 +221,10 @@ pub struct AppState {
     pub session: Signal<Option<crate::db::Session>>,
     /// Why the database could not open, if it could not.
     pub db_error: Signal<Option<String>>,
+    /// No shop on this device yet: the first-run setup shows.
+    pub needs_setup: Signal<bool>,
+    /// The shop's name and its branch's (the sidebar's header).
+    pub shop: Signal<Option<(String, String)>>,
     /// The database checked at start found something wrong (after a crash
     /// or a disk fault): shown until it is looked at.
     pub unsound: Signal<bool>,
@@ -263,6 +267,8 @@ impl AppState {
             db: nsh_core::prelude::stored(None),
             session: signal(None),
             db_error: signal(None),
+            needs_setup: signal(false),
+            shop: signal(None),
             unsound: signal(false),
             data_rev: signal(0),
             user: signal(None),
@@ -303,6 +309,14 @@ impl AppState {
     }
 
     /// The local database (started by [`AppState::connect`] if needed).
+    /// The demo's language, as the interface's.
+    pub fn demo_lang(&self) -> nb_store::demo::DemoLang {
+        match self.lang.get_untracked() {
+            Lang::Ar => nb_store::demo::DemoLang::Ar,
+            _ => nb_store::demo::DemoLang::Fr,
+        }
+    }
+
     pub fn db(&self) -> crate::db::Db {
         if let Some(db) = self.db.get() {
             return db;
@@ -323,21 +337,31 @@ impl AppState {
             let opened = async {
                 let s = db.session().await?;
                 let owner = s.owner();
-                let (needs, features, me) = db
+                let s_org = s.setup.org;
+                let (needs, features, me, shop) = db
                     .call(move |store| {
+                        let name = org_usecases::settings(store)?.name;
+                        let branch = store.read(|r| {
+                            Ok(nb_store::repo::org::branches(r.conn(), s_org)?
+                                .into_iter()
+                                .next()
+                                .map(|b| b.name)
+                                .unwrap_or_default())
+                        })?;
                         let needs = sign_in_required(store)?;
                         let me = if needs {
                             None
                         } else {
                             Some(session_of(store, owner)?)
                         };
-                        Ok((needs, org_usecases::features(store)?, me))
+                        Ok((needs, org_usecases::features(store)?, me, (name, branch)))
                     })
                     .await?;
-                Ok::<_, crate::db::DbError>((s, needs, features, me))
+                Ok::<_, crate::db::DbError>((s, needs, features, me, shop))
             };
             match opened.await {
-                Ok((s, needs, features, me)) => {
+                Ok((s, needs, features, me, shop)) => {
+                    self.shop.set(Some(shop));
                     self.needs_sign_in.set(needs);
                     self.features.set(Some(features));
                     self.session.set(Some(s));
@@ -355,6 +379,9 @@ impl AppState {
                         Ok(_) => {}
                         Err(e) => log::error!("database check: {}", e.message),
                     }
+                }
+                Err(e) if e.codes.iter().any(|c| c.1 == crate::db::NEEDS_SETUP) => {
+                    self.needs_setup.set(true);
                 }
                 Err(e) => {
                     log::error!("database: {}", e.message);

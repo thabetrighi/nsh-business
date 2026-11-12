@@ -1066,3 +1066,74 @@ pub fn schedule(shop: &Shop, s: &Schedule, lang: Lang, paper: Paper, o: &Options
         blocks: b,
     }
 }
+
+/// A report's table on sheets (M13.5): the title, what it covers, the
+/// header row, then every row: names at the start, figures at the end.
+pub fn report_table(
+    shop: &str,
+    title: &str,
+    subtitle: &str,
+    rows: &[Vec<String>],
+    lang: Lang,
+    paper: Paper,
+) -> Doc {
+    let mut b = vec![
+        Block::text(shop, 9.0, false, Place::Start),
+        Block::text(title, 16.0, true, Place::Start),
+    ];
+    if !subtitle.is_empty() {
+        b.push(Block::text(subtitle, 9.0, false, Place::Start));
+    }
+    b.push(Block::Gap(8.0));
+    let Some((heads, body)) = rows.split_first() else {
+        return Doc {
+            paper,
+            rtl: lang == Lang::Ar,
+            blocks: b,
+        };
+    };
+    let n = heads.len().max(1);
+    // The first column (a name) takes more room than figures.
+    let first = if n == 1 {
+        1.0
+    } else {
+        (0.34_f32).max(1.0 / n as f32)
+    };
+    let rest = if n == 1 {
+        0.0
+    } else {
+        (1.0 - first) / (n - 1) as f32
+    };
+    let share = |i: usize| if i == 0 { first } else { rest };
+    let size = if n > 6 { 7.5 } else { 8.5 };
+    b.push(Block::Line);
+    b.push(Block::Row {
+        cells: heads
+            .iter()
+            .enumerate()
+            .map(|(i, h)| Cell::new(h, share(i), if i == 0 { Place::Start } else { Place::End }))
+            .collect(),
+        size,
+        bold: true,
+    });
+    b.push(Block::Line);
+    for row in body {
+        b.push(Block::Row {
+            cells: row
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    Cell::new(v, share(i), if i == 0 { Place::Start } else { Place::End })
+                })
+                .collect(),
+            size,
+            bold: false,
+        });
+    }
+    b.push(Block::Line);
+    Doc {
+        paper,
+        rtl: lang == Lang::Ar,
+        blocks: b,
+    }
+}

@@ -130,6 +130,94 @@ fn export(st: AppState, name: String, rows: Vec<Vec<String>>) {
     drop(task); // runs to completion: tasks end with their owner, not their handle
 }
 
+/// What a report exports: the file's name (no extension), its title and
+/// what it covers, and its rows (the header first).
+type Export = (String, String, String, Vec<Vec<String>>);
+
+/// Saves the report as a PDF table the person names.
+#[cfg(not(target_arch = "wasm32"))]
+fn export_pdf(st: AppState, (name, title, subtitle, rows): Export) {
+    let lang = st.lang();
+    let task = spawn(async move {
+        let shop = st
+            .db()
+            .call(|s| nb_store::usecases::printing::print_shop(s))
+            .await
+            .map(|s| s.name)
+            .unwrap_or_default();
+        let dialog = nsh_core::file_dialog::SaveDialog::new()
+            .file_name(format!("{name}.pdf"))
+            .title(st.tn("reports.export_pdf"));
+        let Ok(Some(path)) = pick_save_path(dialog).await else {
+            return;
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let doc = nb_docs::templates::report_table(
+                &shop,
+                &title,
+                &subtitle,
+                &rows,
+                lang,
+                nb_docs::Paper::A4,
+            );
+            let r = nb_docs::pdf(&doc)
+                .map_err(|e| e.0)
+                .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()));
+            let _ = tx.send(r);
+        });
+        match rx.await {
+            Ok(Ok(())) => show_toast(st, st.tn("reports.exported")),
+            _ => show_toast(st, st.tn("reports.export_failed")),
+        }
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
+}
+
+/// CSV and PDF buttons for a report.
+fn export_buttons(
+    st: AppState,
+    ids: (&'static str, &'static str),
+    make: impl Fn() -> Option<Export> + Clone + 'static,
+) -> View {
+    let csv = {
+        let make = make.clone();
+        move || {
+            if let Some((name, _, _, rows)) = make() {
+                export(st, format!("{name}.csv"), rows);
+            }
+        }
+    };
+    let v = view().flex_row().gap(px(8.0)).child(
+        button(
+            Variant::Secondary,
+            Size::Md,
+            Some(Icon::Download),
+            st.t("reports.export"),
+            csv,
+        )
+        .test_id(ids.0),
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    let v = v.child(
+        button(
+            Variant::Secondary,
+            Size::Md,
+            Some(Icon::FileText),
+            st.t("reports.export_pdf"),
+            move || {
+                if let Some(e) = make() {
+                    export_pdf(st, e);
+                }
+            },
+        )
+        .test_id(ids.1),
+    );
+    #[cfg(target_arch = "wasm32")]
+    let _ = (ids.1, make);
+    v
+}
+
 fn tile(
     st: AppState,
     key: &'static str,
@@ -560,27 +648,21 @@ pub fn reports_page(st: AppState, compact: bool) -> View {
             ],
             by,
         )))
-        .child(
-            button(
-                Variant::Secondary,
-                Size::Md,
-                Some(Icon::Download),
-                st.t("reports.export"),
-                move || {
-                    if let Some(r) = report.get_untracked() {
-                        let (heads, mut rows) =
-                            breakdown(st, &r, by.get_untracked(), profit(), true);
-                        rows.insert(0, heads);
-                        export(
-                            st,
-                            format!("ventes-{}-{}.csv", r.span.from, r.span.to),
-                            rows,
-                        );
-                    }
-                },
-            )
-            .test_id("rep-export"),
-        );
+        .child(export_buttons(st, ("rep-export", "rep-pdf"), move || {
+            let r = report.get_untracked()?;
+            let (heads, mut rows) = breakdown(st, &r, by.get_untracked(), profit(), true);
+            rows.insert(0, heads);
+            Some((
+                format!("ventes-{}-{}", r.span.from, r.span.to),
+                st.tn("nav.reports"),
+                tr_args(
+                    st.lang(),
+                    "reports.span",
+                    &[("from", &r.span.from), ("to", &r.span.to)],
+                ),
+                rows,
+            ))
+        }));
     let body = view()
         .gap(px(16.0))
         .child(card().child(filters))
@@ -818,23 +900,17 @@ pub fn stock_reports_page(st: AppState, compact: bool) -> View {
             window,
         ))
         .child(view().flex_1())
-        .child(
-            button(
-                Variant::Secondary,
-                Size::Md,
-                Some(Icon::Download),
-                st.t("reports.export"),
-                move || {
-                    if let Some(r) = report.get_untracked() {
-                        let (heads, mut rows) =
-                            stock_rows(st, &r, show.get_untracked(), cost(), true);
-                        rows.insert(0, heads);
-                        export(st, "stock.csv".to_owned(), rows);
-                    }
-                },
-            )
-            .test_id("stk-export"),
-        );
+        .child(export_buttons(st, ("stk-export", "stk-pdf"), move || {
+            let r = report.get_untracked()?;
+            let (heads, mut rows) = stock_rows(st, &r, show.get_untracked(), cost(), true);
+            rows.insert(0, heads);
+            Some((
+                "stock".to_owned(),
+                st.tn("nav.stock_reports"),
+                String::new(),
+                rows,
+            ))
+        }));
     let body =
         view()
             .gap(px(16.0))
@@ -1204,34 +1280,26 @@ fn finance(st: AppState, compact: bool, route: Route, first: Book) -> View {
             ],
             book,
         )))
-        .child(
-            button(
-                Variant::Secondary,
-                Size::Md,
-                Some(Icon::Download),
-                st.t("reports.export"),
-                move || {
-                    let b = book.get_untracked();
-                    if b == Book::Result && !profit() {
-                        return;
-                    }
-                    if let Some((heads, mut rows)) = rows_of(b, true) {
-                        rows.insert(0, heads);
-                        let name = match b {
-                            Book::Result => "resultat",
-                            Book::Vat => "tva",
-                            Book::Shifts => "sessions",
-                        };
-                        export(
-                            st,
-                            format!("{name}-{}-{}.csv", from.get_untracked(), to.get_untracked()),
-                            rows,
-                        );
-                    }
-                },
-            )
-            .test_id("fin-export"),
-        );
+        .child(export_buttons(st, ("fin-export", "fin-pdf"), move || {
+            let b = book.get_untracked();
+            if b == Book::Result && !profit() {
+                return None;
+            }
+            let (heads, mut rows) = rows_of(b, true)?;
+            rows.insert(0, heads);
+            let (name, key) = match b {
+                Book::Result => ("resultat", "reports.book.result"),
+                Book::Vat => ("tva", "reports.book.vat"),
+                Book::Shifts => ("sessions", "reports.book.shifts"),
+            };
+            let (f, t) = (from.get_untracked(), to.get_untracked());
+            Some((
+                format!("{name}-{f}-{t}"),
+                st.tn(key),
+                tr_args(st.lang(), "reports.span", &[("from", &f), ("to", &t)]),
+                rows,
+            ))
+        }));
     let subtitle = if route == Route::Shifts {
         "reports.shifts.subtitle"
     } else {

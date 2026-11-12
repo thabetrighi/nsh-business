@@ -318,3 +318,37 @@ fn vouchers_and_schedules() -> Result<(), nb_docs::DocError> {
     );
     Ok(())
 }
+
+/// A report's table flows onto as many pages as it needs.
+#[test]
+fn a_long_report_takes_several_pages() -> Result<(), nb_docs::DocError> {
+    use nb_docs::templates::report_table;
+    let mut rows = vec![vec!["Produit".to_owned(), "Qté".into(), "Montant".into()]];
+    for i in 0..120 {
+        rows.push(vec![
+            format!("Article {i}"),
+            format!("{i}"),
+            format!("{}.00 DA", i * 100),
+        ]);
+    }
+    let doc = report_table(
+        "Épicerie",
+        "Ventes",
+        "Du 2026-11-01 au 2026-11-30",
+        &rows,
+        Lang::Fr,
+        Paper::A4,
+    );
+    let text = doc.plain_text();
+    assert!(text.contains("Article 119") && text.contains("Montant"));
+    assert!(pdf(&doc)?.starts_with(b"%PDF"));
+    let pages = nb_docs::page_count(&doc);
+    assert!(pages >= 3, "{pages}");
+    assert!(
+        report_table("", "Vide", "", &[], Lang::Ar, Paper::A4)
+            .blocks
+            .len()
+            >= 2
+    );
+    Ok(())
+}

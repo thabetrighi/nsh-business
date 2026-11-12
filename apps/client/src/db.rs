@@ -132,14 +132,62 @@ fn read_session(store: &Store) -> Result<Option<Session>, Error> {
     })
 }
 
-/// Opens the store and makes sure an organization exists (a demo one on a
-/// first start, in the interface's language).
-fn open(lang: DemoLang) -> Result<(Store, Session), Error> {
+/// The answer of a store with no organization yet: the first-run setup
+/// shows (a store on disk); in memory (tests, the browser) a demo shop is
+/// made instead.
+pub const NEEDS_SETUP: &str = "setup.needed";
+
+fn needs_setup() -> DbError {
+    DbError {
+        codes: vec![(None, NEEDS_SETUP)],
+        message: "no organization yet".into(),
+    }
+}
+
+/// The demo shop, in the interface's language.
+fn demo_shop(store: &mut Store, lang: DemoLang) -> Result<Session, Error> {
+    let (name, branch, owner) = match lang {
+        DemoLang::Ar => ("متجر النور", "الوادي", "أحمد بن علي"),
+        DemoLang::Fr => ("Magasin En-Nour", "El Oued", "Ahmed Benali"),
+    };
+    let setup = setup_organization(
+        store,
+        SetupInput {
+            org_name: name.into(),
+            activity: "grocery".into(),
+            country: "DZ".into(),
+            currency: "DZD".into(),
+            currency_exp: 2,
+            branch_name: branch.into(),
+            owner_name: owner.into(),
+            language: match lang {
+                DemoLang::Ar => "ar",
+                DemoLang::Fr => "fr",
+            }
+            .into(),
+            fiscal_year_start: 1,
+        },
+    )?;
+    demo::seed(store, &setup, lang, 2_000)?;
+    Ok(Session {
+        setup,
+        currency: Currency::DZD,
+        actor: setup.owner,
+    })
+}
+
+/// Opens the store and reads its organization. A store on disk with none
+/// yet waits for the first-run setup (`None`), unless `NB_DEMO=1`; in
+/// memory a demo shop is made at once.
+fn open(lang: DemoLang) -> Result<(Store, Option<Session>), Error> {
     let opts = StoreOptions {
         device_name: "client".into(),
         ..StoreOptions::default()
     };
-    let mut store = match PATH.get().cloned().or_else(packaged_path) {
+    let on_disk = PATH.get().cloned().or_else(packaged_path);
+    let demo_on_disk = std::env::var("NB_DEMO").is_ok_and(|v| v == "1");
+    let wizard = on_disk.is_some() && !demo_on_disk;
+    let mut store = match on_disk {
         Some(p) => {
             if let Some(dir) = p.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| Error::Backup(e.to_string()))?;
@@ -148,39 +196,10 @@ fn open(lang: DemoLang) -> Result<(Store, Session), Error> {
         }
         None => Store::open_in_memory(opts)?,
     };
-    let existing = read_session(&store)?;
-    let session = match existing {
-        Some(s) => s,
-        None => {
-            let (name, branch, owner) = match lang {
-                DemoLang::Ar => ("متجر النور", "الوادي", "أحمد بن علي"),
-                DemoLang::Fr => ("Magasin En-Nour", "El Oued", "Ahmed Benali"),
-            };
-            let setup = setup_organization(
-                &mut store,
-                SetupInput {
-                    org_name: name.into(),
-                    activity: "grocery".into(),
-                    country: "DZ".into(),
-                    currency: "DZD".into(),
-                    currency_exp: 2,
-                    branch_name: branch.into(),
-                    owner_name: owner.into(),
-                    language: match lang {
-                        DemoLang::Ar => "ar",
-                        DemoLang::Fr => "fr",
-                    }
-                    .into(),
-                    fiscal_year_start: 1,
-                },
-            )?;
-            demo::seed(&mut store, &setup, lang, 2_000)?;
-            Session {
-                setup,
-                currency: Currency::DZD,
-                actor: setup.owner,
-            }
-        }
+    let session = match read_session(&store)? {
+        Some(s) => Some(s),
+        None if wizard => None,
+        None => Some(demo_shop(&mut store, lang)?),
     };
     Ok((store, session))
 }
@@ -196,7 +215,7 @@ impl State {
         match open(lang) {
             Ok((store, session)) => Self {
                 store: Some(store),
-                session: Ok(session),
+                session: session.ok_or_else(needs_setup),
             },
             Err(e) => Self {
                 store: None,
@@ -298,6 +317,36 @@ impl Db {
                 state.session = Ok(s);
             }
             Ok(r)
+        })
+        .await
+    }
+
+    /// The first-run setup: the shop as entered (its legal identity
+    /// too), or the demo shop.
+    pub async fn setup(
+        &self,
+        input: Option<(SetupInput, nb_store::usecases::org::BusinessProfile)>,
+        lang: DemoLang,
+    ) -> Result<Session, DbError> {
+        self.run(move |state| {
+            let store = state.store.as_mut().ok_or_else(stopped)?;
+            let session = match input {
+                Some((input, profile)) => {
+                    let setup = setup_organization(store, input).map_err(DbError::from)?;
+                    let s = read_session(store)
+                        .map_err(DbError::from)?
+                        .ok_or_else(stopped)?;
+                    if profile != nb_store::usecases::org::BusinessProfile::default() {
+                        let meta = OpMeta::new("setup.profile", Some(setup.org), Some(setup.owner));
+                        nb_store::usecases::org::update_business_profile(store, meta, profile)
+                            .map_err(DbError::from)?;
+                    }
+                    s
+                }
+                None => demo_shop(store, lang).map_err(DbError::from)?,
+            };
+            state.session = Ok(session);
+            Ok(session)
         })
         .await
     }

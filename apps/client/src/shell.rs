@@ -3,7 +3,6 @@
 //! navigation. The sidebar sits at the reading start, so it moves to the
 //! other side when the language changes.
 
-use nb_i18n::Lang;
 use nsh_core::element::{SharedString, View};
 use nsh_core::prelude::*;
 
@@ -34,13 +33,20 @@ pub fn shell(st: AppState) -> impl IntoElement {
         .text_color(Tone::Body.color())
         .child(
             when(
-                move || st.needs_sign_in.get() && st.user.get().is_none(),
-                move || lock_screen(st).into_element(),
+                move || st.needs_setup.get(),
+                move || crate::screens::setup::setup_wizard(st).into_element(),
             )
             .otherwise(move || {
-                when(compact, move || phone(st).into_element())
-                    .otherwise(move || desktop(st).into_element())
-                    .into_element()
+                when(
+                    move || st.needs_sign_in.get() && st.user.get().is_none(),
+                    move || lock_screen(st).into_element(),
+                )
+                .otherwise(move || {
+                    when(compact, move || phone(st).into_element())
+                        .otherwise(move || desktop(st).into_element())
+                        .into_element()
+                })
+                .into_element()
             }),
         )
         .child(dynamic(move || {
@@ -177,23 +183,11 @@ fn page_of(st: AppState, route: Route, compact: bool) -> AnyElement {
 }
 
 fn store_name(st: AppState) -> impl Fn() -> String + 'static {
-    move || {
-        if st.lang() == Lang::Ar {
-            "متجر النور".into()
-        } else {
-            "Magasin En-Nour".into()
-        }
-    }
+    move || st.shop.get().map(|s| s.0).unwrap_or_default()
 }
 
 fn store_place(st: AppState) -> impl Fn() -> String + 'static {
-    move || {
-        if st.lang() == Lang::Ar {
-            "الوادي".into()
-        } else {
-            "El Oued".into()
-        }
-    }
+    move || st.shop.get().map(|s| s.1).unwrap_or_default()
 }
 
 pub fn user_name(st: AppState) -> impl Fn() -> String + 'static {

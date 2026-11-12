@@ -16,6 +16,19 @@ use crate::{Doc, DocError};
 
 const MARGIN: f32 = 36.0;
 
+/// How many pages the PDF of `doc` has.
+pub fn page_count(doc: &Doc) -> usize {
+    if doc.paper.is_thermal() {
+        return 1;
+    }
+    with_fonts(|fs| {
+        let (w, sheet_h) = doc.paper.sheet();
+        let l = layout(fs, doc, w, MARGIN, 1.0);
+        let usable = sheet_h - 2.0 * MARGIN;
+        (((l.height - 2.0 * MARGIN) / usable).ceil() as usize).max(1)
+    })
+}
+
 /// `doc` as a PDF. Roll documents become one page as long as the receipt.
 pub fn pdf(doc: &Doc) -> Result<Vec<u8>, DocError> {
     with_fonts(|fs| {

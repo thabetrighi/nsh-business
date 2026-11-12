@@ -27,4 +27,5 @@ pub mod settings;
 pub mod settings_catalog;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod settings_printing;
+pub mod setup;
 pub mod users;

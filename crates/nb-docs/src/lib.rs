@@ -24,7 +24,7 @@ mod preview;
 pub mod templates;
 
 pub use escpos::{EscPos, OPEN_DRAWER, decode as decode_escpos, escpos, escpos_with};
-pub use pdf::pdf;
+pub use pdf::{page_count, pdf};
 pub use preview::preview;
 
 /// The paper a document is laid out for.

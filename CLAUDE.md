@@ -33,7 +33,9 @@
 - **جدول `nsh-base` يسار-يمين فقط:** في العربية تُعكس الأعمدة يدوياً ويُثبَّت الجدول LTR (انظر `screens/products.rs`).
 - **الخطوط على سطح المكتب:** `Root` الذي يُشغَّل مباشرة لا يسجّل خطوط `assets!()`؛ تُمرَّر بـ `Root::font` في `main.rs` (وإلا يُستعمل خط النظام بصمت). Cairo SemiBold مولّد عند wght 650 لأن 600 في Cairo يكاد لا يختلف عن العادي.
 - **قاعدة البيانات لكل نسخة تطبيق:** `AppState::db()` يبدأ خيطاً خاصاً (اختبارات الواجهة تعمل في عملية واحدة فتتشارك أي حالة عامة). سطح المكتب يحدد الملف في `main.rs` (`NB_DATA_DIR` أو مجلد بيانات النظام)؛ دونه قاعدة في الذاكرة مع بيانات العرض.
-- **اللقطات:** شغّل التطبيق مع `NB_DATA_DIR` جديد في كل لقطة، واحذف `~/.local/share/default/storage.json`.
+- **اللقطات:** شغّل التطبيق مع `NB_DATA_DIR` جديد و`NB_DEMO=1` في كل لقطة (دونه تظهر شاشة الإعداد الأول لقاعدة على القرص)، واحذف `~/.local/share/default/storage.json`. `xdotool` متاح لقيادة الواجهة تحت Xvfb.
+- **الإعداد الأول:** قاعدة على القرص بلا مؤسسة → `setup.needed` → `screens/setup.rs`؛ في الذاكرة (اختبارات الواجهة، الويب) يُنشأ متجر العرض مباشرة.
+- **خطوات متتالية في `dynamic` واحد تتشارك عناصر الإدخال حسب الموضع:** حقل الخطوة التالية يظهر بنص الخطوة السابقة. اجعل كل خطوة في `when` مستقل.
 - **إعدادات المظهر تعيد بناء الشجرة:** الحالة الدائمة (المسار، البيانات) تبقى في `AppState` خارج الجذر المعاد بناؤه.
 - **مساحة القرص في بيئة Claude محدودة (~43 GB):** `nsh test` يبني في `apps/client/target` منفصلاً عن `target` الجذر. شغّل أوامر cargo بـ `CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=apps/client/target` لتشارك المجلد نفسه، ولا تُبقِ `target` الجذر. عند الامتلاء: `find apps/client/target/debug/deps -maxdepth 1 -type f -mmin +45 -size +20M -delete` (نسخ قديمة بتجزئات أخرى).
 - **الموجّه يبني الصفحة داخل `untracked`:** ما تقرؤه الصفحة أثناء بنائها (الجلسة، البيانات) لا يجوز أن يعيد بناءها فيضيع حالها (محرر مفتوح). لا يعيد البناء إلا المسار (`shell.rs::content`).
@@ -60,7 +62,7 @@
 - NSH: الإصدار المثبت `0.4.0` (لا ترقية دون ADR).
 - تثبيت NSH في بيئة Claude: nsh.dev محجوب من الشل؛ نزّل `https://github.com/longbridge/nsh/releases/download/v0.4.0/nsh-linux-x86_64.tar.gz` وفكّه في `~/.nsh` ثم اربط `~/.nsh/nsh/bin/nsh`.
 - متطلبات Linux: `apt-get install libgtk-4-dev clang xvfb imagemagick` (GTK ≥ 4.14).
-- متغيرات تطوير للتطبيق: `NB_LANG=ar|fr|en`، `NB_APPEARANCE=light|dark|system`، `NB_WINDOW=1360x860`، `NB_ROUTE=products|settings|design|customers`، `NB_OPEN=add_product|palette|till`، `NB_ACCENT=blurple|ocean|emerald|teal|amber|rose|slate`، `NB_FONT=cairo|tajawal|almarai|readex|plex`، `NB_TEXT=s|m|l|xl`، `NB_DENSITY=compact|comfortable|spacious`. الإعدادات تُحفظ في `~/.local/share/default/storage.json` (احذفه بين اللقطات).
+- متغيرات تطوير للتطبيق: `NB_LANG=ar|fr|en`، `NB_APPEARANCE=light|dark|system`، `NB_WINDOW=1360x860`، `NB_ROUTE=products|settings|design|customers`، `NB_OPEN=add_product|palette|till|printing`، `NB_ACCENT=blurple|ocean|emerald|teal|amber|rose|slate`، `NB_FONT=cairo|tajawal|almarai|readex|plex`، `NB_TEXT=s|m|l|xl`، `NB_DENSITY=compact|comfortable|spacious`. الإعدادات تُحفظ في `~/.local/share/default/storage.json` (احذفه بين اللقطات).
 - تشغيل واجهة دون شاشة: `Xvfb :99 &` ثم `DISPLAY=:99 GDK_BACKEND=x11 <binary>` ولقطة بـ `import -window root`.
 - اختبارات الواجهة: `nsh test <app-dir>`.
 - الويب يحتاج `rustup target add wasm32-unknown-unknown` + `wasm-bindgen-cli`؛ غير متاح في بيئة Claude (انظر NEEDS_OWNER) — يُبنى عبر GitHub Actions.

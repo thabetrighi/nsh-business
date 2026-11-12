@@ -581,6 +581,11 @@ fn store(st: AppState, compact: bool) -> View {
                     Ok((o, features)) => {
                         st.changed();
                         st.features.set(Some(features));
+                        st.shop.update(|s| {
+                            if let Some(s) = s {
+                                s.0 = o.name.clone();
+                            }
+                        });
                         st.user.update(|u| {
                             if let Some(u) = u {
                                 u.auto_lock_min = o.auto_lock_min;
