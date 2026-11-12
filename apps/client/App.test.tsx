@@ -1108,7 +1108,7 @@ test("the till is arranged for scanning: quantity in one press, pay and print", 
   await app.waitFor("id:pos-item-0");
   // Arranged: the cart as a table.
   await app.press("id:pos-customize");
-  await app.press("id:pos-layout-2");
+  await app.press("id:pos-layout-use-1");
   await app.press("id:pos-customize-done");
   await app.type("id:pos-search", "Bimo");
   await app.waitFor("id:pos-item-0");
@@ -1131,8 +1131,16 @@ test("the till is arranged for scanning: quantity in one press, pay and print", 
   await app.press("id:pay-confirm");
   await app.waitFor("id:print-preview");
   await app.press("id:dialog-close");
-  // Back to cards for the other tests on this device.
+  // The screen edited in place: a column wider, a panel lower, kept.
+  await app.press("id:pos-layout-edit");
+  await app.waitFor("id:pos-edit-bar");
+  await app.press("id:pos-col-wide-0");
+  await app.press("id:pos-down-1-0");
+  await app.press("id:pos-edit-save");
+  await app.waitFor("text:Disposition enregistrée");
+  await app.waitUntil(() => !app.shows("id:pos-edit-bar"));
+  // Back to the shop's layout for the other tests on this device.
   await app.press("id:pos-customize");
-  await app.press("id:pos-layout-0");
+  await app.press("id:pos-layout-use-0");
   await app.press("id:pos-customize-done");
 });

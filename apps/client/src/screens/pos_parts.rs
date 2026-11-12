@@ -18,12 +18,6 @@ pub(super) enum Quick {
     Discount,
 }
 
-/// The till's layouts ([`crate::state::PosPrefs::layout`]).
-pub(super) const GRID: usize = 0;
-pub(super) const LIST: usize = 1;
-pub(super) const SCAN: usize = 2;
-pub(super) const TILES: usize = 3;
-
 impl Till {
     /// Opens payment; `print`: the receipt prints after it whatever the
     /// setting.
@@ -99,6 +93,22 @@ pub(super) fn line_menu(st: AppState, t: Till, i: usize, at: Point<Points>) {
         MenuItem::new(st.tn("pos.edit_line"))
             .shortcut("f6")
             .on_select(move || t.edit(i)),
+        MenuItem::new(st.tn("pos.menu.edit_product"))
+            .disabled(
+                !st.can("products.edit")
+                    || t.cart
+                        .with_untracked(|v| v.get(i).is_none_or(|l| l.product.is_none())),
+            )
+            .on_select(move || {
+                let id = t.cart.with_untracked(|v| {
+                    v.get(i)
+                        .and_then(|l| l.product.as_ref().map(|p| p.id.clone()))
+                });
+                if id.is_some() {
+                    t.product_edit.set(id);
+                    t.product_edit_open.set(true);
+                }
+            }),
         MenuItem::separator(),
         MenuItem::new(st.tn("pos.menu.more")).on_select(move || t.step(i, 1_000)),
         MenuItem::new(st.tn("pos.menu.less")).on_select(move || t.step(i, -1_000)),
@@ -380,144 +390,6 @@ pub(super) fn quick_dialog(
     )
 }
 
-/// How the till looks on this device.
-pub(super) fn customize_dialog(st: AppState, close: impl Fn() + Clone + 'static) -> View {
-    let p = st.biz.pos;
-    let layouts: Vec<(usize, &'static str, &'static str, Icon)> = vec![
-        (
-            GRID,
-            "pos.layout.grid",
-            "pos.layout.grid.help",
-            Icon::Dashboard,
-        ),
-        (
-            LIST,
-            "pos.layout.list",
-            "pos.layout.list.help",
-            Icon::ClipboardList,
-        ),
-        (
-            SCAN,
-            "pos.layout.scan",
-            "pos.layout.scan.help",
-            Icon::Barcode,
-        ),
-        (
-            TILES,
-            "pos.layout.tiles",
-            "pos.layout.tiles.help",
-            Icon::Store,
-        ),
-    ];
-    let mut cards = view().flex_row().flex_wrap().gap(px(10.0));
-    for (id, name, help, ic) in layouts {
-        let on = computed(move || p.layout.get() == id);
-        cards = cards.child(
-            view()
-                .test_id(&format!("pos-layout-{id}"))
-                .flex_grow(1.0)
-                .basis(px(200.0))
-                .gap(px(6.0))
-                .p(px(12.0))
-                .rounded(px(radius::lg()))
-                .border_2()
-                .border_color(move || {
-                    if on.get() {
-                        Tone::Primary.color()
-                    } else {
-                        Tone::Border.color()
-                    }
-                })
-                .bg(move || {
-                    if on.get() {
-                        Tone::PrimarySoft.color()
-                    } else {
-                        Tone::Surface.color()
-                    }
-                })
-                .cursor_pointer()
-                .on_press(move || p.layout.set(id))
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(icon(ic, 18.0, move || {
-                            if on.get() { Tone::Primary } else { Tone::Muted }
-                        }))
-                        .child(label_line(
-                            st.t(name),
-                            ty::MD,
-                            FontWeight::SEMIBOLD,
-                            Tone::Ink,
-                        )),
-                )
-                .child(label(st.t(help), ty::XS, FontWeight::NORMAL, Tone::Muted)),
-        );
-    }
-    let toggle = |key: &'static str, on: Signal<bool>, id: &'static str| {
-        view()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .py(px(4.0))
-            .child(switch(on, st.t(key)).test_id(id))
-            .child(label(st.t(key), ty::SM, FontWeight::NORMAL, Tone::Body))
-    };
-    let sizes: Vec<(usize, Box<dyn Fn() -> String>)> = vec![
-        (0, Box::new(st.t("pos.tile.s"))),
-        (1, Box::new(st.t("pos.tile.m"))),
-        (2, Box::new(st.t("pos.tile.l"))),
-    ];
-    let sides: Vec<(bool, Box<dyn Fn() -> String>)> = vec![
-        (false, Box::new(st.t("pos.cart_side.end"))),
-        (true, Box::new(st.t("pos.cart_side.start"))),
-    ];
-    let body = view()
-        .gap(px(16.0))
-        .child(labelled(st.t("pos.layout"), cards, None))
-        .child(labelled(
-            st.t("pos.tile"),
-            segmented(sizes, p.tile).test_id("pos-tile"),
-            None,
-        ))
-        .child(labelled(
-            st.t("pos.cart_side"),
-            segmented(sides, p.cart_start).test_id("pos-cart-side"),
-            None,
-        ))
-        .child(
-            view()
-                .gap(px(2.0))
-                .child(toggle("pos.show.big_total", p.big_total, "pos-big-total"))
-                .child(toggle(
-                    "pos.show.categories",
-                    p.categories,
-                    "pos-categories",
-                ))
-                .child(toggle("pos.show.stock", p.stock, "pos-stock"))
-                .child(toggle("pos.show.sku", p.sku, "pos-sku")),
-        );
-    let footer = view().child(
-        button(
-            Variant::Primary,
-            Size::Md,
-            Some(Icon::Check),
-            st.t("action.done"),
-            close.clone(),
-        )
-        .test_id("pos-customize-done"),
-    );
-    dialog_frame(
-        st,
-        st.t("pos.customize"),
-        st.t("pos.customize.help"),
-        body,
-        footer,
-        close,
-    )
-}
-
 /// Every key of the till, behind the help icon.
 pub(super) fn keys_dialog(st: AppState, close: impl Fn() + Clone + 'static) -> View {
     let mut list = view().gap(px(8.0));
@@ -581,12 +453,36 @@ pub(super) fn head_tools(t: Till, st: AppState) -> View {
         .gap(px(4.0))
         .child(
             icon_button(
-                || Icon::Sliders,
-                st.t("pos.customize"),
+                || Icon::LayoutTemplate,
+                st.t("pos.layouts"),
                 Variant::Ghost,
-                move || t.customize_open.set(true),
+                move || t.board.layouts_open.set(true),
             )
             .test_id("pos-customize"),
+        )
+        .child(
+            icon_button(
+                || Icon::Pencil,
+                st.t("pos.layouts.edit_this"),
+                Variant::Ghost,
+                move || {
+                    let k = super::board::Board::kept(st);
+                    let l = k.current();
+                    let ready = k.chosen.is_empty()
+                        || k.chosen.starts_with(crate::screens::pos_layout::BUILTIN);
+                    let name = if ready {
+                        nb_i18n::tr_args(
+                            st.lang(),
+                            "templates.copy_of",
+                            &[("name", &st.tn(&format!("pos.layout.{}", l.name)))],
+                        )
+                    } else {
+                        l.name.clone()
+                    };
+                    t.board.edit(l, name);
+                },
+            )
+            .test_id("pos-layout-edit"),
         )
         .child(
             icon_button(

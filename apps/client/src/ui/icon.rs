@@ -114,6 +114,8 @@ icons! {
     Building => "building",
     PercentPlain => "percent",
     Shield => "shield-check",
+    Grip => "grip-vertical",
+    LayoutTemplate => "layout-template",
     CloudUpload => "cloud-upload",
     Barcode => "scan-barcode",
     HardDrive => "hard-drive",

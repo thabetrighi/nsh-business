@@ -145,6 +145,13 @@ pub fn persisted_index(key: &'static str, default: usize) -> Signal<usize> {
 
 const K_PRINTERS: &str = "nb.printers";
 
+/// A text setting saved on the device.
+pub fn persisted_text(key: &'static str) -> Signal<String> {
+    let s = signal(stored(key, |v| Some(v.to_owned())).unwrap_or_default());
+    effect(move || save(key, &s.get()));
+    s
+}
+
 /// An on/off setting saved on the device.
 pub fn persisted_flag(key: &'static str, default: bool) -> Signal<bool> {
     let s = signal(stored(key, |v| v.parse().ok()).unwrap_or(default));
@@ -176,18 +183,14 @@ pub struct BizPrefs {
 /// The till's screen, as this device's cashier arranged it.
 #[derive(Clone, Copy)]
 pub struct PosPrefs {
-    /// 0 products as cards, 1 as a list, 2 the cart as a table
-    /// (supermarkets: scanning first), 3 large tiles (restaurants, cafés).
-    pub layout: Signal<usize>,
-    /// The cart at the reading start instead of the end.
-    pub cart_start: Signal<bool>,
     /// Cards: 0 small, 1 medium, 2 large.
     pub tile: Signal<usize>,
     pub stock: Signal<bool>,
-    pub categories: Signal<bool>,
     /// The total in a large band.
     pub big_total: Signal<bool>,
     pub sku: Signal<bool>,
+    /// The till's layouts kept on this device (`pos_layout::Kept`, JSON).
+    pub layouts: Signal<String>,
 }
 
 impl BizPrefs {
@@ -219,13 +222,11 @@ impl BizPrefs {
             scale: persisted_index("nb.device.scale", 0),
             scanner: persisted_flag("nb.device.scanner", true),
             pos: PosPrefs {
-                layout: persisted_index("nb.pos.layout", 0),
-                cart_start: persisted_flag("nb.pos.cart_start", false),
                 tile: persisted_index("nb.pos.tile", 1),
                 stock: persisted_flag("nb.pos.stock", true),
-                categories: persisted_flag("nb.pos.categories", true),
                 big_total: persisted_flag("nb.pos.big_total", true),
                 sku: persisted_flag("nb.pos.sku", false),
+                layouts: persisted_text("nb.pos.layouts"),
             },
         }
     }

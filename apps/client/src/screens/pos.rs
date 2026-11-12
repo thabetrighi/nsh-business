@@ -47,6 +47,9 @@ use crate::ui::tokens::{Status, Tone, radius, ty};
 #[path = "pos_parts.rs"]
 mod parts;
 use parts::*;
+#[path = "pos_board.rs"]
+mod board;
+use board::*;
 
 fn first_error(st: AppState, e: &DbError) -> String {
     error_text(st, e.codes.first().map_or("internal", |c| c.1))
@@ -209,12 +212,16 @@ struct Till {
     /// The one-number dialog: a line and what it changes.
     quick: Signal<Option<(usize, Quick)>>,
     quick_open: Signal<bool>,
-    customize_open: Signal<bool>,
     keys_open: Signal<bool>,
     /// The cart printed before paying.
     prebill_open: Signal<bool>,
     /// The category the products are filtered on.
     category: Signal<Option<String>>,
+    /// The screen's layout, and its editing.
+    board: Board,
+    /// A product of the cart edited in the catalog (its id).
+    product_edit: Signal<Option<String>>,
+    product_edit_open: Signal<bool>,
 }
 
 /// A sale reopened in the cart: its number, what is left of it, and
@@ -405,10 +412,12 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         print_after: signal(false),
         quick: signal(None),
         quick_open: signal(false),
-        customize_open: signal(false),
         keys_open: signal(false),
         prebill_open: signal(false),
         category: signal(None),
+        board: Board::new(),
+        product_edit: signal(None),
+        product_edit_open: signal(false),
     };
     effect(move || {
         if !t.printing_open.get() {
@@ -434,9 +443,10 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             && !t.sales_open.get_untracked()
             && !t.printing_open.get_untracked()
             && !t.quick_open.get_untracked()
-            && !t.customize_open.get_untracked()
             && !t.keys_open.get_untracked()
             && !t.prebill_open.get_untracked()
+            && !t.board.layouts_open.get_untracked()
+            && !t.product_edit_open.get_untracked()
     };
 
     // A quote or order sent to the till (from the sales documents): its
@@ -721,11 +731,7 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             ))
             .into_element(),
         Some((reg, None)) => view().child(open_till(st, reg)).into_element(),
-        Some((_, Some(_))) => {
-            // Another layout or side: the screen is built again.
-            let _ = (st.biz.pos.layout.get(), st.biz.pos.cart_start.get());
-            selling_view(st, t, compact).into_element()
-        }
+        Some((_, Some(_))) => selling_view(st, t, compact).into_element(),
     });
     // The page fills the window: the products and the cart scroll in
     // their own areas, so the cart and its "pay" stay in place.
@@ -799,9 +805,29 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
                 None => view().into_element(),
             }
         }))
-        .child(modal(t.customize_open, compact, move || {
-            customize_dialog(st, move || t.customize_open.set(false)).into_element()
+        .child(modal(t.board.layouts_open, compact, move || {
+            layouts_dialog(st, t, move || t.board.layouts_open.set(false)).into_element()
         }))
+        .child(crate::ui::overlay::wide_modal(
+            t.product_edit_open,
+            compact,
+            move || match t.product_edit.get_untracked() {
+                Some(id) => scroll()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .child(crate::screens::product_editor::product_editor(
+                        st,
+                        crate::screens::product_editor::Target::Edit(id),
+                        compact,
+                        move || {
+                            t.product_edit_open.set(false);
+                            st.changed();
+                        },
+                    ))
+                    .into_element(),
+                None => view().into_element(),
+            },
+        ))
         .child(modal(t.keys_open, compact, move || {
             keys_dialog(st, move || t.keys_open.set(false)).into_element()
         }))
@@ -896,101 +922,50 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
         });
         drop(task); // runs to completion: tasks end with their owner, not their handle
     };
-    let search = view()
-        .flex_row()
-        .items_center()
-        .gap(px(10.0))
-        .h(px(48.0))
-        .px(px(14.0))
-        .rounded(px(radius::md()))
-        .border_1()
-        .border_color(Tone::BorderStrong.color())
-        .bg(Tone::Surface.color())
-        .child(icon(Icon::Barcode, 20.0, || Tone::Muted))
-        .child(
-            input()
-                .test_id("pos-search")
-                .element_ref(&t.search)
-                .auto_focus(!compact)
-                .flex_1()
-                .placeholder(st.t("pos.search"))
-                .value(move || text.get())
-                .on_change(move |s: &str| text.set(s.to_owned()))
-                .on_submit(submit)
-                .text_color(Tone::Ink.color()),
-        )
-        .child(when(
-            move || !text.get().is_empty(),
-            move || {
-                icon_button(
-                    || Icon::Close,
-                    st.t("action.clear"),
-                    Variant::Ghost,
-                    move || text.set(String::new()),
-                )
-                .into_element()
-            },
-        ))
-        .child(when(
-            move || !compact,
-            move || kbd(|| "F2".to_owned()).into_element(),
-        ));
-    let pr = st.biz.pos;
-    let grid = dynamic(move || {
-        let all = rows.get();
-        if all.is_empty() {
-            return empty_state(
-                Icon::Search,
-                st.t("table.empty.title"),
-                st.t("pos.empty.body"),
-                Some(button(
-                    Variant::Secondary,
-                    Size::Md,
-                    Some(Icon::PackagePlus),
-                    st.t("pos.free"),
-                    move || t.free_open.set(true),
-                )),
+    let make_search = move || {
+        view()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .h(px(48.0))
+            .px(px(14.0))
+            .rounded(px(radius::md()))
+            .border_1()
+            .border_color(Tone::BorderStrong.color())
+            .bg(Tone::Surface.color())
+            .child(icon(Icon::Barcode, 20.0, || Tone::Muted))
+            .child(
+                input()
+                    .test_id("pos-search")
+                    .element_ref(&t.search)
+                    .auto_focus(!compact)
+                    .flex_1()
+                    .placeholder(st.t("pos.search"))
+                    .value(move || text.get())
+                    .on_change(move |s: &str| text.set(s.to_owned()))
+                    .on_submit(submit)
+                    .text_color(Tone::Ink.color()),
             )
-            .into_element();
-        }
-        let layout = pr.layout.get();
-        // Sizes follow the setting.
-        let _ = (pr.tile.get(), pr.stock.get(), pr.sku.get());
-        match layout {
-            LIST => {
-                let mut g = view()
-                    .rounded(px(radius::md()))
-                    .border_1()
-                    .border_color(Tone::Border.color());
-                for (i, p) in all.into_iter().enumerate() {
-                    g = g.child(product_row(st, t, i, p, None));
-                }
-                g.into_element()
-            }
-            TILES => {
-                let mut g = view().flex_row().flex_wrap().gap(px(12.0));
-                for (i, p) in all.into_iter().enumerate() {
-                    g = g.child(product_tile(st, t, i, p));
-                }
-                g.into_element()
-            }
-            _ => {
-                let mut g = view().flex_row().flex_wrap().gap(px(10.0));
-                for (i, p) in all.into_iter().enumerate() {
-                    g = g.child(product_card(st, t, i, p, compact));
-                }
-                g.into_element()
-            }
-        }
-    });
-    let chips = when(
-        move || pr.categories.get(),
-        move || category_chips(st, t).into_element(),
-    );
-    // Scanning first: the cart is the table in the middle, what is found
-    // shows under the search, the total and payment at the side.
-    if !compact && pr.layout.get() == SCAN {
-        let results = dynamic(move || {
+            .child(when(
+                move || !text.get().is_empty(),
+                move || {
+                    icon_button(
+                        || Icon::Close,
+                        st.t("action.clear"),
+                        Variant::Ghost,
+                        move || text.set(String::new()),
+                    )
+                    .into_element()
+                },
+            ))
+            .child(when(
+                move || !compact,
+                move || kbd(|| "F2".to_owned()).into_element(),
+            ))
+    };
+    // What is found, under the search, when no products panel shows it.
+    let results = move || {
+        dynamic(move || {
             if text.get().trim().is_empty() {
                 return view().into_element();
             }
@@ -1004,75 +979,102 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
             for (i, p) in all.into_iter().take(8).enumerate() {
                 list = list.child(product_row(st, t, i, p, Some(text)));
             }
-            // Over the table, under the search.
             list.absolute()
                 .top(px(52.0))
                 .left_0()
                 .right_0()
                 .z_index(20)
                 .into_element()
-        });
-        let main = card()
+        })
+    };
+    let grid = move |style: u8| {
+        dynamic(move || {
+            let all = rows.get();
+            if all.is_empty() {
+                return empty_state(
+                    Icon::Search,
+                    st.t("table.empty.title"),
+                    st.t("pos.empty.body"),
+                    Some(button(
+                        Variant::Secondary,
+                        Size::Md,
+                        Some(Icon::PackagePlus),
+                        st.t("pos.free"),
+                        move || t.free_open.set(true),
+                    )),
+                )
+                .into_element();
+            }
+            // Sizes and what shows follow the layout.
+            let pr = st.biz.pos;
+            let _ = (pr.tile.get(), pr.stock.get(), pr.sku.get());
+            match style {
+                1 => {
+                    let mut g = view()
+                        .rounded(px(radius::md()))
+                        .border_1()
+                        .border_color(Tone::Border.color());
+                    for (i, p) in all.into_iter().enumerate() {
+                        g = g.child(product_row(st, t, i, p, None));
+                    }
+                    g.into_element()
+                }
+                2 => {
+                    let mut g = view().flex_row().flex_wrap().gap(px(12.0));
+                    for (i, p) in all.into_iter().enumerate() {
+                        g = g.child(product_tile(st, t, i, p));
+                    }
+                    g.into_element()
+                }
+                _ => {
+                    let mut g = view().flex_row().flex_wrap().gap(px(10.0));
+                    for (i, p) in all.into_iter().enumerate() {
+                        g = g.child(product_card(st, t, i, p, compact));
+                    }
+                    g.into_element()
+                }
+            }
+        })
+    };
+    if compact {
+        let products = card()
             .flex_1()
             .min_h(px(0.0))
-            .p(px(16.0))
+            .p(px(12.0))
             .gap(px(12.0))
-            .child(view().relative().z_index(10).child(search).child(results))
+            .child(make_search())
+            .child(category_chips(st, t))
             .child(
                 scroll()
                     .flex_1()
                     .min_h(px(0.0))
-                    .rounded(px(radius::md()))
-                    .border_1()
-                    .border_color(Tone::Border.color())
-                    .child(cart_table(st, t)),
+                    .child(view().pb(px(8.0)).child(grid(0))),
             );
-        let side = view()
-            .w(px(340.0))
-            .flex_shrink_0()
-            .min_h(px(0.0))
-            .child(cart_panel(st, t, false, true));
-        let mut row = view().flex_1().min_h(px(0.0)).flex_row().gap(px(20.0));
-        row = if pr.cart_start.get_untracked() {
-            row.child(side).child(main)
-        } else {
-            row.child(main).child(side)
-        };
-        return view().flex_1().min_h(px(0.0)).child(row);
-    }
-    let products = card()
-        .flex_1()
-        .min_h(px(0.0))
-        .p(px(if compact { 12.0 } else { 16.0 }))
-        .gap(px(12.0))
-        .child(search)
-        .child(chips)
-        .child(
-            scroll()
-                .flex_1()
-                .min_h(px(0.0))
-                .child(view().pb(px(8.0)).child(grid)),
-        );
-    if compact {
-        view()
+        return view()
             .flex_1()
             .min_h(px(0.0))
             .gap(px(12.0))
             .child(products)
-            .child(cart_bar(st, t))
-    } else {
-        let cart = view()
-            .w(px(400.0))
-            .flex_shrink_0()
-            .min_h(px(0.0))
-            .child(cart_panel(st, t, false, false));
-        let row = view().flex_1().min_h(px(0.0)).flex_row().gap(px(20.0));
-        if pr.cart_start.get_untracked() {
-            row.child(cart).child(products)
-        } else {
-            row.child(products).child(cart)
-        }
+            .child(cart_bar(st, t));
     }
+    board_view(
+        st,
+        t,
+        BoardParts {
+            search: std::rc::Rc::new(move |with_results: bool| {
+                let v = view().relative().z_index(10).child(make_search());
+                if with_results { v.child(results()) } else { v }
+            }),
+            products: std::rc::Rc::new(move |style: u8| {
+                card().flex_1().min_h(px(0.0)).p(px(12.0)).child(
+                    scroll()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .child(view().pb(px(8.0)).child(grid(style))),
+                )
+            }),
+        },
+    )
 }
 
 fn product_card(st: AppState, t: Till, i: usize, p: ProductRow, compact: bool) -> View {
@@ -1240,9 +1242,21 @@ fn cart_bar(st: AppState, t: Till) -> View {
 }
 
 /// The cart: its lines scroll; the totals and "pay" stay at the bottom.
-fn cart_panel(st: AppState, t: Till, in_sheet: bool, side_only: bool) -> View {
+/// What the cart panel holds: the phone's sheet holds everything; a
+/// layout's panels split it.
+#[derive(Clone, Copy)]
+struct CartParts {
+    /// The lines: as a list, or as a table.
+    lines: Option<bool>,
+    customer: bool,
+    sums: bool,
+    pay: bool,
+}
+
+/// The cart's lines as a list.
+fn cart_lines(st: AppState, t: Till) -> View {
     let totals = computed(move || t.totals(currency(st)));
-    let lines = dynamic(move || {
+    view().child(dynamic(move || {
         let items = t.cart.get();
         if items.is_empty() {
             return view()
@@ -1270,7 +1284,13 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool, side_only: bool) -> View {
             v = v.child(cart_line(st, t, i, it, line_total));
         }
         v.into_element()
-    });
+    }))
+}
+
+/// The cart's figures: discount, net, VAT, discounts, total (`band`: the
+/// total large).
+fn cart_sums(st: AppState, t: Till, in_sheet: bool, band: bool, total: bool) -> View {
+    let totals = computed(move || t.totals(currency(st)));
     let row = move |key: &'static str, value: Box<dyn Fn() -> String>| {
         view()
             .flex_row()
@@ -1290,7 +1310,7 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool, side_only: bool) -> View {
                 .map_or_else(|| money(st, 0), |t| money(st, f(&t)))
         }
     };
-    let sums = view()
+    view()
         .gap(px(6.0))
         .px(px(16.0))
         .pt(px(12.0))
@@ -1348,7 +1368,11 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool, side_only: bool) -> View {
             move || row("pos.discounts", Box::new(pick(|t| -t.discounts.minor()))).into_element(),
         ))
         .child(dynamic(move || {
-            if st.biz.pos.big_total.get() {
+            // The total shows elsewhere (a large total panel).
+            if !total {
+                return view().into_element();
+            }
+            if band {
                 return total_band(st, t).mt(px(6.0)).into_element();
             }
             view()
@@ -1368,8 +1392,31 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool, side_only: bool) -> View {
                     || Tone::Ink,
                 ))
                 .into_element()
-        }));
-    let pay = view().p(px(16.0)).child(pay_buttons(st, t, in_sheet));
+        }))
+}
+
+fn cart_panel(st: AppState, t: Till, in_sheet: bool, side_only: bool) -> View {
+    let parts = if side_only {
+        CartParts {
+            lines: None,
+            customer: true,
+            sums: true,
+            pay: true,
+        }
+    } else {
+        CartParts {
+            lines: Some(false),
+            customer: true,
+            sums: true,
+            pay: true,
+        }
+    };
+    cart_box(st, t, in_sheet, parts, side_only)
+}
+
+/// The cart as one panel: its header, chips, lines, figures and payment as
+/// `parts` says.
+fn cart_box(st: AppState, t: Till, in_sheet: bool, parts: CartParts, side_only: bool) -> View {
     let count = move || {
         tr_args(
             st.lang(),
@@ -1431,7 +1478,11 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool, side_only: bool) -> View {
                 },
             )),
         ))
-        .child(customer_chip(st, t, in_sheet))
+        .child(if parts.customer {
+            customer_chip(st, t, in_sheet)
+        } else {
+            view()
+        })
         .child(exchange_chip(st, t))
         .child(correcting_chip(st, t))
         .child(dynamic(move || match t.document.get() {
@@ -1461,24 +1512,38 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool, side_only: bool) -> View {
                 .into_element(),
             None => view().into_element(),
         }))
-        .child(if side_only {
+        .child(match (side_only, parts.lines) {
             // The lines are the table beside: here what acts on the cart.
-            scroll()
+            (true, _) => scroll()
                 .flex_1()
                 .min_h(px(0.0))
                 .border_t_1()
                 .border_color(Tone::Border.color())
                 .child(side_actions(st, t))
-        } else {
-            scroll()
+                .into_element(),
+            (false, Some(table)) => scroll()
                 .flex_1()
                 .min_h(px(0.0))
                 .border_t_1()
                 .border_color(Tone::Border.color())
-                .child(lines)
+                .child(if table {
+                    cart_table(st, t)
+                } else {
+                    cart_lines(st, t)
+                })
+                .into_element(),
+            (false, None) => view().into_element(),
         })
-        .child(sums)
-        .child(pay)
+        .child(if parts.sums {
+            cart_sums(st, t, in_sheet, st.biz.pos.big_total.get_untracked(), true)
+        } else {
+            view()
+        })
+        .child(if parts.pay {
+            view().p(px(16.0)).child(pay_buttons(st, t, in_sheet))
+        } else {
+            view()
+        })
 }
 
 fn stepper(
