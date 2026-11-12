@@ -111,21 +111,41 @@ fn span_picker(
     (from, to, filters)
 }
 
-/// Offers the export formats (Excel or CSV) at the pointer; `name` is the
-/// file's name without its extension.
+/// Exports `rows` (`name`: the file's name without its extension): one
+/// save dialog offering Excel and CSV; the extension chosen decides.
 pub(crate) fn export(st: AppState, name: String, rows: Vec<Vec<String>>) {
-    use nsh_core::element::desktop::{MenuItem, popup_menu};
     let name = name.trim_end_matches(".csv").to_owned();
-    let (n1, r1) = (name.clone(), rows.clone());
-    let items = vec![
-        MenuItem::new(st.tn("export.xlsx"))
-            .on_select(move || export_xlsx(st, n1.clone(), r1.clone())),
-        MenuItem::new(st.tn("export.csv"))
-            .on_select(move || export_csv(st, format!("{name}.csv"), rows.clone())),
-    ];
-    // Off desktops no menu shows: CSV, which every device reads.
-    let shown = popup_menu(items);
-    drop(shown);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use nsh_core::file_dialog::{FileFilter, SaveDialog};
+        let rtl = st.lang().direction() == nb_i18n::Direction::Rtl;
+        let task = spawn(async move {
+            let dialog = SaveDialog::new()
+                .file_name(format!("{name}.xlsx"))
+                .filter(FileFilter::new(st.tn("export.xlsx"), ["xlsx"]))
+                .filter(FileFilter::new(st.tn("export.csv"), ["csv"]))
+                .title(st.tn("reports.export"));
+            let Ok(Some(path)) = pick_save_path(dialog).await else {
+                return;
+            };
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::spawn(move || {
+                let r = if crate::sheets::is_workbook(&path) {
+                    crate::sheets::write_xlsx(&path, &name, &rows, rtl)
+                } else {
+                    std::fs::write(&path, to_csv(&rows)).map_err(|e| e.to_string())
+                };
+                let _ = tx.send(r);
+            });
+            match rx.await {
+                Ok(Ok(())) => show_toast(st, st.tn("reports.exported")),
+                _ => show_toast(st, st.tn("reports.export_failed")),
+            }
+        });
+        drop(task); // runs to completion: tasks end with their owner, not their handle
+    }
+    #[cfg(target_arch = "wasm32")]
+    export_csv(st, format!("{name}.csv"), rows);
 }
 
 /// Saves `rows` as an Excel workbook the person names.

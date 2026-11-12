@@ -1004,7 +1004,7 @@ pub fn purchases_page(st: AppState, compact: bool) -> View {
                     let c = currency(st);
                     let open_it = r.clone();
                     vec![
-                        Act::new(st.tn("sales.act.details"), move || {
+                        Act::with(Icon::Eye, st.tn("sales.act.details"), move || {
                             showing.set(Some(open_it.clone()))
                         }),
                         Act::Line,

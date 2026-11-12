@@ -243,15 +243,10 @@ pub fn table(
             row = row.child(cell_frame(c).child(cell(at, c.key)));
         }
         // A right click: what may be done to the row (copying included).
-        if let Some(m) = menu.clone() {
-            row = row.on_context_menu(move |e: &ContextMenuEvent| {
-                drop(nsh_core::element::desktop::popup_menu_at(
-                    super::menu::menu_items(m(at.index())),
-                    e.page_position,
-                ))
-            });
+        match menu.clone() {
+            Some(m) => super::menu::with_menu(row, move || m(at.index())),
+            None => row,
         }
-        row
     })
     // As tall as its rows (a page of them): the page around it scrolls.
     .h(move || px(count() as f32 * row_h));

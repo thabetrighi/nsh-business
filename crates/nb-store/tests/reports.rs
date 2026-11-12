@@ -273,3 +273,28 @@ fn sales_profit_and_stock_add_up() -> R {
     assert!(payables(&s)?.is_empty());
     Ok(())
 }
+
+#[test]
+fn the_bell_counts_what_wants_attention() -> R {
+    let mut s = Store::open_in_memory(options("A"))?;
+    let setup = setup_organization(&mut s, setup_input())?;
+    let with = |s: &mut Store, name: &'static str, qty: Option<&str>, min: Option<&str>| {
+        let mut p = product(name, "", 1_000);
+        p.min_stock = min.map(Into::into);
+        p.opening = qty.map(|q| Opening {
+            warehouse_id: setup.warehouse.to_string(),
+            qty: q.into(),
+            unit_cost_minor: 500,
+            tracked: Default::default(),
+        });
+        create_product(s, meta(&setup, name), p).map(|_| ())
+    };
+    with(&mut s, "Plenty", Some("50"), Some("5"))?;
+    with(&mut s, "Few", Some("2"), Some("5"))?;
+    with(&mut s, "None", None, None)?;
+    let a = alerts(&s)?;
+    assert_eq!((a.out_of_stock, a.low_stock), (1, 1));
+    assert_eq!((a.customers_overdue, a.suppliers_owed), (0, 0));
+    assert_eq!(a.count(), 2);
+    Ok(())
+}

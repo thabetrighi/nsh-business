@@ -4,8 +4,8 @@
 
 use std::rc::Rc;
 
-use nsh_base::{SelectItem, menu, menu_item, menu_separator, select};
-use nsh_core::element::{Align, Placement, SharedString, View};
+use nsh_base::{SelectItem, select};
+use nsh_core::element::{SharedString, View};
 use nsh_core::prelude::*;
 
 use super::icon::{Icon, icon};
@@ -132,52 +132,14 @@ pub fn row_menu(
         .hover(|s| s.bg(Tone::Hover.color()))
         .label(move || SharedString::from(a11y()))
         .child(icon(Icon::More, 16.0, || Tone::Muted));
-    let actions = Rc::new(actions);
-    let mut m = menu()
-        .trigger(trigger)
-        .popup_class(POPUP)
-        .placement(Placement::Bottom)
-        .align(Align::End);
-    let list = actions();
-    let mut separated = false;
-    for a in list {
-        if a.danger && !separated {
-            m = m.child(
-                menu_separator().child(view().h(px(1.0)).my(px(4.0)).bg(Tone::Border.color())),
-            );
-            separated = true;
-        }
-        let tone = if a.danger { Tone::Danger } else { Tone::Ink };
-        let run = a.run.clone();
-        m = m.child(
-            menu_item().on_select(move || run()).child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .h(px(control::md()))
-                    .px(px(10.0))
-                    .rounded(px(radius::md()))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(Tone::Hover.color()))
-                    .child(icon(a.icon, 16.0, move || {
-                        if tone == Tone::Danger {
-                            Tone::Danger
-                        } else {
-                            Tone::Muted
-                        }
-                    }))
-                    .child(label_line(
-                        {
-                            let t = a.title.clone();
-                            move || t.clone()
-                        },
-                        ty::SM,
-                        FontWeight::MEDIUM,
-                        tone,
-                    )),
-            ),
-        );
-    }
-    view().child(m)
+    // The app's one menu look (`menu.rs`).
+    let acts = actions()
+        .into_iter()
+        .map(|a| {
+            let run = a.run.clone();
+            let act = super::menu::Act::with(a.icon, a.title, move || run());
+            if a.danger { act.danger() } else { act }
+        })
+        .collect();
+    super::menu::menu_on(trigger, acts)
 }

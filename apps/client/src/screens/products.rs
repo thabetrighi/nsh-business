@@ -21,7 +21,7 @@ use crate::ui::kit::{
     Size, Variant, badge, button, figure, icon_button, label, label_line, menu_button, spacer,
 };
 use crate::ui::overlay::{modal, show_toast, wide_modal};
-use crate::ui::popup::{Action, dropdown, row_menu};
+use crate::ui::popup::dropdown;
 use crate::ui::surface::{card, empty_state, page_pad};
 use crate::ui::table::{Column, Paging, Selection, Sort, Width, pager, table};
 use crate::ui::tokens::{Status, Tone, control, radius, sp, ty};
@@ -872,6 +872,55 @@ pub fn products(st: AppState, compact: bool) -> View {
     };
 
     let row_of = move |at: Position| computed(move || rows.with(|r| r.get(at.index()).cloned()));
+    // One list of what may be done to a product: its ⋯ button and a right
+    // click show the same.
+    let row_acts: std::rc::Rc<dyn Fn(usize) -> Vec<crate::ui::menu::Act>> =
+        std::rc::Rc::new(move |i: usize| {
+            use crate::ui::menu::{Act, tsv};
+            let Some(p) = rows.with_untracked(|v| v.get(i).cloned()) else {
+                return Vec::new();
+            };
+            let (p1, p2, p3) = (p.id.clone(), p.id.clone(), p.clone());
+            let gone = p.product_id().ok();
+            let price = Money::from_minor(p.price_minor, currency()).to_plain_string();
+            let mut acts = vec![
+                Act::with(Icon::Pencil, st.tn("action.edit"), move || {
+                    editor.set(Some(Target::Edit(p1.clone())))
+                })
+                .when(st.can("products.edit")),
+                Act::with(Icon::Copy, st.tn("action.duplicate"), move || {
+                    editor.set(Some(Target::Copy(p2.clone())))
+                })
+                .when(st.can("products.edit")),
+                Act::with(Icon::Tag, st.tn("products.print_label"), move || {
+                    labeling.set(Some(p3.clone()));
+                    labeling_open.set(true);
+                }),
+                Act::Line,
+                Act::copy(st.tn("action.copy_name"), p.name.clone()),
+                Act::copy(st.tn("action.copy_sku"), p.sku.clone()),
+                Act::copy(st.tn("action.copy_price"), price.clone()),
+            ];
+            if let Some(b) = p.barcodes.first() {
+                acts.push(Act::copy(st.tn("action.copy_barcode"), b.clone()));
+            }
+            acts.push(Act::copy(
+                st.tn("action.copy_row"),
+                tsv(&[product_cells(st, &p)]),
+            ));
+            acts.push(Act::Line);
+            acts.push(
+                Act::with(Icon::Trash, st.tn("action.delete"), move || {
+                    if let Some(id) = gone {
+                        archive(st, vec![id]);
+                    }
+                })
+                .when(st.can("products.archive"))
+                .danger(),
+            );
+            acts
+        });
+    let menu_acts = row_acts.clone();
     let cell = move |at: Position, key: &'static str| -> AnyElement {
         let p = row_of(at);
         match key {
@@ -976,36 +1025,11 @@ pub fn products(st: AppState, compact: bool) -> View {
                 || Tone::Ink,
             )
             .into_element(),
-            _ => row_menu(
-                move || {
-                    vec![
-                        Action::new(Icon::Pencil, st.tn("action.edit"), move || {
-                            if let Some(p) = p.get_untracked() {
-                                editor.set(Some(Target::Edit(p.id)));
-                            }
-                        }),
-                        Action::new(Icon::Copy, st.tn("action.duplicate"), move || {
-                            if let Some(p) = p.get_untracked() {
-                                editor.set(Some(Target::Copy(p.id)));
-                            }
-                        }),
-                        Action::new(Icon::Printer, st.tn("products.print_label"), move || {
-                            if let Some(p) = p.get_untracked() {
-                                labeling.set(Some(p));
-                                labeling_open.set(true);
-                            }
-                        }),
-                        Action::new(Icon::Trash, st.tn("action.delete"), move || {
-                            if let Some(id) = p.get_untracked().and_then(|p| p.product_id().ok()) {
-                                archive(st, vec![id]);
-                            }
-                        })
-                        .danger(),
-                    ]
-                },
-                st.t("action.row_actions"),
-            )
-            .into_element(),
+            _ => {
+                let acts = menu_acts.clone();
+                crate::ui::menu::more_button(st, move || acts(at.index()), "product-more")
+                    .into_element()
+            }
         }
     };
 
@@ -1016,52 +1040,9 @@ pub fn products(st: AppState, compact: bool) -> View {
             sort,
             (!compact).then_some(selection),
             move |i| rows.with(|r| r.get(i).map(id_of)),
-            cell,
+            cell.clone(),
             "products-table",
-            Some(std::rc::Rc::new(move |i: usize| {
-                use crate::ui::menu::{Act, tsv};
-                let Some(p) = rows.with_untracked(|v| v.get(i).cloned()) else {
-                    return Vec::new();
-                };
-                let (p1, p2, p3) = (p.id.clone(), p.id.clone(), p.clone());
-                let gone = p.product_id().ok();
-                let price = Money::from_minor(p.price_minor, currency()).to_plain_string();
-                let mut acts = vec![
-                    Act::new(st.tn("action.edit"), move || {
-                        editor.set(Some(Target::Edit(p1.clone())))
-                    })
-                    .when(st.can("products.edit")),
-                    Act::new(st.tn("action.duplicate"), move || {
-                        editor.set(Some(Target::Copy(p2.clone())))
-                    })
-                    .when(st.can("products.edit")),
-                    Act::new(st.tn("products.print_label"), move || {
-                        labeling.set(Some(p3.clone()));
-                        labeling_open.set(true);
-                    }),
-                    Act::Line,
-                    Act::copy(st.tn("action.copy_name"), p.name.clone()),
-                    Act::copy(st.tn("action.copy_sku"), p.sku.clone()),
-                    Act::copy(st.tn("action.copy_price"), price.clone()),
-                ];
-                if let Some(b) = p.barcodes.first() {
-                    acts.push(Act::copy(st.tn("action.copy_barcode"), b.clone()));
-                }
-                acts.push(Act::copy(
-                    st.tn("action.copy_row"),
-                    tsv(&[product_cells(st, &p)]),
-                ));
-                acts.push(Act::Line);
-                acts.push(
-                    Act::new(st.tn("action.delete"), move || {
-                        if let Some(id) = gone {
-                            archive(st, vec![id]);
-                        }
-                    })
-                    .when(st.can("products.archive")),
-                );
-                acts
-            })),
+            Some(row_acts.clone()),
         )
         .into_element()
     };
@@ -1090,7 +1071,7 @@ pub fn products(st: AppState, compact: bool) -> View {
                 .into_element()
         },
     )
-    .otherwise(move || dynamic(grid).into_element());
+    .otherwise(move || dynamic(grid.clone()).into_element());
 
     let importing = signal(false);
     let actions = if compact {

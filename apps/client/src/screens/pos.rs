@@ -50,6 +50,9 @@ use parts::*;
 #[path = "pos_board.rs"]
 mod board;
 use board::*;
+#[path = "pos_widgets.rs"]
+mod widgets;
+use widgets::*;
 
 fn first_error(st: AppState, e: &DbError) -> String {
     error_text(st, e.codes.first().map_or("internal", |c| c.1))
@@ -222,6 +225,12 @@ struct Till {
     /// A product of the cart edited in the catalog (its id).
     product_edit: Signal<Option<String>>,
     product_edit_open: Signal<bool>,
+    /// The till and its shift (once known).
+    till: Memo<Option<(Register, Option<ShiftRow>)>>,
+    /// The closing of the shift is asked.
+    closing: Signal<bool>,
+    /// Bumped for each payment made at once (cash, the exact amount).
+    direct: Signal<u32>,
 }
 
 /// A sale reopened in the cart: its number, what is left of it, and
@@ -369,6 +378,7 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
     });
     let register: Signal<Option<String>> = signal(None);
     let held_rev = signal(0u32);
+    let closing = signal(false);
     effect(move || {
         let id = state.with(|s| s.as_ref().map(|(r, _)| r.id.clone()));
         if register.get_untracked() != id {
@@ -418,6 +428,9 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         board: Board::new(),
         product_edit: signal(None),
         product_edit_open: signal(false),
+        till: state,
+        closing,
+        direct: signal(0),
     };
     effect(move || {
         if !t.printing_open.get() {
@@ -429,7 +442,6 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             t.editing.set(None);
         }
     });
-    let closing = signal(false);
     let selling = move || matches!(state.get_untracked(), Some((_, Some(_))));
     let no_dialog = move || {
         !t.paying.get_untracked()
@@ -544,6 +556,11 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             t.pay(st, false);
         }
     });
+    on_key("mod+enter", move |_| {
+        if selling() && no_dialog() {
+            t.pay_now(st, false);
+        }
+    });
     on_key("f8", move |_| {
         if no_dialog() {
             t.clear();
@@ -606,14 +623,13 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
 
     let actions = move || {
         view().child(dynamic(move || match state.get() {
-            Some((_, Some(shift))) => view()
+            Some((_, Some(_))) => view()
                 .flex_row()
                 .flex_wrap()
                 .items_center()
                 .gap(px(8.0))
-                .child(badge(Status::Success, Some(Icon::Wallet), move || {
-                    tr_args(st.lang(), "pos.till_open", &[("number", &shift.number)])
-                }))
+                // Which till, which shift, since when and who; its menu.
+                .child(till_chip(st, t, compact))
                 // Phones: the actions as icons, beside the till's badge.
                 .child(dynamic(move || {
                     let n = t.held.get().len();
@@ -661,44 +677,26 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
                 .child(when(
                     move || st.can("sales.return") || st.can("sales.sell"),
                     move || {
-                        if compact {
-                            icon_button(
-                                || Icon::Undo,
-                                st.t("pos.return"),
-                                Variant::Secondary,
-                                move || t.returning.set(true),
-                            )
-                        } else {
-                            button(
-                                Variant::Secondary,
-                                Size::Md,
-                                Some(Icon::Undo),
-                                st.t("pos.return"),
-                                move || t.returning.set(true),
-                            )
-                        }
+                        // Icons: the head stays on one line beside the till's chip.
+                        icon_button(
+                            || Icon::Undo,
+                            st.t("pos.return"),
+                            Variant::Secondary,
+                            move || t.returning.set(true),
+                        )
                         .test_id("pos-return")
                         .into_element()
                     },
                 ))
-                .child(if compact {
+                .child(
                     icon_button(
                         || Icon::PackagePlus,
                         st.t("pos.free"),
                         Variant::Secondary,
                         move || t.free_open.set(true),
                     )
-                    .test_id("pos-free")
-                } else {
-                    button(
-                        Variant::Secondary,
-                        Size::Md,
-                        Some(Icon::PackagePlus),
-                        st.t("pos.free"),
-                        move || t.free_open.set(true),
-                    )
-                    .test_id("pos-free")
-                })
+                    .test_id("pos-free"),
+                )
                 .child(head_tools(t, st))
                 .child(if compact {
                     icon_button(
@@ -760,10 +758,20 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         .child(modal(t.paying, compact, move || {
             match state.get_untracked() {
                 Some((reg, Some(_))) => {
-                    pay_dialog(st, reg, t, move || t.paying.set(false)).into_element()
+                    pay_dialog(st, reg, t, move || t.paying.set(false), false).into_element()
                 }
                 _ => view().into_element(),
             }
+        }))
+        // Each payment made at once: the payment's work, with no screen.
+        .child(dynamic(move || {
+            if t.direct.get() == 0 {
+                return view().into_element();
+            }
+            untracked(move || match state.get_untracked() {
+                Some((reg, Some(_))) => pay_dialog(st, reg, t, || {}, true).into_element(),
+                _ => view().into_element(),
+            })
         }))
         .child(modal(t.editing_open, compact, move || {
             match t.editing.get_untracked() {
@@ -1529,7 +1537,14 @@ fn cart_box(st: AppState, t: Till, in_sheet: bool, parts: CartParts, side_only: 
                 .min_h(px(0.0))
                 .border_t_1()
                 .border_color(Tone::Border.color())
-                .child(side_actions(st, t))
+                .child(actions_panel(
+                    st,
+                    t,
+                    &crate::screens::pos_layout::Panel::new(
+                        crate::screens::pos_layout::Widget::Actions,
+                    ),
+                    0,
+                ))
                 .into_element(),
             (false, Some(table)) => scroll()
                 .flex_1()
@@ -1606,7 +1621,7 @@ fn cart_line(st: AppState, t: Till, i: usize, it: Item, line_total: i64) -> View
         }
         s
     };
-    view()
+    let row = view()
         .test_id(&format!("cart-line-{i}"))
         .gap(px(8.0))
         .px(px(16.0))
@@ -1623,7 +1638,6 @@ fn cart_line(st: AppState, t: Till, i: usize, it: Item, line_total: i64) -> View
         })
         .cursor_pointer()
         .on_press(move || t.selected.set(Some(i)))
-        .on_context_menu(move |e: &ContextMenuEvent| line_menu(st, t, i, e.page_position))
         .on_long_press(move || t.edit(i))
         .child(
             view()
@@ -1722,7 +1736,8 @@ fn cart_line(st: AppState, t: Till, i: usize, it: Item, line_total: i64) -> View
                     )
                     .test_id(&format!("cart-remove-{i}")),
                 ),
-        )
+        );
+    crate::ui::menu::with_menu(row, move || line_acts(st, t, i))
 }
 
 /// A line edited in place: its name, quantity, unit price and discount.
@@ -2115,7 +2130,13 @@ enum Way {
     Credit,
 }
 
-fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + 'static) -> View {
+fn pay_dialog(
+    st: AppState,
+    reg: Register,
+    t: Till,
+    close: impl Fn() + Clone + 'static,
+    direct: bool,
+) -> View {
     let Some(session) = st.session.get_untracked() else {
         return view();
     };
@@ -2344,6 +2365,13 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                         t.search.focus();
                     }
                     Err(e) => {
+                        // Paid at once but it cannot go through as it is
+                        // (an approval, a limit): the payment screen shows.
+                        if direct {
+                            show_toast(st, first_error(st, &e));
+                            t.paying.set(true);
+                            return;
+                        }
                         if let Some(p) = needs_approval(&e) {
                             asked_for.set(p);
                             asking.set(Some(Ask {
@@ -2359,6 +2387,11 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
             drop(task); // runs to completion: tasks end with their owner, not their handle
         }
     };
+    // Paid at once: cash, the exact amount, no screen.
+    if direct {
+        save();
+        return view();
+    }
     let retry = save.clone();
     let swap_open = swap.is_some() || t.correcting.with_untracked(Option::is_some);
     // While a supervisor is asked, the keys are theirs.

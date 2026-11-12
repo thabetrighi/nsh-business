@@ -136,6 +136,21 @@ icons! {
     Wand => "wand-sparkles",
     ArrowBack => "arrow-left",
     ArrowForward => "arrow-right",
+    Pause => "pause",
+    LogOut => "log-out",
+    History => "history",
+    Zap => "zap",
+    Maximize => "maximize-2",
+    TextSize => "a-large-small",
+    Box => "box",
+    UserCheck => "user-round-check",
+    Rotate => "rotate-ccw",
+    BellRing => "bell-ring",
+    LifeBuoy => "life-buoy",
+    PanelBottom => "panel-bottom",
+    Bag => "shopping-bag",
+    Hash => "hash",
+    UserX => "user-round-x",
 }
 
 /// An icon `size` points square, stroked in `tone`.
@@ -147,5 +162,6 @@ pub fn icon(which: Icon, size: f32, tone: impl Fn() -> Tone + 'static) -> impl I
             .replace("stroke-width=\"2\"", "stroke-width=\"1.75\"");
         ImageSrc::svg_markup(&markup)
     };
+    let size = (size * super::tokens::scale()).round();
     svg(src).w(px(size)).h(px(size)).flex_shrink_0()
 }

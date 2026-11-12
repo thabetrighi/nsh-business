@@ -10,8 +10,10 @@ use crate::screens::pos_layout::{
     BUILTIN, Kept, Layout, MAX_COLUMNS, MAX_PANELS, Panel, Widget, builtin,
 };
 
-use nsh_core::element::desktop::{MenuItem, popup_menu};
 use nsh_core::element::{ResponderEvent, TouchClaim};
+
+use crate::screens::pos_layout::{LABELS, TEXT_SIZES};
+use crate::ui::menu::{Act, menu_on};
 
 use super::*;
 
@@ -196,8 +198,27 @@ pub(super) struct BoardParts {
     pub products: Rc<dyn Fn(u8) -> View>,
 }
 
-/// A panel's content.
-fn widget(st: AppState, t: Till, l: &Layout, p: &Panel, parts: &BoardParts) -> View {
+/// A panel's content at its type size: a larger or smaller panel has its
+/// scale provided above it, which its text, icons and controls follow
+/// (also when parts of it are made again later).
+fn panel_view(st: AppState, t: Till, l: &Layout, p: &Panel, parts: &BoardParts, n: usize) -> View {
+    let k = p.scale();
+    if (k - 1.0).abs() < f32::EPSILON {
+        return widget(st, t, l, p, parts, n);
+    }
+    let (l, p, parts) = (l.clone(), p.clone(), parts.clone());
+    view().flex_1().min_h(px(0.0)).child(dynamic(move || {
+        provide_context(crate::ui::tokens::Scale(k));
+        untracked(|| widget(st, t, &l, &p, &parts, n))
+            .flex_1()
+            .min_h(px(0.0))
+            .into_element()
+    }))
+}
+
+/// A panel's content (`n`: which of its kind, for buttons in several
+/// places).
+fn widget(st: AppState, t: Till, l: &Layout, p: &Panel, parts: &BoardParts, n: usize) -> View {
     let has = |w: Widget| {
         l.columns
             .iter()
@@ -231,15 +252,224 @@ fn widget(st: AppState, t: Till, l: &Layout, p: &Panel, parts: &BoardParts) -> V
                 .child(cart_sums(st, t, false, false, !has(Widget::BigTotal)))
         }
         Widget::BigTotal => total_band(st, t),
-        Widget::Pay => pay_buttons(st, t, false),
+        Widget::Pay => pay_panel(st, t, p, false),
         Widget::Customer => card().child(customer_chip(st, t, false)),
-        Widget::Actions => card().child(side_actions(st, t)),
+        Widget::Actions => card().child(actions_panel(st, t, p, n)),
         Widget::Keypad => card().p(px(12.0)).child(line_keypad(st, t)),
+        Widget::Session => session_panel(st, t, p),
+        Widget::CartBar => bottom_bar(st, t, p),
     }
 }
 
 fn widget_name(st: AppState, w: Widget) -> String {
     st.tn(&format!("pos.widget.{}", w.code()))
+}
+
+fn widget_icon(w: Widget) -> Icon {
+    match w {
+        Widget::Search => Icon::Search,
+        Widget::Categories => Icon::Layers,
+        Widget::Products => Icon::Package,
+        Widget::Cart => Icon::Cart,
+        Widget::Totals => Icon::Receipt,
+        Widget::BigTotal => Icon::Dollar,
+        Widget::Pay => Icon::Banknote,
+        Widget::Customer => Icon::User,
+        Widget::Actions => Icon::Zap,
+        Widget::Keypad => Icon::Keyboard,
+        Widget::Session => Icon::Wallet,
+        Widget::CartBar => Icon::PanelBottom,
+    }
+}
+
+/// What may be set on a panel (`at`: its column and place; no column: the
+/// footer): its type size, how its buttons read, what it shows, its style.
+fn panel_acts(st: AppState, b: Board, at: (Option<usize>, usize), p: &Panel) -> Vec<Act> {
+    let set = move |f: Rc<dyn Fn(&mut Panel)>| {
+        move || {
+            let f = f.clone();
+            b.change(move |l| {
+                if let Some(p) = l.panel_mut(at) {
+                    f(p);
+                }
+            })
+        }
+    };
+    let w = p.widget;
+    let mut acts = vec![Act::sub(
+        Icon::TextSize,
+        st.tn("pos.panel.text"),
+        TEXT_SIZES
+            .iter()
+            .enumerate()
+            .map(|(k, code)| {
+                let k = u8::try_from(k).unwrap_or(0);
+                Act::new(
+                    st.tn(&format!("pos.panel.text.{code}")),
+                    set(Rc::new(move |p: &mut Panel| p.text = k)),
+                )
+                .checked(p.text == k)
+            })
+            .collect(),
+    )];
+    if w.has_buttons() {
+        acts.push(Act::sub(
+            Icon::Type,
+            st.tn("pos.panel.labels"),
+            LABELS
+                .iter()
+                .enumerate()
+                .map(|(k, code)| {
+                    let k = u8::try_from(k).unwrap_or(0);
+                    Act::new(
+                        st.tn(&format!("pos.panel.labels.{code}")),
+                        set(Rc::new(move |p: &mut Panel| p.labels = k)),
+                    )
+                    .checked(p.labels == k)
+                })
+                .collect(),
+        ));
+    }
+    if !w.items().is_empty() {
+        let shown = p.shown_items();
+        acts.push(Act::sub(
+            Icon::ClipboardCheck,
+            st.tn("pos.panel.items"),
+            w.items()
+                .iter()
+                .map(|code| {
+                    let code: &'static str = code;
+                    Act::new(
+                        st.tn(&format!("pos.item.{}.{code}", w.code())),
+                        set(Rc::new(move |p: &mut Panel| p.toggle_item(code))),
+                    )
+                    .checked(shown.iter().any(|s| s == code))
+                })
+                .collect(),
+        ));
+    }
+    if !w.styles().is_empty() {
+        acts.push(Act::sub(
+            Icon::Sliders,
+            st.tn("pos.panel.style"),
+            w.styles()
+                .iter()
+                .enumerate()
+                .map(|(k, code)| {
+                    let k = u8::try_from(k).unwrap_or(0);
+                    Act::new(
+                        st.tn(&format!("pos.style.{code}")),
+                        set(Rc::new(move |p: &mut Panel| p.style = k)),
+                    )
+                    .checked(p.style == k)
+                })
+                .collect(),
+        ));
+    }
+    // The footer may show another strip.
+    if at.0.is_none() {
+        let kinds = [
+            Widget::CartBar,
+            Widget::Actions,
+            Widget::Session,
+            Widget::Pay,
+            Widget::BigTotal,
+            Widget::Totals,
+            Widget::Customer,
+        ];
+        acts.push(Act::sub(
+            Icon::PanelBottom,
+            st.tn("pos.panel.widget"),
+            kinds
+                .into_iter()
+                .map(|k| {
+                    Act::with(widget_icon(k), widget_name(st, k), move || {
+                        b.change(move |l| {
+                            let old = l.footer.take();
+                            l.footer = Some(Panel::new(k));
+                            if !l.check() {
+                                l.footer = old;
+                            }
+                        })
+                    })
+                    .checked(w == k)
+                })
+                .collect(),
+        ));
+    }
+    acts
+}
+
+/// The options' button of a panel being edited.
+fn options_button(
+    st: AppState,
+    b: Board,
+    at: (Option<usize>, usize),
+    p: &Panel,
+    id: String,
+) -> View {
+    menu_on(
+        icon_button(
+            || Icon::Settings,
+            st.t("pos.panel.options"),
+            Variant::Ghost,
+            || {},
+        )
+        .test_id(&id),
+        panel_acts(st, b, at, p),
+    )
+}
+
+/// The footer while editing: its name, its options, remove it.
+fn footer_frame(st: AppState, b: Board, p: Panel, content: View) -> View {
+    let w = p.widget;
+    view()
+        .test_id("pos-panel-footer")
+        .rounded(px(10.0))
+        .border_2()
+        .border_color(Tone::BorderStrong.color())
+        .overflow_hidden()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(10.0))
+                .py(px(4.0))
+                .bg(Tone::PrimarySoft.color())
+                .child(icon(Icon::PanelBottom, 16.0, || Tone::Primary))
+                .child(label_line(
+                    move || format!("{} · {}", st.tn("pos.show.footer"), widget_name(st, w)),
+                    ty::SM,
+                    FontWeight::BOLD,
+                    Tone::Primary,
+                ))
+                .child(view().flex_1())
+                .child(options_button(
+                    st,
+                    b,
+                    (None, 0),
+                    &p,
+                    "pos-opts-footer".into(),
+                ))
+                .child(
+                    icon_button(
+                        || Icon::Close,
+                        st.t("action.delete"),
+                        Variant::Ghost,
+                        move || {
+                            b.change(|l| {
+                                let old = l.footer.take();
+                                if !l.check() {
+                                    l.footer = old;
+                                }
+                            })
+                        },
+                    )
+                    .test_id("pos-remove-footer"),
+                ),
+        )
+        .child(view().p(px(6.0)).child(content))
 }
 
 /// The till's screen from its layout; while editing, with the handles.
@@ -270,6 +500,8 @@ pub(super) fn board_view(st: AppState, t: Till, parts: BoardParts) -> View {
         }
         let gap = f32::from(l.gap);
         let n = l.columns.len();
+        // Buttons may be in several places: each has its own test ids.
+        let mut actions_seen = 0usize;
         let mut row = view()
             .flex_1()
             .min_h(px(0.0))
@@ -292,7 +524,13 @@ pub(super) fn board_view(st: AppState, t: Till, parts: BoardParts) -> View {
                 if editing {
                     stack = stack.child(slot(b, c, i));
                 }
-                let content = widget(st, t, &l, p, &parts);
+                let which = if p.widget == Widget::Actions {
+                    actions_seen += 1;
+                    actions_seen - 1
+                } else {
+                    0
+                };
+                let content = panel_view(st, t, &l, p, &parts, which);
                 let sized = if editing && p.height > 0 {
                     // While editing the board scrolls: a share is a fixed height.
                     view()
@@ -324,16 +562,36 @@ pub(super) fn board_view(st: AppState, t: Till, parts: BoardParts) -> View {
         if editing {
             row = row.child(new_column_slot(st, b, n));
         }
-        let mut v = view().flex_1().min_h(px(0.0)).gap(px(10.0));
+        // The strip along the bottom, the whole width.
+        let footer = l.footer.clone().map(|f| {
+            let content = panel_view(st, t, &l, &f, &parts, actions_seen);
+            if editing {
+                footer_frame(st, b, f, content)
+            } else {
+                content
+            }
+        });
+        let mut v = view()
+            .flex_1()
+            .min_h(px(0.0))
+            .gap(px(if editing { 10.0 } else { gap }));
         if editing {
-            v = v.child(edit_bar(st, b)).child(
-                scroll()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .child(row.flex_1().pb(px(24.0))),
-            );
+            let mut inner = view()
+                .flex_1()
+                .gap(px(10.0))
+                .pb(px(24.0))
+                .child(row.flex_1());
+            if let Some(f) = footer {
+                inner = inner.child(f);
+            }
+            v = v
+                .child(edit_bar(st, b))
+                .child(scroll().flex_1().min_h(px(0.0)).child(inner));
         } else {
             v = v.child(row);
+            if let Some(f) = footer {
+                v = v.child(f);
+            }
         }
         v.into_element()
     });
@@ -472,20 +730,19 @@ fn splitter(b: Board, c: usize, rtl: bool) -> View {
 /// Above a column while editing: its width, narrower or wider, and what
 /// can be added to it.
 fn column_bar(st: AppState, b: Board, c: usize, width: u8) -> View {
-    let add = move || {
-        let items: Vec<MenuItem> = b.draft.with_untracked(|l| {
+    let add_acts = move || -> Vec<Act> {
+        b.draft.with_untracked(|l| {
             l.missing()
                 .into_iter()
                 .map(|w| {
-                    MenuItem::new(widget_name(st, w)).on_select(move || {
+                    Act::with(widget_icon(w), widget_name(st, w), move || {
                         b.change(|l| {
                             l.add(c, w);
                         })
                     })
                 })
                 .collect()
-        });
-        drop(popup_menu(items));
+        })
     };
     view()
         .flex_row()
@@ -532,14 +789,17 @@ fn column_bar(st: AppState, b: Board, c: usize, width: u8) -> View {
                 })
             },
             move || {
-                button(
-                    Variant::Secondary,
-                    Size::Sm,
-                    Some(Icon::Plus),
-                    st.t("pos.layouts.add"),
-                    add,
+                menu_on(
+                    button(
+                        Variant::Secondary,
+                        Size::Sm,
+                        Some(Icon::Plus),
+                        st.t("pos.layouts.add"),
+                        || {},
+                    )
+                    .test_id(&format!("pos-col-add-{c}")),
+                    add_acts(),
                 )
-                .test_id(&format!("pos-col-add-{c}"))
                 .into_element()
             },
         ))
@@ -617,6 +877,13 @@ fn edit_frame(
             .test_id(&format!("pos-style-{c}-{i}")),
         );
     }
+    bar = bar.child(options_button(
+        st,
+        b,
+        (Some(c), i),
+        &p,
+        format!("pos-opts-{c}-{i}"),
+    ));
     let height = p.height;
     bar = bar
         .child(label_line(
@@ -820,24 +1087,31 @@ fn edit_bar(st: AppState, b: Board) -> View {
             )
         })
         .collect();
-    let start_from = move || {
-        let items: Vec<MenuItem> = builtin()
-            .into_iter()
-            .map(|l| {
-                let label = st.tn(&format!("pos.layout.{}", l.name));
-                MenuItem::new(label).on_select(move || {
-                    tile.set(l.tile);
-                    stock.set(l.stock);
-                    sku.set(l.sku);
-                    gap.set(l.gap);
-                    head.set(l.head);
-                    big.set(l.big_lines);
-                    b.draft.set(l.clone());
-                })
+    let foot = signal(b.draft.get_untracked().footer.is_some());
+    effect(move || {
+        let on = foot.get();
+        if b.draft.with_untracked(|l| l.footer.is_some()) != on {
+            b.draft.update(|l| {
+                l.footer = on.then(|| Panel::new(Widget::CartBar));
+            });
+        }
+    });
+    let start_acts: Vec<Act> = builtin()
+        .into_iter()
+        .map(|l| {
+            let label = st.tn(&format!("pos.layout.{}", l.name));
+            Act::with(Icon::LayoutTemplate, label, move || {
+                tile.set(l.tile);
+                stock.set(l.stock);
+                sku.set(l.sku);
+                gap.set(l.gap);
+                head.set(l.head);
+                big.set(l.big_lines);
+                foot.set(l.footer.is_some());
+                b.draft.set(l.clone());
             })
-            .collect();
-        drop(popup_menu(items));
-    };
+        })
+        .collect();
     let toggle = |key: &'static str, on: Signal<bool>, id: &'static str| {
         view()
             .flex_row()
@@ -871,22 +1145,24 @@ fn edit_bar(st: AppState, b: Board) -> View {
             KeyboardType::Default,
             "pos-layout-name",
         )))
-        .child(
+        .child(menu_on(
             button(
                 Variant::Secondary,
                 Size::Md,
                 Some(Icon::LayoutTemplate),
                 st.t("pos.layouts.start_from"),
-                start_from,
+                || {},
             )
             .test_id("pos-start-from"),
-        )
+            start_acts,
+        ))
         .child(segmented(tiles, tile).test_id("pos-edit-tile"))
         .child(segmented(gaps, gap).test_id("pos-edit-gap"))
         .child(toggle("pos.show.stock", stock, "pos-edit-stock"))
         .child(toggle("pos.show.sku", sku, "pos-edit-sku"))
         .child(toggle("pos.show.head", head, "pos-edit-head"))
         .child(toggle("pos.show.big_lines", big, "pos-edit-big-lines"))
+        .child(toggle("pos.show.footer", foot, "pos-edit-footer"))
         .child(view().flex_1())
         .child(
             label(

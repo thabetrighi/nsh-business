@@ -170,13 +170,13 @@ fn category_row(
         use crate::ui::menu::Act;
         let (e, s, id) = (e2.clone(), s2.clone(), id2.clone());
         vec![
-            Act::new(st.tn("categories.edit"), move || {
+            Act::with(Icon::Pencil, st.tn("categories.edit"), move || {
                 start(Some(e.clone()), None)
             }),
-            Act::new(st.tn("categories.add_sub"), move || {
+            Act::with(Icon::PlusCircle, st.tn("categories.add_sub"), move || {
                 start(None, Some(s.clone()))
             }),
-            Act::new(st.tn("categories.products_of"), move || {
+            Act::with(Icon::Package, st.tn("categories.products_of"), move || {
                 st.intent
                     .set(Some(crate::state::Intent::ProductsIn(id.clone())));
                 st.route.set(Route::Products);
@@ -185,7 +185,7 @@ fn category_row(
             Act::copy(st.tn("action.copy_name"), n2.clone()),
         ]
     };
-    crate::ui::menu::with_menu(view(), acts)
+    let row = view()
         .test_id(&format!("category-{i}"))
         .flex_row()
         .items_center()
@@ -231,7 +231,8 @@ fn category_row(
                 )
             },
         ))
-        .child(menu)
+        .child(menu);
+    crate::ui::menu::with_menu(row, acts)
 }
 
 fn category_form(

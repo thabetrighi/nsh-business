@@ -14,7 +14,7 @@ use crate::screens::{design::design, home::home, products::products, settings::s
 use crate::state::AppState;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{
-    Size, Variant, avatar, badge, button, figure, icon_button, kbd, label, label_line, spacer,
+    Size, Variant, badge, button, figure, icon_button, kbd, label, label_line, spacer,
 };
 use crate::ui::overlay::{modal, toast_layer};
 use crate::ui::surface::page_pad;
@@ -54,6 +54,12 @@ pub fn shell(st: AppState) -> impl IntoElement {
         }))
         .child(dynamic(move || {
             command_palette(st, compact.get()).into_element()
+        }))
+        .child(dynamic(move || {
+            crate::ui::overlay::modal(st.shortcuts, compact.get(), move || {
+                crate::topbar::shortcuts_dialog(st, move || st.shortcuts.set(false)).into_element()
+            })
+            .into_element()
         }))
 }
 
@@ -306,7 +312,7 @@ fn narrow_sidebar(st: AppState) -> View {
         nav = nav.child(when(
             move || section.routes.iter().any(|r| st.shows(*r)),
             move || {
-                view()
+                let trigger = view()
                     .test_id(&format!("section-{i}"))
                     .w(px(40.0))
                     .h(px(40.0))
@@ -317,20 +323,6 @@ fn narrow_sidebar(st: AppState) -> View {
                     .style_when(holds, |s| s.bg(Tone::Hover.color()))
                     .hover(|s| s.bg(Tone::Hover.color()))
                     .label(move || SharedString::from(st.tn(section.key)))
-                    .on_press(move || {
-                        use nsh_core::element::desktop::{MenuItem, popup_menu};
-                        let items = section
-                            .routes
-                            .iter()
-                            .filter(|r| st.shows(**r))
-                            .map(|&r| {
-                                MenuItem::new(st.tn(r.key()))
-                                    .checked(st.route.get_untracked() == r)
-                                    .on_select(move || st.route.set(r))
-                            })
-                            .collect();
-                        drop(popup_menu(items));
-                    })
                     .child(dynamic(move || {
                         icon(section.icon, 18.0, move || {
                             if holds.get() {
@@ -340,7 +332,25 @@ fn narrow_sidebar(st: AppState) -> View {
                             }
                         })
                         .into_element()
-                    }))
+                    }));
+                // Its pages beside it: the section's name, then each page
+                // with its icon (the one shown marked).
+                let mut acts = vec![crate::ui::menu::Act::Title(st.tn(section.key))];
+                for &r in section.routes.iter().filter(|r| st.shows(**r)) {
+                    let mut a = crate::ui::menu::Act::with(r.icon(), st.tn(r.key()), move || {
+                        st.route.set(r)
+                    });
+                    if st.route.get_untracked() == r {
+                        a = a.hint("●");
+                    }
+                    acts.push(a);
+                }
+                let side = if st.rtl() {
+                    nsh_core::element::Placement::Left
+                } else {
+                    nsh_core::element::Placement::Right
+                };
+                crate::ui::menu::menu_at(trigger, acts, side, nsh_core::element::Align::Start)
                     .into_element()
             },
         ));
@@ -584,18 +594,8 @@ fn top_bar(st: AppState) -> View {
         .child(search_box(st))
         .child(spacer())
         .child(sync_status(st))
-        .child(icon_button(
-            || Icon::Bell,
-            st.t("action.notifications"),
-            Variant::Ghost,
-            || {},
-        ))
-        .child(icon_button(
-            || Icon::Help,
-            st.t("action.help"),
-            Variant::Ghost,
-            || {},
-        ))
+        .child(crate::topbar::notifications(st))
+        .child(crate::topbar::help(st))
         .child(
             icon_button(
                 || if dark() { Icon::Sun } else { Icon::Moon },
@@ -627,7 +627,13 @@ fn top_bar(st: AppState) -> View {
                 .into_element()
             },
         ))
-        .child(avatar(user_name(st), 32.0, Status::Accent))
+        .child(dynamic(move || {
+            // Its entries follow the language, the theme and who is there.
+            st.lang.get();
+            st.user.get();
+            st.prefs.theme.get();
+            untracked(move || crate::topbar::user_menu(st)).into_element()
+        }))
 }
 
 fn search_box(st: AppState) -> View {

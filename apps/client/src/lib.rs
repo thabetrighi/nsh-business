@@ -18,6 +18,7 @@ mod screens;
 mod sheets;
 mod shell;
 mod state;
+mod topbar;
 mod ui;
 
 #[native_module("nb-client/native")]
@@ -141,6 +142,7 @@ pub fn App() -> impl IntoElement {
         .child(dynamic(move || {
             let l = look.get();
             ui::tokens::install(l);
+            ui::tokens::set_rtl(st.lang().direction() == nb_i18n::Direction::Rtl);
             ui::theme::apply(l);
             view()
                 .flex_1()

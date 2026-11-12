@@ -255,6 +255,8 @@ pub struct AppState {
     pub toast: Signal<Option<String>>,
     /// The command palette is open.
     pub palette: Signal<bool>,
+    /// The keyboard shortcuts' sheet is open.
+    pub shortcuts: Signal<bool>,
     /// A pending request for the screen being opened.
     pub intent: Signal<Option<Intent>>,
     /// The local database of this app instance (set by [`AppState::connect`]).
@@ -305,6 +307,7 @@ impl AppState {
             settings_tab: signal(0),
             toast: signal(None),
             palette: signal(false),
+            shortcuts: signal(false),
             intent: signal(None),
             db: nsh_core::prelude::stored(None),
             session: signal(None),

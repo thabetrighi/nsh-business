@@ -1170,3 +1170,52 @@ test("the sidebar narrows to icons, and the debts and expenses reports open", as
   await app.press("text:Dépenses");
   await app.waitFor("id:party-tabs");
 });
+
+test("the bell, help and the user's menu; a sale paid at once; a panel set larger with a bottom bar", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  // What wants attention: products out of stock in the demo shop.
+  await app.waitFor("id:notifications-count");
+  await app.press("id:open-notifications");
+  await app.waitFor("id:notifications");
+  await app.waitUntil(() => app.texts().some((t) => plain(t).includes("en rupture")));
+  await app.press("id:alert-0");
+  await app.waitFor("text:Produits");
+  // Help: the keyboard's shortcuts.
+  await app.press("id:open-help");
+  await app.press("text:Raccourcis clavier");
+  await app.waitFor("text:Partout");
+  await app.press("id:dialog-close");
+  // The person's own menu.
+  await app.press("id:open-user");
+  await app.waitFor("text:Personnaliser l'apparence");
+  await app.press("text:Personnaliser l'apparence");
+  await app.waitFor("text:Couleur d'accent");
+  // Paid at once: cash, the exact amount, no payment screen.
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.waitFor("id:cart-line-0");
+  await app.press("id:pos-pay-now");
+  await app.waitUntil(() => app.texts().some((t) => plain(t).startsWith("Vente ")));
+  await app.waitUntil(() => !app.shows("id:cart-line-0"));
+  expect(app.shows("id:pay-confirm")).toBe(false);
+  // A panel's own options: the search larger; a bar along the bottom.
+  await app.press("id:pos-layout-edit");
+  await app.waitFor("id:pos-edit-bar");
+  await app.press("id:pos-opts-0-0");
+  await app.press("text:Taille du texte");
+  await app.press("text:Très grande");
+  await app.press("id:pos-edit-footer");
+  await app.waitFor("id:pos-panel-footer");
+  await app.press("id:pos-edit-save");
+  await app.waitFor("id:pos-cart-bar");
+  await app.waitFor("id:bar-total");
+  // Back to the shop's layout for the other tests on this device.
+  await app.press("id:pos-customize");
+  await app.press("id:pos-layout-use-0");
+  await app.press("id:pos-customize-done");
+});

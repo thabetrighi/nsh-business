@@ -252,6 +252,53 @@ pub fn payables(store: &Store) -> Result<Vec<PartyRow>> {
     })
 }
 
+/// What wants attention (the bell in the top bar): products out of
+/// stock or low, customers past their days to pay, suppliers owed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Alerts {
+    pub out_of_stock: u32,
+    pub low_stock: u32,
+    pub customers_overdue: u32,
+    pub overdue_minor: i64,
+    pub suppliers_owed: u32,
+    pub payables_minor: i64,
+}
+
+impl Alerts {
+    /// How many things the bell counts.
+    pub fn count(&self) -> u32 {
+        u32::from(self.out_of_stock > 0)
+            + u32::from(self.low_stock > 0)
+            + u32::from(self.customers_overdue > 0)
+            + u32::from(self.suppliers_owed > 0)
+    }
+}
+
+pub fn alerts(store: &Store) -> Result<Alerts> {
+    let page = crate::usecases::products::list_products(
+        store,
+        &crate::repo::catalog::ProductQuery {
+            limit: 1,
+            with_counts: true,
+            ..Default::default()
+        },
+    )?;
+    let ageing = crate::usecases::debts::ageing(store)?;
+    let owed = payables(store)?;
+    let owing: Vec<&PartyRow> = owed.iter().filter(|r| r.total_minor > 0).collect();
+    Ok(Alerts {
+        out_of_stock: page.counts[3],
+        low_stock: page.counts[2],
+        customers_overdue: u32::try_from(
+            ageing.rows.iter().filter(|r| r.overdue_minor > 0).count(),
+        )
+        .unwrap_or(u32::MAX),
+        overdue_minor: ageing.overdue_minor,
+        suppliers_owed: u32::try_from(owing.len()).unwrap_or(u32::MAX),
+        payables_minor: owing.iter().map(|r| r.total_minor).sum(),
+    })
+}
+
 /// Sales over a span of business days.
 pub fn sales_report(store: &Store, span: &Span) -> Result<SalesReport> {
     report_of(store, span, Parts::All)

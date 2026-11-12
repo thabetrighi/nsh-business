@@ -246,6 +246,19 @@ pub fn look() -> Look {
     LOOK.with(Cell::get)
 }
 
+thread_local! {
+    static RTL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the interface reads right to left (set with the look).
+pub fn set_rtl(on: bool) {
+    RTL.with(|r| r.set(on));
+}
+
+pub fn rtl() -> bool {
+    RTL.with(Cell::get)
+}
+
 // ------------------------------------------------------------------ colors
 
 /// A semantic color with a light and a dark value.
@@ -396,9 +409,20 @@ pub mod ty {
     pub const DISPLAY: f32 = 34.0;
 }
 
-/// A type size scaled by the user's text size.
+/// A part of the screen drawn larger or smaller than the rest (a till's
+/// panel set to large type): provided above it, its text, icons and
+/// controls follow.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Scale(pub f32);
+
+/// The scale provided above what is being made (1 where none is).
+pub fn scale() -> f32 {
+    nsh_core::prelude::use_context::<Scale>().map_or(1.0, |s| s.0)
+}
+
+/// A type size scaled by the user's text size (and a part's scale).
 pub fn fs(base: f32) -> f32 {
-    (base * look().text.factor()).round()
+    (base * look().text.factor() * scale()).round()
 }
 
 /// A length scaled by density (control heights, paddings, row heights).
@@ -429,15 +453,15 @@ pub mod radius {
 
 /// Control heights (points at comfortable density).
 pub mod control {
-    use super::sp;
+    use super::{scale, sp};
     pub fn sm() -> f32 {
-        sp(28.0)
+        (sp(28.0) * scale()).round()
     }
     pub fn md() -> f32 {
-        sp(34.0)
+        (sp(34.0) * scale()).round()
     }
     pub fn lg() -> f32 {
-        sp(42.0)
+        (sp(42.0) * scale()).round()
     }
 }
 

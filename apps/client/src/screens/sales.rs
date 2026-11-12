@@ -272,15 +272,15 @@ pub fn sales_page(st: AppState, compact: bool) -> View {
                     let (n1, n2, n3) = (r.number.clone(), r.number.clone(), r.number.clone());
                     let corrected = r.edited_into.is_some();
                     vec![
-                        Act::new(st.tn("sales.act.details"), move || {
+                        Act::with(Icon::Eye, st.tn("sales.act.details"), move || {
                             viewing.set(Some(n1.clone()));
                             viewing_open.set(true);
                         }),
-                        Act::new(st.tn("action.print"), move || {
+                        Act::with(Icon::Printer, st.tn("action.print"), move || {
                             printing.set(Some(n2.clone()));
                             printing_open.set(true);
                         }),
-                        Act::new(st.tn("sales.act.correct"), move || {
+                        Act::with(Icon::Undo, st.tn("sales.act.correct"), move || {
                             st.intent.set(Some(Intent::Reopen(n3.clone())));
                             st.route.set(Route::Sell);
                         })

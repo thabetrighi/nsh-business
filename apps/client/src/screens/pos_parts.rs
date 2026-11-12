@@ -6,7 +6,9 @@
 //! by side; a receipt printed before paying; full screen; the shortcuts
 //! behind a help icon.
 
-use nsh_core::element::desktop::{MenuItem, popup_menu_at, toggle_full_screen};
+use nsh_core::element::desktop::toggle_full_screen;
+
+use crate::ui::menu::{Act, with_menu};
 
 use super::*;
 
@@ -31,6 +33,24 @@ impl Till {
         self.paying.set(true);
     }
 
+    /// Pays at once: cash, the exact amount, no payment screen (a sale
+    /// that brings goods back or corrects another shows it).
+    pub(super) fn pay_now(self, st: AppState, print: bool) {
+        if self.cart.with_untracked(Vec::is_empty) {
+            return;
+        }
+        if self.exchange.with_untracked(Option::is_some)
+            || self.correcting.with_untracked(Option::is_some)
+        {
+            self.pay(st, print);
+            return;
+        }
+        self.cart_open.set(false);
+        self.print_after
+            .set(print || st.biz.auto_print.get_untracked());
+        self.direct.update(|n| *n += 1);
+    }
+
     pub(super) fn quick(self, i: usize, q: Quick) {
         self.selected.set(Some(i));
         self.quick.set(Some((i, q)));
@@ -38,81 +58,49 @@ impl Till {
     }
 }
 
-/// "Pay" and, at its end, "pay and print": one control in two parts.
+/// Payment as a ready-made layout has it: at once, through the payment
+/// screen, with the receipt.
 pub(super) fn pay_buttons(st: AppState, t: Till, in_sheet: bool) -> View {
-    view()
-        .flex_row()
-        .gap(px(2.0))
-        .child(
-            button(
-                Variant::Primary,
-                Size::Lg,
-                Some(Icon::Banknote),
-                move || format!("{}  ·  F9", st.tn("pos.pay")),
-                move || t.pay(st, false),
-            )
-            .test_id(if in_sheet { "sheet-pay" } else { "pos-pay" })
-            .flex_1(),
-        )
-        .child(
-            view()
-                .test_id(if in_sheet {
-                    "sheet-pay-print"
-                } else {
-                    "pos-pay-print"
-                })
-                .w(px(52.0))
-                .h(px(control_lg()))
-                .items_center()
-                .justify_center()
-                .rounded(px(radius::md()))
-                .bg(Tone::Primary.color())
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.9))
-                .label(move || SharedString::from(st.tn("pos.pay_print")))
-                .on_press(move || t.pay(st, true))
-                .child(icon(Icon::Printer, 20.0, || Tone::OnPrimary)),
-        )
+    let p = crate::screens::pos_layout::Panel::new(crate::screens::pos_layout::Widget::Pay);
+    pay_panel(st, t, &p, in_sheet)
 }
 
-fn control_lg() -> f32 {
-    crate::ui::tokens::control::lg()
-}
-
-/// What may be done to cart line `i`, at the pointer (a right click).
-pub(super) fn line_menu(st: AppState, t: Till, i: usize, at: Point<Points>) {
-    t.selected.set(Some(i));
-    let mut items = vec![
-        MenuItem::new(st.tn("pos.menu.qty")).on_select(move || t.quick(i, Quick::Qty)),
-        MenuItem::new(st.tn("pos.menu.price"))
-            .disabled(!st.can("sales.price_override") && !st.can("sales.sell"))
-            .on_select(move || t.quick(i, Quick::Price)),
-        MenuItem::new(st.tn("pos.menu.discount"))
-            .disabled(!st.can("sales.discount"))
-            .on_select(move || t.quick(i, Quick::Discount)),
-        MenuItem::new(st.tn("pos.edit_line"))
-            .shortcut("f6")
-            .on_select(move || t.edit(i)),
-        MenuItem::new(st.tn("pos.menu.edit_product"))
-            .disabled(
-                !st.can("products.edit")
-                    || t.cart
-                        .with_untracked(|v| v.get(i).is_none_or(|l| l.product.is_none())),
-            )
-            .on_select(move || {
-                let id = t.cart.with_untracked(|v| {
-                    v.get(i)
-                        .and_then(|l| l.product.as_ref().map(|p| p.id.clone()))
-                });
-                if id.is_some() {
-                    t.product_edit.set(id);
-                    t.product_edit_open.set(true);
-                }
-            }),
-        MenuItem::separator(),
-        MenuItem::new(st.tn("pos.menu.more")).on_select(move || t.step(i, 1_000)),
-        MenuItem::new(st.tn("pos.menu.less")).on_select(move || t.step(i, -1_000)),
-        MenuItem::new(st.tn("pos.menu.duplicate")).on_select(move || {
+/// What may be done to cart line `i` (its right click, a held finger).
+pub(super) fn line_acts(st: AppState, t: Till, i: usize) -> Vec<Act> {
+    let no_product = t
+        .cart
+        .with_untracked(|v| v.get(i).is_none_or(|l| l.product.is_none()));
+    let mut acts = vec![
+        Act::with(Icon::Hash, st.tn("pos.menu.qty"), move || {
+            t.quick(i, Quick::Qty)
+        }),
+        Act::with(Icon::Tag, st.tn("pos.menu.price"), move || {
+            t.quick(i, Quick::Price)
+        })
+        .when(st.can("sales.price_override") || st.can("sales.sell")),
+        Act::with(Icon::Percent, st.tn("pos.menu.discount"), move || {
+            t.quick(i, Quick::Discount)
+        })
+        .when(st.can("sales.discount")),
+        Act::with(Icon::Pencil, st.tn("pos.edit_line"), move || t.edit(i)).hint("F6"),
+        Act::with(Icon::Package, st.tn("pos.menu.edit_product"), move || {
+            let id = t.cart.with_untracked(|v| {
+                v.get(i)
+                    .and_then(|l| l.product.as_ref().map(|p| p.id.clone()))
+            });
+            if id.is_some() {
+                t.product_edit.set(id);
+                t.product_edit_open.set(true);
+            }
+        })
+        .when(st.can("products.edit") && !no_product),
+        Act::Line,
+        Act::with(Icon::Plus, st.tn("pos.menu.more"), move || t.step(i, 1_000)).hint("+"),
+        Act::with(Icon::Minus, st.tn("pos.menu.less"), move || {
+            t.step(i, -1_000)
+        })
+        .hint("-"),
+        Act::with(Icon::Copy, st.tn("pos.menu.duplicate"), move || {
             t.cart.update(|v| {
                 if let Some(l) = v.get(i).cloned() {
                     v.insert(i + 1, l);
@@ -120,16 +108,12 @@ pub(super) fn line_menu(st: AppState, t: Till, i: usize, at: Point<Points>) {
             });
             t.selected.set(Some(i + 1));
         }),
-        MenuItem::separator(),
     ];
     if let Some(name) = t.cart.with_untracked(|v| v.get(i).map(|l| l.name.clone())) {
-        items.push(
-            MenuItem::new(st.tn("pos.menu.copy_name"))
-                .on_select(move || set_clipboard(name.clone())),
-        );
+        acts.push(Act::copy(st.tn("pos.menu.copy_name"), name));
     }
-    items.push(MenuItem::new(st.tn("pos.menu.remove")).on_select(move || t.remove(i)));
-    drop(popup_menu_at(items, at));
+    acts.push(Act::with(Icon::Trash, st.tn("pos.menu.remove"), move || t.remove(i)).danger());
+    acts
 }
 
 /// A keypad for touch screens: digits, the decimal point, erase.
@@ -828,7 +812,7 @@ pub(super) fn cart_table(st: AppState, t: Till) -> View {
                     .hover(|s| s.bg(Tone::Subtle.color()))
                     .on_press(move || t.quick(i, q))
             };
-            v = v.child(
+            v = v.child(with_menu(
                 view()
                     .test_id(&format!("cart-line-{i}"))
                     .flex_row()
@@ -847,9 +831,6 @@ pub(super) fn cart_table(st: AppState, t: Till) -> View {
                     })
                     .cursor_pointer()
                     .on_press(move || t.selected.set(Some(i)))
-                    .on_context_menu(move |e: &ContextMenuEvent| {
-                        line_menu(st, t, i, e.page_position)
-                    })
                     .child(view().w(px(28.0)).child(figure(
                         move || (i + 1).to_string(),
                         ty::SM,
@@ -951,7 +932,8 @@ pub(super) fn cart_table(st: AppState, t: Till) -> View {
                             .test_id(&format!("cart-remove-{i}")),
                         ),
                     ),
-            );
+                move || line_acts(st, t, i),
+            ));
         }
         v.into_element()
     });
@@ -1012,96 +994,4 @@ pub(super) fn prebill_sale(st: AppState, t: Till) -> Option<nb_docs::templates::
         balance: None,
         settled_minor: 0,
     })
-}
-
-/// The scanning layout's side: the cart's actions as large buttons.
-pub(super) fn side_actions(st: AppState, t: Till) -> View {
-    let action =
-        move |ic: Icon, key: &'static str, k: &'static str, id: &'static str, f: Box<dyn Fn()>| {
-            view()
-                .test_id(id)
-                .flex_grow(1.0)
-                .basis(px(150.0))
-                .h(px(64.0))
-                .gap(px(2.0))
-                .items_center()
-                .justify_center()
-                .rounded(px(radius::md()))
-                .border_1()
-                .border_color(Tone::Border.color())
-                .bg(Tone::Surface.color())
-                .cursor_pointer()
-                .hover(|s| s.bg(Tone::Subtle.color()))
-                .on_press(f)
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(icon(ic, 18.0, || Tone::Ink))
-                        .child(label_line(
-                            st.t(key),
-                            ty::SM,
-                            FontWeight::SEMIBOLD,
-                            Tone::Ink,
-                        )),
-                )
-                .child(label_line(
-                    move || k.to_owned(),
-                    ty::XS,
-                    FontWeight::NORMAL,
-                    Tone::Faint,
-                ))
-        };
-    view()
-        .p(px(12.0))
-        .flex_row()
-        .flex_wrap()
-        .gap(px(8.0))
-        .child(action(
-            Icon::Percent,
-            "pos.key.discount",
-            "F5",
-            "side-discount",
-            Box::new(move || {
-                if !t.cart.with_untracked(Vec::is_empty) {
-                    t.discount_open.set(true);
-                }
-            }),
-        ))
-        .child(action(
-            Icon::User,
-            "pos.key.customer",
-            "F10",
-            "side-customer",
-            Box::new(move || t.customer_open.set(true)),
-        ))
-        .child(action(
-            Icon::Clock,
-            "pos.key.hold",
-            "F7",
-            "side-hold",
-            Box::new(move || hold(st, t)),
-        ))
-        .child(action(
-            Icon::ClipboardList,
-            "pos.key.held",
-            "F3",
-            "side-held",
-            Box::new(move || t.recalling.set(true)),
-        ))
-        .child(action(
-            Icon::PackagePlus,
-            "pos.key.free",
-            "F4",
-            "side-free",
-            Box::new(move || t.free_open.set(true)),
-        ))
-        .child(action(
-            Icon::Trash,
-            "pos.key.clear",
-            "F8",
-            "side-clear",
-            Box::new(move || t.clear()),
-        ))
 }

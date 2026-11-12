@@ -370,7 +370,7 @@ fn customer_row(
             v
         }
     };
-    crate::ui::menu::with_menu(view(), acts)
+    let row = view()
         .test_id(&format!("customer-{i}"))
         .flex_row()
         .items_center()
@@ -409,7 +409,8 @@ fn customer_row(
         .child(tail)
         .cursor_pointer()
         .hover(|s| s.bg(Tone::Hover.color()))
-        .on_press(move || showing.set(Some(id.clone())))
+        .on_press(move || showing.set(Some(id.clone())));
+    crate::ui::menu::with_menu(row, acts)
 }
 
 fn groups(st: AppState) -> Memo<Vec<CustomerGroup>> {
