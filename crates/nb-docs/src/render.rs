@@ -163,9 +163,16 @@ impl R<'_> {
                 start.push(Block::Gap(4.0));
             }
             start.extend(shop);
+            // A long title (a report's) a little smaller, to stay on a line.
+            let title = self.d.var("doc.title").unwrap_or_default().to_uppercase();
+            let grow = if title.chars().count() > 14 {
+                6.0
+            } else {
+                12.0
+            };
             let mut end = vec![self.accent_text(vec![Block::text(
-                self.d.var("doc.title").unwrap_or_default().to_uppercase(),
-                self.base + 12.0,
+                title,
+                self.base + grow,
                 true,
                 Place::End,
             )])];
@@ -477,7 +484,7 @@ impl R<'_> {
                     self.text(&c.title)
                 };
                 let place = match c.field {
-                    ItemField::Index => Place::Center,
+                    ItemField::Index | ItemField::State => Place::Center,
                     f if f.is_figure() => Place::End,
                     _ => Place::Start,
                 };
@@ -499,65 +506,41 @@ impl R<'_> {
     }
 
     fn totals(&self, lines: &[TotalLine], out: &mut Vec<Block>) {
-        let mut pairs = Vec::new();
-        let mut grand = None;
+        // In the template's order; on a sheet the grand total is a band
+        // in the accent colour, in a column at the end.
+        let mut col = Vec::new();
         for want in lines {
             for (kind, label, value, strong) in &self.d.totals {
                 if kind != want {
                     continue;
                 }
-                if *kind == TotalLine::Total {
-                    grand = Some((label.clone(), value.clone()));
-                    if !self.sheet {
-                        pairs.push(Block::pair(
-                            label.clone(),
-                            value.clone(),
-                            self.base + 3.0,
-                            true,
-                        ));
+                let grand = *kind == TotalLine::Total && *strong;
+                col.push(match (grand, self.sheet) {
+                    (true, true) => Block::Panel {
+                        blocks: vec![Block::Paint {
+                            color: [255, 255, 255],
+                            blocks: vec![Block::pair(
+                                label.clone(),
+                                value.clone(),
+                                self.base + 2.0,
+                                true,
+                            )],
+                        }],
+                        fill: Some(self.accent),
+                        border: None,
+                        pad: 6.0,
+                    },
+                    (true, false) => {
+                        Block::pair(label.clone(), value.clone(), self.base + 3.0, true)
                     }
-                } else {
-                    pairs.push(Block::pair(
-                        label.clone(),
-                        value.clone(),
-                        self.base,
-                        *strong,
-                    ));
-                }
+                    _ => Block::pair(label.clone(), value.clone(), self.base, *strong),
+                });
             }
         }
         if !self.sheet {
-            out.extend(pairs);
+            out.extend(col);
             return;
         }
-        // On a sheet: a column of figures at the end, the total in a band.
-        let mut col = Vec::new();
-        let total_at = lines.iter().position(|l| *l == TotalLine::Total);
-        let before = pairs.len().min(
-            total_at
-                .map(|i| {
-                    lines[..i]
-                        .iter()
-                        .map(|l| self.d.totals.iter().filter(|t| t.0 == *l).count())
-                        .sum()
-                })
-                .unwrap_or(pairs.len()),
-        );
-        let mut rest = pairs;
-        let after = rest.split_off(before);
-        col.extend(rest);
-        if let Some((l, v)) = grand {
-            col.push(Block::Panel {
-                blocks: vec![Block::Paint {
-                    color: [255, 255, 255],
-                    blocks: vec![Block::pair(l, v, self.base + 2.0, true)],
-                }],
-                fill: Some(self.accent),
-                border: None,
-                pad: 6.0,
-            });
-        }
-        col.extend(after);
         out.push(Block::Gap(4.0));
         out.push(Block::Columns {
             cols: vec![(0.52, vec![]), (0.48, col)],

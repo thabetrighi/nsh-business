@@ -1063,3 +1063,37 @@ test("bon par bon: the old debt is paid with a sale, and a receipt is corrected 
   await app.press("id:pos-sales");
   await seen(/^Corrigée → FV-01-/);
 });
+
+test("an invoice template is copied, edited live and used for printing", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-settings");
+  await app.press("id:settings-printing");
+  await app.waitFor("id:tpl-row-0");
+  await app.waitFor("text:Classique");
+  await app.waitFor("id:tpl-preview");
+  // Invoices: the modern layout is in use; copy it.
+  await app.press("text:Facture");
+  await app.waitFor("text:Moderne");
+  await app.press("id:tpl-copy-0");
+  await app.waitFor("id:tpl-name");
+  await app.waitFor("id:tpl-preview");
+  await app.press("id:tpl-accent-2");
+  await app.press("text:Lignes alternées");
+  // A text with a variable, at the end.
+  await app.press("id:tpl-add");
+  await app.waitFor("id:tpl-section-editor");
+  await app.paste("id:tpl-text", { text: "RIB 0020 " });
+  await app.press("id:tpl-var-shop.name");
+  await app.waitFor("text:RIB 0020 {shop.name}");
+  await app.press("id:tpl-bold");
+  await app.press("id:tpl-save");
+  await app.waitFor("text:Modèles enregistrés");
+  // The shop's template is the one invoices print with now.
+  await app.waitFor("text:Moderne (copie)");
+  await app.waitFor("id:tpl-delete-2");
+  await app.waitUntil(() => app.texts().filter((t) => t === "Utilisé").length === 1);
+  // Removed: back to the built-in layout.
+  await app.press("id:tpl-delete-2");
+  await app.waitUntil(() => !app.texts().includes("Moderne (copie)"));
+});

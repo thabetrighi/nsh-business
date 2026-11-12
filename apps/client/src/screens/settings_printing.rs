@@ -196,6 +196,7 @@ pub fn printing_settings(st: AppState, compact: bool) -> View {
         .child(printers_card)
         .child(after_sale)
         .child(documents_card(st, compact))
+        .child(crate::screens::templates::templates_card(st, compact))
         .child(modal(editing_open, compact, move || {
             let Some(i) = editing.get_untracked() else {
                 return view().into_element();

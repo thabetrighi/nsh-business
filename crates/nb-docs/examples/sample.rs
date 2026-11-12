@@ -170,5 +170,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::write(dir.join(format!("{name}.bin")), escpos(&doc, false)?.bytes)?;
         }
     }
+    // Every built-in template on its sample, in Arabic and French.
+    use nb_domain::template::{DocKind, builtin};
+    for kind in DocKind::ALL {
+        for (code, t) in builtin(kind) {
+            for lang in [Lang::Ar, Lang::Fr] {
+                let paper = match kind {
+                    DocKind::Label => Paper::Label { w_mm: 40, h_mm: 30 },
+                    DocKind::Receipt | DocKind::Voucher => Paper::ROLL80,
+                    _ => Paper::A4,
+                };
+                let o = Options::default();
+                let d = nb_docs::templates::sample_data(kind, lang, Currency::DZD, &shop(), &o);
+                let doc = nb_docs::render::render(&t, &d, lang, paper);
+                let name = format!("tpl-{}-{code}-{}", kind.code(), lang.code());
+                std::fs::write(dir.join(format!("{name}.png")), preview(&doc)?.0)?;
+            }
+        }
+    }
     Ok(())
 }

@@ -139,12 +139,18 @@ type Export = (String, String, String, Vec<Vec<String>>);
 fn export_pdf(st: AppState, (name, title, subtitle, rows): Export) {
     let lang = st.lang();
     let task = spawn(async move {
-        let shop = st
+        let (shop, docs, t) = st
             .db()
-            .call(|s| nb_store::usecases::printing::print_shop(s))
+            .call(|s| {
+                Ok((
+                    nb_store::usecases::printing::print_shop(s)?,
+                    nb_store::usecases::printing::document_settings(s)?,
+                    crate::screens::printing::layout(s, nb_domain::template::DocKind::Report),
+                ))
+            })
             .await
-            .map(|s| s.name)
-            .unwrap_or_default();
+            .map_err(|_| ())
+            .map_or((None, None, None), |(a, b, c)| (Some(a), Some(b), Some(c)));
         let dialog = nsh_core::file_dialog::SaveDialog::new()
             .file_name(format!("{name}.pdf"))
             .title(st.tn("reports.export_pdf"));
@@ -153,14 +159,28 @@ fn export_pdf(st: AppState, (name, title, subtitle, rows): Export) {
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
-            let doc = nb_docs::templates::report_table(
-                &shop,
-                &title,
-                &subtitle,
-                &rows,
-                lang,
-                nb_docs::Paper::A4,
-            );
+            let doc = match (shop, docs, t) {
+                (Some(shop), Some(docs), Some(t)) => {
+                    use crate::screens::printing::{draw, options, shop_of};
+                    let o = options(&docs);
+                    let d = nb_docs::templates::report_data(
+                        &shop_of(&shop, ""),
+                        &title,
+                        &subtitle,
+                        &rows,
+                        &o,
+                    );
+                    draw(&t, &o, &d, lang, nb_docs::Paper::A4)
+                }
+                _ => nb_docs::templates::report_table(
+                    "",
+                    &title,
+                    &subtitle,
+                    &rows,
+                    lang,
+                    nb_docs::Paper::A4,
+                ),
+            };
             let r = nb_docs::pdf(&doc)
                 .map_err(|e| e.0)
                 .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()));

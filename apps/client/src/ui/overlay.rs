@@ -24,6 +24,25 @@ pub fn modal(
     compact: bool,
     content: impl Fn() -> AnyElement + 'static,
 ) -> impl IntoElement {
+    modal_sized(open, compact, false, content)
+}
+
+/// A [`modal`] for work that needs room (an editor with its preview):
+/// most of the window on a desktop, the full sheet on a phone.
+pub fn wide_modal(
+    open: Signal<bool>,
+    compact: bool,
+    content: impl Fn() -> AnyElement + 'static,
+) -> impl IntoElement {
+    modal_sized(open, compact, true, content)
+}
+
+fn modal_sized(
+    open: Signal<bool>,
+    compact: bool,
+    wide: bool,
+    content: impl Fn() -> AnyElement + 'static,
+) -> impl IntoElement {
     let close = move || open.set(false);
     when(open, move || {
         // The dimmed layer is the container itself (so it always paints); a
@@ -44,7 +63,7 @@ pub fn modal(
                     .bottom_0()
                     .left_0()
                     .right_0()
-                    .max_h(relative(0.92))
+                    .max_h(relative(if wide { 0.97 } else { 0.92 }))
                     .rounded_t(px(radius::xl().max(14.0)))
                     .bg(Tone::Surface.color())
                     .pb_safe_area_plus(px(8.0))
@@ -61,10 +80,13 @@ pub fn modal(
                     .child(content()),
             )
         } else {
+            let panel = if wide {
+                view().w(relative(0.94)).max_w(px(1240.0)).h(relative(0.92))
+            } else {
+                view().w(px(DIALOG_W)).max_h(relative(0.9))
+            };
             layer.items_center().justify_center().child(
-                view()
-                    .w(px(DIALOG_W))
-                    .max_h(relative(0.9))
+                panel
                     .rounded(px(radius::xl()))
                     .bg(Tone::Surface.color())
                     .border_1()

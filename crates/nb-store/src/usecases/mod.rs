@@ -25,4 +25,5 @@ pub mod returns;
 pub mod sales;
 pub mod setup;
 pub mod stock;
+pub mod templates;
 pub mod tracked;

@@ -89,7 +89,9 @@ mod tests {
                 let t = tr(lang, key);
                 for p in t.split('{').skip(1).filter_map(|p| p.split_once('}')) {
                     assert!(
-                        p.0.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                        // `{shop.name}`: a template variable shown as an example.
+                        p.0.chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_' || c == '.'),
                         "{key} in {lang:?}: {{{}}}",
                         p.0
                     );

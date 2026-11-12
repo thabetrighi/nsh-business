@@ -5,8 +5,9 @@
 //! interface's thread. Devices with files and sockets only (not the
 //! browser).
 
-use nb_docs::templates::{Line, Options, Sale, ShelfLabel, Shop, invoice, receipt, shelf_label};
+use nb_docs::templates::{Line, Options, Sale, ShelfLabel, Shop, apply, label_data, sale_data};
 use nb_docs::{Doc, OPEN_DRAWER, Paper, escpos_with, pdf, preview};
+use nb_domain::template::{DocKind, Template, builtin};
 use nb_i18n::{Lang, tr_args};
 use nb_store::usecases::printing::{
     DocSettings, PrintSale, PrintShop, document_settings, print_sale, print_shop,
@@ -32,6 +33,9 @@ pub struct Printable {
     shop: PrintShop,
     docs: DocSettings,
     currency: nb_core::Currency,
+    /// The layouts the shop chose for receipts and invoices.
+    receipt_t: Template,
+    invoice_t: Template,
 }
 
 /// Which document of a sale.
@@ -87,7 +91,7 @@ fn lang_of(shop: &PrintShop) -> Lang {
     Lang::from_tag(&shop.language).unwrap_or(Lang::Ar)
 }
 
-fn shop_of(p: &PrintShop, footer: &str) -> Shop {
+pub fn shop_of(p: &PrintShop, footer: &str) -> Shop {
     let pr = &p.profile;
     Shop {
         name: p.name.clone(),
@@ -140,10 +144,29 @@ pub fn document(p: &Printable, kind: Kind, paper: Paper) -> Doc {
     let shop = shop_of(&p.shop, &p.docs.footer);
     let o = options(&p.docs);
     let lang = lang_of(&p.shop);
-    match kind {
-        Kind::Receipt => receipt(&shop, &sale, lang, paper, &o),
-        Kind::Invoice => invoice(&shop, &sale, lang, paper, &o),
-    }
+    let (dk, t) = match kind {
+        Kind::Receipt => (DocKind::Receipt, &p.receipt_t),
+        Kind::Invoice => (DocKind::Invoice, &p.invoice_t),
+    };
+    draw(t, &o, &sale_data(&shop, &sale, lang, &o, dk), lang, paper)
+}
+
+/// A document with the shop's layout, its switches applied.
+pub fn draw(
+    t: &Template,
+    o: &Options,
+    d: &nb_docs::render::DocData,
+    lang: Lang,
+    paper: Paper,
+) -> Doc {
+    nb_docs::render::render(&apply(t, o), d, lang, paper)
+}
+
+/// The layout a kind of document prints with (the built-in one if the
+/// shop's cannot be read).
+pub fn layout(s: &nb_store::Store, kind: DocKind) -> Template {
+    nb_store::usecases::templates::template_for(s, kind)
+        .unwrap_or_else(|_| nb_domain::template::usable(kind, None))
 }
 
 /// The paper a document goes on with `printer` (or as a PDF alone).
@@ -159,7 +182,9 @@ pub fn paper_for(kind: Kind, printer: Option<&Printer>, sheet: Paper) -> Paper {
 
 /// Runs `f` on a thread of its own and waits for it without blocking the
 /// interface.
-async fn off_thread<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> Option<R> {
+pub(crate) async fn off_thread<R: Send + 'static>(
+    f: impl FnOnce() -> R + Send + 'static,
+) -> Option<R> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         // The receiver is gone only if the screen closed: nothing to tell.
@@ -236,14 +261,17 @@ async fn load(st: AppState, number: String) -> Result<Printable, String> {
                 print_sale(s, &number)?,
                 print_shop(s)?,
                 document_settings(s)?,
+                (layout(s, DocKind::Receipt), layout(s, DocKind::Invoice)),
             ))
         })
         .await
-        .map(|(sale, shop, docs)| Printable {
+        .map(|(sale, shop, docs, (receipt_t, invoice_t))| Printable {
             sale,
             shop,
             docs,
             currency,
+            receipt_t,
+            invoice_t,
         })
         .map_err(|e| error_text(st, e.codes.first().map_or("internal", |c| c.1)))
 }
@@ -357,7 +385,7 @@ fn save_pdf(
 }
 
 /// The preview of `picture` (PNG bytes and size), at a readable size.
-fn picture_view(
+pub(crate) fn picture_view(
     st: AppState,
     picture: Option<(Vec<u8>, u32, u32)>,
     error: Option<String>,
@@ -608,9 +636,12 @@ pub fn print_dialog(st: AppState, number: String, close: impl Fn() + Clone + 'st
 /// Draws a document on a paper (made off the interface's thread).
 pub type Maker = std::sync::Arc<dyn Fn(Paper) -> Doc + Send + Sync>;
 
-async fn shop_and_docs(st: AppState) -> Result<(PrintShop, DocSettings), String> {
+async fn shop_and_docs(
+    st: AppState,
+    kind: DocKind,
+) -> Result<(PrintShop, DocSettings, Template), String> {
     st.db()
-        .call(|s| Ok((print_shop(s)?, document_settings(s)?)))
+        .call(move |s| Ok((print_shop(s)?, document_settings(s)?, layout(s, kind))))
         .await
         .map_err(|e| error_text(st, e.codes.first().map_or("internal", |c| c.1)))
 }
@@ -627,8 +658,8 @@ fn local_date(iso: &str) -> (i32, u32, u32) {
 
 /// A customer receipt's voucher.
 pub async fn voucher_maker(st: AppState, number: String) -> Result<Maker, String> {
-    use nb_docs::templates::{Voucher, voucher};
-    let (shop, docs) = shop_and_docs(st).await?;
+    use nb_docs::templates::{Voucher, voucher_data};
+    let (shop, docs, t) = shop_and_docs(st, DocKind::Voucher).await?;
     let v = st
         .db()
         .call(move |s| nb_store::usecases::printing::print_voucher(s, &number))
@@ -650,7 +681,7 @@ pub async fn voucher_maker(st: AppState, number: String) -> Result<Maker, String
     };
     let (sh, o, lang) = (shop_of(&shop, &docs.footer), options(&docs), lang_of(&shop));
     Ok(std::sync::Arc::new(move |paper| {
-        voucher(&sh, &v, lang, paper, &o)
+        draw(&t, &o, &voucher_data(&sh, &v, lang, &o), lang, paper)
     }))
 }
 
@@ -659,8 +690,8 @@ pub async fn schedule_maker(
     st: AppState,
     plan: nb_store::usecases::installments::Plan,
 ) -> Result<Maker, String> {
-    use nb_docs::templates::{Due, Schedule, schedule};
-    let (shop, docs) = shop_and_docs(st).await?;
+    use nb_docs::templates::{Due, Schedule, schedule_data};
+    let (shop, docs, t) = shop_and_docs(st, DocKind::Schedule).await?;
     let cid = plan.customer_id.clone();
     let ids = st
         .db()
@@ -699,7 +730,7 @@ pub async fn schedule_maker(
     };
     let (sh, o, lang) = (shop_of(&shop, &docs.footer), options(&docs), lang_of(&shop));
     Ok(std::sync::Arc::new(move |paper| {
-        schedule(&sh, &s, lang, paper, &o)
+        draw(&t, &o, &schedule_data(&sh, &s, lang, &o), lang, paper)
     }))
 }
 
@@ -895,21 +926,30 @@ pub fn label_dialog(st: AppState, item: LabelItem, close: impl Fn() + Clone + 's
             _ => Paper::Label { w_mm: 40, h_mm: 30 },
         },
     };
-    let label_doc = move |l: &ShelfLabel, paper: Paper, shop: &str| {
-        shelf_label(l, lang, paper, (!shop.is_empty()).then_some(shop))
+    let label_doc = move |t: &Template, l: &ShelfLabel, paper: Paper, shop: &str| {
+        let d = label_data(l, lang, (!shop.is_empty()).then_some(shop));
+        draw(t, &Options::default(), &d, lang, paper)
     };
+    // The shop's label layout, once read (the built-in one until then).
+    let tpl = signal(builtin(DocKind::Label).remove(0).1);
+    let task = spawn(async move {
+        if let Ok(t) = st.db().call(|s| Ok(layout(s, DocKind::Label))).await {
+            tpl.set(t);
+        }
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
     let l = shelf(st, &item);
     let picture = resource(
         {
             let l = l.clone();
-            move || Some((l.clone(), paper()))
+            move || Some((l.clone(), paper(), tpl.get()))
         },
         {
             let shop = shop.clone();
-            move |(l, paper), _| {
+            move |(l, paper, t), _| {
                 let shop = shop.clone();
                 async move {
-                    off_thread(move || preview(&label_doc(&l, paper, &shop)).map_err(|e| e.0))
+                    off_thread(move || preview(&label_doc(&t, &l, paper, &shop)).map_err(|e| e.0))
                         .await
                         .unwrap_or_else(|| Err(String::new()))
                 }
@@ -964,8 +1004,13 @@ pub fn label_dialog(st: AppState, item: LabelItem, close: impl Fn() + Clone + 's
         let (l, shop) = (l.clone(), shop.clone());
         let name = format!("{}.pdf", item.name.replace(['/', '\\'], "-"));
         move || {
-            let (l, paper, shop) = (l.clone(), paper(), shop.clone());
-            save_pdf(st, name.clone(), move || label_doc(&l, paper, &shop), busy);
+            let (l, paper, shop, t) = (l.clone(), paper(), shop.clone(), tpl.get_untracked());
+            save_pdf(
+                st,
+                name.clone(),
+                move || label_doc(&t, &l, paper, &shop),
+                busy,
+            );
         }
     };
     let print_now = {
@@ -978,17 +1023,19 @@ pub fn label_dialog(st: AppState, item: LabelItem, close: impl Fn() + Clone + 's
                 return;
             }
             busy.set(true);
-            let (l, paper, n, shop) = (
+            let (l, paper, n, shop, t) = (
                 l.clone(),
                 paper(),
                 copies_of(&count.get_untracked()),
                 shop.clone(),
+                tpl.get_untracked(),
             );
             let close = close.clone();
             let task = spawn(async move {
-                let r = off_thread(move || print_on(&pr, &label_doc(&l, paper, &shop), n, false))
-                    .await
-                    .unwrap_or_else(|| Err(String::new()));
+                let r =
+                    off_thread(move || print_on(&pr, &label_doc(&t, &l, paper, &shop), n, false))
+                        .await
+                        .unwrap_or_else(|| Err(String::new()));
                 busy.set(false);
                 if r.is_ok() {
                     show_toast(st, st.tn("print.sent"));
@@ -1082,6 +1129,8 @@ mod tests {
             },
             docs: DocSettings::default(),
             currency: nb_core::Currency::DZD,
+            receipt_t: builtin(DocKind::Receipt).remove(0).1,
+            invoice_t: builtin(DocKind::Invoice).remove(0).1,
         }
     }
 
@@ -1162,7 +1211,7 @@ mod tests {
             roles: vec![Role::Label],
             ..Printer::default()
         };
-        let doc = shelf_label(
+        let doc = nb_docs::templates::shelf_label(
             &ShelfLabel {
                 name: "Olive noir".into(),
                 price_minor: 65_000,

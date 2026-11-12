@@ -355,6 +355,89 @@ fn yes() -> bool {
 }
 
 impl Section {
+    /// Every kind of section, in the order the editor offers them.
+    pub const CODES: [&'static str; 12] = [
+        "header",
+        "title",
+        "fields",
+        "parties",
+        "items",
+        "totals",
+        "balance",
+        "text",
+        "barcode",
+        "signatures",
+        "divider",
+        "spacer",
+    ];
+
+    /// A new section of `code` as the editor adds it to a `kind` document.
+    pub fn fresh(code: &str, kind: DocKind) -> Option<Section> {
+        use ItemField as F;
+        Some(match code {
+            "header" => Section::Header { legal_ids: true },
+            "title" => Section::Title {
+                text: match kind {
+                    DocKind::Label => "{item.name}".into(),
+                    DocKind::Report => "{report.title}".into(),
+                    _ => "{doc.title}".into(),
+                },
+                align: Align::Center,
+            },
+            "fields" => Section::Fields {
+                fields: vec![match kind {
+                    DocKind::Label => Field::new("", "{item.sku}"),
+                    DocKind::Report => Field::new("", "{report.period}"),
+                    _ => Field::new("@print.label.date", "{doc.date}"),
+                }],
+            },
+            "parties" => Section::Parties { details: true },
+            "items" => Section::Items {
+                columns: match kind {
+                    DocKind::Receipt | DocKind::Invoice => vec![
+                        ItemColumn::new(F::Name, 46),
+                        ItemColumn::new(F::Qty, 14),
+                        ItemColumn::new(F::Price, 18),
+                        ItemColumn::new(F::Amount, 22),
+                    ],
+                    DocKind::Voucher => {
+                        vec![ItemColumn::new(F::Name, 65), ItemColumn::new(F::Amount, 35)]
+                    }
+                    DocKind::Schedule => vec![
+                        ItemColumn::new(F::Due, 40),
+                        ItemColumn::new(F::Amount, 30),
+                        ItemColumn::new(F::State, 30),
+                    ],
+                    DocKind::Label | DocKind::Report => vec![],
+                },
+            },
+            "totals" => Section::Totals {
+                lines: vec![TotalLine::Total],
+            },
+            "balance" => Section::Balance,
+            "text" => Section::Text {
+                text: String::new(),
+                align: Align::Center,
+                size: 0,
+                bold: false,
+            },
+            "barcode" => Section::Barcode {
+                value: match kind {
+                    DocKind::Label => "{item.barcode}".into(),
+                    DocKind::Report => "{report.title}".into(),
+                    _ => "{doc.number}".into(),
+                },
+            },
+            "signatures" => Section::Signatures {
+                start: String::new(),
+                end: String::new(),
+            },
+            "divider" => Section::Divider { dashed: true },
+            "spacer" => Section::Spacer { height: 8 },
+            _ => return None,
+        })
+    }
+
     pub fn code(&self) -> &'static str {
         match self {
             Section::Header { .. } => "header",
@@ -888,13 +971,9 @@ pub fn builtin(kind: DocKind) -> Vec<(&'static str, Template)> {
                     logo_width: 70,
                 },
                 vec![
+                    // The title and the period at the header's end.
                     Section::Header { legal_ids: false },
-                    Section::Title {
-                        text: "{report.title}".into(),
-                        align: Align::Start,
-                    },
-                    text("{report.period}", Align::Start, -1, false),
-                    Section::Spacer { height: 6 },
+                    Section::Spacer { height: 12 },
                     Section::Items { columns: vec![] },
                 ],
             ),
@@ -913,6 +992,24 @@ pub fn usable(kind: DocKind, kept: Option<&str>) -> Template {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_fresh_section_passes_the_check() {
+        for kind in DocKind::ALL {
+            for code in Section::CODES {
+                let mut t = builtin(kind).remove(0).1;
+                t.sections.retain(|s| !matches!(s, Section::Items { .. }));
+                let s = Section::fresh(code, kind);
+                assert_eq!(s.as_ref().map(Section::code), Some(code));
+                t.sections.extend(s);
+                if kind == DocKind::Label && code == "items" {
+                    continue; // labels have no rows
+                }
+                assert_eq!(t.check(), Ok(()), "{kind:?} {code}");
+            }
+        }
+        assert!(Section::fresh("nope", DocKind::Receipt).is_none());
+    }
 
     #[test]
     fn every_builtin_is_valid_and_round_trips() {

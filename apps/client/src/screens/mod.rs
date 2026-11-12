@@ -28,4 +28,6 @@ pub mod settings_catalog;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod settings_printing;
 pub mod setup;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod templates;
 pub mod users;

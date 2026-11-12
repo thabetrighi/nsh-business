@@ -735,6 +735,7 @@ pub fn report_data(
         ("report.period", period.to_owned()),
         ("report.rows", rows.len().saturating_sub(1).to_string()),
         ("doc.title", title.to_owned()),
+        ("doc.date", period.to_owned()),
     ] {
         d.vars.insert(k.into(), v);
     }
@@ -764,4 +765,156 @@ pub fn report_table(
         lang,
         paper,
     )
+}
+
+/// A document of `kind` made up to show a template on (never a real one):
+/// the shop's identity and switches, sample lines in `lang`.
+pub fn sample_data(
+    kind: DocKind,
+    lang: Lang,
+    currency: Currency,
+    shop: &Shop,
+    o: &Options,
+) -> DocData {
+    let t = |k: &str| nb_i18n::tr(lang, k).into_owned();
+    let when = (2026, 11, 8, 19, 57);
+    let customer = (
+        t("print.sample.customer"),
+        "NIF: 000016009876543".to_owned(),
+    );
+    match kind {
+        DocKind::Receipt | DocKind::Invoice => {
+            let line = |name: String, sku: &str, qty: i64, price: i64, discount: i64| {
+                let amount = crate::templates::round_milli(qty, price) - discount;
+                // 19 % included in the price.
+                let net = (amount * 10_000 + 5_950) / 11_900;
+                Line {
+                    name,
+                    qty_milli: qty,
+                    unit: if qty % 1000 == 0 {
+                        "u".into()
+                    } else {
+                        "kg".into()
+                    },
+                    unit_price_minor: price,
+                    amount_minor: amount,
+                    discount_minor: discount,
+                    sku: sku.into(),
+                    tax_bps: 1_900,
+                    net_minor: net,
+                }
+            };
+            let lines = vec![
+                line(t("print.sample.item1"), "6130010", 1_000, 39_000, 0),
+                line(t("print.sample.item2"), "6130027", 310, 65_000, 0),
+                line(t("print.sample.item3"), "6130034", 2_000, 21_000, 2_000),
+            ];
+            let total: i64 = lines.iter().map(|l| l.amount_minor).sum();
+            let net: i64 = lines.iter().map(|l| l.net_minor).sum();
+            let sale = Sale {
+                number: "FV-01-26-A000123".into(),
+                when,
+                cashier: t("print.sample.cashier"),
+                register: t("print.sample.register"),
+                customer: Some(customer),
+                currency,
+                lines,
+                discount_minor: 0,
+                net_minor: net,
+                taxes: vec![(1_900, net, total - net)],
+                stamp_minor: 0,
+                total_minor: total,
+                payments: vec![("cash".into(), 120_000)],
+                change_minor: 120_000 - total,
+                owed_minor: 0,
+                balance: Some((50_000, 50_000)),
+                settled_minor: 0,
+            };
+            sale_data(shop, &sale, lang, o, kind)
+        }
+        DocKind::Voucher => voucher_data(
+            shop,
+            &Voucher {
+                number: "RC-01-26-A000007".into(),
+                when,
+                cashier: t("print.sample.cashier"),
+                customer,
+                currency,
+                method: "cash".into(),
+                amount_minor: 1_250_000,
+                reference: String::new(),
+                note: String::new(),
+                invoices: vec![("FV-01-26-A000123".into(), 1_000_000)],
+                installments: vec![("TQ-01-26-000002".into(), 3, 250_000)],
+                unallocated_minor: 0,
+            },
+            lang,
+            o,
+        ),
+        DocKind::Schedule => schedule_data(
+            shop,
+            &Schedule {
+                number: "TQ-01-26-000002".into(),
+                version: 1,
+                when,
+                customer,
+                currency,
+                sale_number: "FV-01-26-A000123".into(),
+                total_minor: 3_570_000,
+                down_minor: 570_000,
+                financed_minor: 3_000_000,
+                dues: (1..=6)
+                    .map(|i| Due {
+                        seq: i,
+                        date: (2027, i, 12),
+                        amount_minor: 500_000,
+                        paid_minor: if i < 3 { 500_000 } else { 0 },
+                        state: if i < 3 {
+                            "paid".into()
+                        } else {
+                            "upcoming".into()
+                        },
+                    })
+                    .collect(),
+            },
+            lang,
+            o,
+        ),
+        DocKind::Label => label_data(
+            &ShelfLabel {
+                name: t("print.sample.item2"),
+                price_minor: 65_000,
+                unit: "kg".into(),
+                currency,
+                barcode: Some("2000122003109".into()),
+                sku: "6130027".into(),
+            },
+            lang,
+            Some(&shop.name),
+        ),
+        DocKind::Report => {
+            let c = Ctx::new(lang, currency);
+            let rows = vec![
+                vec![
+                    t("print.col.item"),
+                    t("print.col.qty"),
+                    t("print.col.amount"),
+                ],
+                vec![t("print.sample.item1"), c.n(12), c.a(468_000)],
+                vec![t("print.sample.item2"), c.q(3_410), c.a(221_650)],
+                vec![t("print.sample.item3"), c.n(20), c.a(420_000)],
+            ];
+            report_data(
+                shop,
+                &t("print.sample.report"),
+                "01/11/2026 – 08/11/2026",
+                &rows,
+                o,
+            )
+        }
+    }
+}
+
+fn round_milli(qty_milli: i64, price: i64) -> i64 {
+    (qty_milli * price + 500) / 1000
 }

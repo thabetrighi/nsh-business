@@ -101,6 +101,10 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0027_fifo_layers",
         include_str!("../migrations/0027_fifo_layers.sql"),
     ),
+    (
+        "0028_document_templates",
+        include_str!("../migrations/0028_document_templates.sql"),
+    ),
 ];
 
 pub fn latest() -> u32 {
