@@ -719,6 +719,7 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
                             text: q,
                             sort: ProductSort::Name,
                             limit: 60,
+                            with_counts: false,
                             ..Default::default()
                         },
                     )

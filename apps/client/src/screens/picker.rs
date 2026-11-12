@@ -33,6 +33,7 @@ pub fn product_picker(
                         &ProductQuery {
                             text: t,
                             limit: 8,
+                            with_counts: false,
                             ..Default::default()
                         },
                     )?

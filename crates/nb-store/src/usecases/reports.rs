@@ -126,11 +126,7 @@ impl SalesReport {
     }
 }
 
-fn groups(
-    conn: &Connection,
-    sql: &str,
-    p: &(String, String, i32, String),
-) -> Result<Vec<GroupRow>> {
+fn groups(conn: &Connection, sql: &str, p: &(i64, i64, i32, String)) -> Result<Vec<GroupRow>> {
     let mut s = conn.prepare(sql)?;
     let rows = s
         .query_map(params![p.0, p.1, p.2, p.3], |r| {
@@ -149,12 +145,35 @@ fn groups(
 
 /// Sales over a span of business days.
 pub fn sales_report(store: &Store, span: &Span) -> Result<SalesReport> {
-    span.dates()?;
+    report_of(store, span, Parts::All)
+}
+
+/// What a report computes (the dashboard needs less than the reports page).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Parts {
+    All,
+    /// Totals and days.
+    Days,
+    /// Totals, payment methods and categories.
+    Mix,
+}
+
+fn report_of(store: &Store, span: &Span, parts: Parts) -> Result<SalesReport> {
+    let (a, b) = span.dates()?;
+    // The span as instants, so that the time indexes serve.
+    let epoch = Date {
+        y: 1970,
+        m: 1,
+        d: 1,
+    };
+    let off_ms = i64::from(store.utc_offset_min) * 60_000;
+    let from_ms = days_between(epoch, a) * 86_400_000 - off_ms;
+    let to_ms = (days_between(epoch, b) + 1) * 86_400_000 - off_ms;
     store.read(|r| {
         let conn = r.conn();
         let (org, _) = the_org(conn)?;
-        let p = (span.from.clone(), span.to.clone(), r.utc_offset_min, org.to_string());
-        let in_span = |col: &str| format!("{} BETWEEN ?1 AND ?2", day(col));
+        let p = (from_ms, to_ms, r.utc_offset_min, org.to_string());
+        let in_span = |col: &str| format!("{col} >= ?1 AND {col} < ?2");
         let sales_in = format!("s.org_id = ?4 AND {}", in_span("s.created_at"));
         let mut out = SalesReport {
             span: span.clone(),
@@ -189,6 +208,9 @@ pub fn sales_report(store: &Store, span: &Span) -> Result<SalesReport> {
         )?;
         out.cost_minor -= back_cost;
 
+        if parts == Parts::Mix {
+            return mix(conn, out, &p, &sales_in);
+        }
         // By day: sales and returns side by side.
         let mut days: std::collections::BTreeMap<String, DayRow> = Default::default();
         let mut s = conn.prepare(&format!(
@@ -235,9 +257,12 @@ pub fn sales_report(store: &Store, span: &Span) -> Result<SalesReport> {
         }
         out.by_day = days.into_values().collect();
 
+        if parts == Parts::Days {
+            return Ok(out);
+        }
         // By product, category and cashier, from the lines sold (what came
         // back is in the totals, not here).
-        let line_cost = "(l.unit_cost_minor * l.base_qty_milli + 500) / 1000";
+        let line_cost = line_cost();
         out.by_product = groups(
             conn,
             &format!(
@@ -245,17 +270,6 @@ pub fn sales_report(store: &Store, span: &Span) -> Result<SalesReport> {
                         SUM(l.net_minor), SUM({line_cost})
                  FROM sale_lines l JOIN sales s ON s.id = l.sale_id WHERE {sales_in}
                  GROUP BY 1 ORDER BY 5 DESC, 2"
-            ),
-            &p,
-        )?;
-        out.by_category = groups(
-            conn,
-            &format!(
-                "SELECT c.id, c.name, SUM(l.base_qty_milli), COUNT(DISTINCT s.id), SUM(l.net_minor), SUM({line_cost})
-                 FROM sale_lines l JOIN sales s ON s.id = l.sale_id
-                 LEFT JOIN products pr ON pr.id = l.product_id
-                 LEFT JOIN categories c ON c.id = pr.category_id
-                 WHERE {sales_in} GROUP BY 1 ORDER BY 5 DESC"
             ),
             &p,
         )?;
@@ -268,42 +282,87 @@ pub fn sales_report(store: &Store, span: &Span) -> Result<SalesReport> {
             ),
             &p,
         )?;
-        // Methods: what was taken (cash after change); goods brought back
-        // in an exchange paid part of the cash shown, and are apart.
-        let mut methods = groups(
-            conn,
-            &format!(
-                "SELECT y.method, y.method, 0, COUNT(DISTINCT s.id), SUM(y.amount_minor), 0
-                 FROM payments y JOIN sales s ON s.id = y.sale_id
-                 WHERE {sales_in} GROUP BY 1"
-            ),
-            &p,
-        )?;
-        let (n, exchanged): (u32, i64) = conn.query_row(
-            &format!(
-                "SELECT COUNT(*), COALESCE(SUM(e.used_minor), 0)
-                 FROM sale_exchanges e JOIN sales s ON s.id = e.sale_id WHERE {sales_in}"
-            ),
-            params![p.0, p.1, p.2, p.3],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if exchanged > 0 {
-            if let Some(cash) = methods.iter_mut().find(|m| m.key == "cash") {
-                cash.net_minor -= exchanged;
-            }
-            methods.push(GroupRow {
-                key: "exchange".into(),
-                name: "exchange".into(),
-                count: n,
-                net_minor: exchanged,
-                ..Default::default()
-            });
-        }
-        methods.retain(|m| m.net_minor != 0);
-        methods.sort_by_key(|m| std::cmp::Reverse(m.net_minor));
-        out.by_method = methods;
+        out.by_category = by_category(conn, &p, &sales_in)?;
+        out.by_method = by_method(conn, &p, &sales_in)?;
         Ok(out)
     })
+}
+
+/// The cost of a sold line.
+fn line_cost() -> &'static str {
+    "(l.unit_cost_minor * l.base_qty_milli + 500) / 1000"
+}
+
+/// The payment methods and categories only (the dashboard's mix).
+fn mix(
+    conn: &Connection,
+    mut out: SalesReport,
+    p: &(i64, i64, i32, String),
+    sales_in: &str,
+) -> Result<SalesReport> {
+    out.by_category = by_category(conn, p, sales_in)?;
+    out.by_method = by_method(conn, p, sales_in)?;
+    Ok(out)
+}
+
+fn by_category(
+    conn: &Connection,
+    p: &(i64, i64, i32, String),
+    sales_in: &str,
+) -> Result<Vec<GroupRow>> {
+    let line_cost = line_cost();
+    groups(
+        conn,
+            &format!(
+                "SELECT c.id, c.name, SUM(l.base_qty_milli), COUNT(DISTINCT s.id), SUM(l.net_minor), SUM({line_cost})
+                 FROM sale_lines l JOIN sales s ON s.id = l.sale_id
+                 LEFT JOIN products pr ON pr.id = l.product_id
+                 LEFT JOIN categories c ON c.id = pr.category_id
+                 WHERE {sales_in} GROUP BY 1 ORDER BY 5 DESC"
+            ),
+        p,
+    )
+}
+
+fn by_method(
+    conn: &Connection,
+    p: &(i64, i64, i32, String),
+    sales_in: &str,
+) -> Result<Vec<GroupRow>> {
+    // Methods: what was taken (cash after change); goods brought back
+    // in an exchange paid part of the cash shown, and are apart.
+    let mut methods = groups(
+        conn,
+        &format!(
+            "SELECT y.method, y.method, 0, COUNT(DISTINCT s.id), SUM(y.amount_minor), 0
+                 FROM payments y JOIN sales s ON s.id = y.sale_id
+                 WHERE {sales_in} GROUP BY 1"
+        ),
+        p,
+    )?;
+    let (n, exchanged): (u32, i64) = conn.query_row(
+        &format!(
+            "SELECT COUNT(*), COALESCE(SUM(e.used_minor), 0)
+                 FROM sale_exchanges e JOIN sales s ON s.id = e.sale_id WHERE {sales_in}"
+        ),
+        params![p.0, p.1, p.2, p.3],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if exchanged > 0 {
+        if let Some(cash) = methods.iter_mut().find(|m| m.key == "cash") {
+            cash.net_minor -= exchanged;
+        }
+        methods.push(GroupRow {
+            key: "exchange".into(),
+            name: "exchange".into(),
+            count: n,
+            net_minor: exchanged,
+            ..Default::default()
+        });
+    }
+    methods.retain(|m| m.net_minor != 0);
+    methods.sort_by_key(|m| std::cmp::Reverse(m.net_minor));
+    Ok(methods)
 }
 
 /// A product's stock across warehouses.
@@ -361,14 +420,17 @@ pub fn stock_report(store: &Store, days: u32) -> Result<StockReport> {
                     COALESCE((SELECT u.code FROM product_units u WHERE u.product_id = p.id ORDER BY u.position LIMIT 1), ''),
                     COALESCE(SUM(b.on_hand_milli), 0),
                     COALESCE(SUM((b.on_hand_milli * b.avg_cost_minor + 500) / 1000), 0),
-                    p.min_stock_milli,
-                    (SELECT COALESCE(SUM(l.base_qty_milli), 0) FROM sale_lines l JOIN sales s ON s.id = l.sale_id
-                      WHERE l.product_id = p.id AND s.created_at >= ?2),
-                    (SELECT MAX(s.created_at) FROM sale_lines l JOIN sales s ON s.id = l.sale_id
-                      WHERE l.product_id = p.id)
+                    p.min_stock_milli, COALESCE(x.sold, 0), x.last
              FROM products p
              LEFT JOIN categories c ON c.id = p.category_id
              LEFT JOIN stock_balances b ON b.product_id = p.id
+             -- What sold, read once for all products.
+             LEFT JOIN (SELECT l.product_id,
+                               SUM(CASE WHEN s.created_at >= ?2 THEN l.base_qty_milli ELSE 0 END) AS sold,
+                               MAX(s.created_at) AS last
+                        FROM sale_lines l JOIN sales s ON s.id = l.sale_id
+                        WHERE s.org_id = ?1 AND l.product_id IS NOT NULL
+                        GROUP BY l.product_id) x ON x.product_id = p.id
              WHERE p.org_id = ?1 AND p.deleted_at IS NULL AND p.kind <> 'service'
              GROUP BY p.id ORDER BY 7 DESC, p.name",
         )?;
@@ -466,7 +528,7 @@ pub fn dashboard(store: &Store, period: Period) -> Result<Dashboard> {
         from: before.iso(),
         to: today.iso(),
     };
-    let report = sales_report(store, &span)?;
+    let report = report_of(store, &span, Parts::Days)?;
     let in_period = |date: &str| date >= first.iso().as_str();
     let bucket = |date: &str| -> Option<usize> {
         let dt = Date::parse(date).ok()?;
@@ -506,12 +568,13 @@ pub fn dashboard(store: &Store, period: Period) -> Result<Dashboard> {
             out.orders_previous += i64::from(row.sales);
         }
     }
-    let current = sales_report(
+    let current = report_of(
         store,
         &Span {
             from: first.iso(),
             to: today.iso(),
         },
+        Parts::Mix,
     )?;
     out.methods = current.by_method;
     out.categories = current.by_category.into_iter().take(5).collect();
@@ -525,14 +588,38 @@ pub fn dashboard(store: &Store, period: Period) -> Result<Dashboard> {
         )?)
     })?;
     out.recent = recent_sales(store, 6)?;
-    let mut low: Vec<StockRow> = stock_report(store, 30)?
-        .rows
-        .into_iter()
-        .filter(|r| r.out() || r.low())
-        .collect();
-    low.sort_by_key(|r| (!r.out(), r.on_hand_milli));
-    out.low_stock = low.into_iter().take(5).collect();
+    out.low_stock = running_out(store, 5)?;
     Ok(out)
+}
+
+/// The products that ran out first, then those under their minimum.
+fn running_out(store: &Store, limit: u32) -> Result<Vec<StockRow>> {
+    store.read(|r| {
+        let (org, _) = the_org(r.conn())?;
+        let mut s = r.conn().prepare(
+            "SELECT p.id, p.name, p.sku, COALESCE(b.oh, 0), p.min_stock_milli
+             FROM products p
+             LEFT JOIN (SELECT product_id, SUM(on_hand_milli) AS oh FROM stock_balances GROUP BY product_id) b
+                    ON b.product_id = p.id
+             WHERE p.org_id = ?1 AND p.deleted_at IS NULL AND p.kind <> 'service'
+               AND (COALESCE(b.oh, 0) <= 0 OR (p.min_stock_milli IS NOT NULL AND b.oh <= p.min_stock_milli))
+             ORDER BY COALESCE(b.oh, 0) > 0, COALESCE(b.oh, 0), p.name
+             LIMIT ?2",
+        )?;
+        let rows = s
+            .query_map(params![org.to_string(), limit], |r| {
+                Ok(StockRow {
+                    product_id: r.get(0)?,
+                    name: r.get(1)?,
+                    sku: r.get(2)?,
+                    on_hand_milli: r.get(3)?,
+                    min_stock_milli: r.get(4)?,
+                    ..Default::default()
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    })
 }
 
 /// An account's amount over a span: revenue credit less debit, expenses

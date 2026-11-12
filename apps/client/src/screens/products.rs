@@ -193,6 +193,8 @@ pub fn products(st: AppState, compact: bool) -> View {
                     desc,
                     limit: paging.size.get(),
                     offset: paging.offset(),
+                    // Counted apart (below): a page turn reads one page.
+                    with_counts: false,
                 },
                 st.data_rev.get(),
             ))
@@ -202,11 +204,41 @@ pub fn products(st: AppState, compact: bool) -> View {
             async move { db.call(move |s| list_products(s, &q)).await }
         },
     );
+    // The counts per stock state read every product's stock: only when
+    // the search or the category changes, after the page shows.
+    let counted = resource(
+        move || {
+            st.session.get()?;
+            let category_id = match category.get() {
+                usize::MAX => None,
+                i => cat_list.with(|c: &Vec<Category>| c.get(i).map(|c| c.id.clone())),
+            };
+            Some((query.get(), category_id, st.data_rev.get()))
+        },
+        move |(text, category_id, _), _| {
+            let db = st.db();
+            async move {
+                db.call(move |s| {
+                    Ok(list_products(
+                        s,
+                        &ProductQuery {
+                            text,
+                            category_id,
+                            limit: 0,
+                            ..Default::default()
+                        },
+                    )?
+                    .counts)
+                })
+                .await
+            }
+        },
+    );
     let rows = computed(move || {
         page.with(|p: Option<&ProductPage>| p.map(|p| p.rows.clone()).unwrap_or_default())
     });
     let counts = computed(move || {
-        page.with(|p: Option<&ProductPage>| p.map_or([0i64; 4], |p| p.counts.map(i64::from)))
+        counted.with(|c: Option<&[u32; 4]>| c.map_or([0i64; 4], |c| c.map(i64::from)))
     });
     let total = computed(move || page.with(|p: Option<&ProductPage>| p.map_or(0, |p| p.total)));
     let currency = move || st.session.get().map_or(Currency::DZD, |s| s.currency);

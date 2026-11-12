@@ -81,6 +81,14 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0022_backups",
         include_str!("../migrations/0022_backups.sql"),
     ),
+    (
+        "0023_report_indexes",
+        include_str!("../migrations/0023_report_indexes.sql"),
+    ),
+    (
+        "0024_product_indexes",
+        include_str!("../migrations/0024_product_indexes.sql"),
+    ),
 ];
 
 pub fn latest() -> u32 {

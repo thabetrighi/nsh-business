@@ -147,6 +147,9 @@ pub struct ProductQuery {
     pub desc: bool,
     pub limit: u32,
     pub offset: u32,
+    /// Count the products in each stock state too (for the filters). It
+    /// reads every product's stock: a search or a page turn goes without.
+    pub with_counts: bool,
 }
 
 impl Default for ProductQuery {
@@ -159,6 +162,7 @@ impl Default for ProductQuery {
             desc: false,
             limit: 200,
             offset: 0,
+            with_counts: true,
         }
     }
 }
@@ -218,7 +222,7 @@ pub fn query(conn: &Connection, org: OrganizationId, q: &ProductQuery) -> Result
 
     // Counts per state under the text/category filters.
     let mut counts = [0u32; 4];
-    {
+    if q.with_counts {
         let sql = format!(
             "SELECT {state} AS st, COUNT(*) FROM products p WHERE {base_where} GROUP BY st"
         );
@@ -248,11 +252,14 @@ pub fn query(conn: &Connection, org: OrganizationId, q: &ProductQuery) -> Result
             }
         ));
     }
-    let total: u32 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM products p WHERE {where_all}"),
-        params_from_iter(args.iter()),
-        |r| r.get(0),
-    )?;
+    let total: u32 = match q.state {
+        None if q.with_counts => counts[0],
+        _ => conn.query_row(
+            &format!("SELECT COUNT(*) FROM products p WHERE {where_all}"),
+            params_from_iter(args.iter()),
+            |r| r.get(0),
+        )?,
+    };
     let dir = if q.desc { "DESC" } else { "ASC" };
     let order = match q.sort {
         ProductSort::Name => format!("p.name COLLATE NOCASE {dir}"),
@@ -269,15 +276,28 @@ pub fn query(conn: &Connection, org: OrganizationId, q: &ProductQuery) -> Result
             if q.desc { "ASC" } else { "DESC" }
         ),
     };
+    // Sorted by a column of the product: the page's rows are chosen
+    // first, and only they read their stock.
+    let page = format!("LIMIT {} OFFSET {}", q.limit.min(5_000), q.offset);
+    let by_stock = matches!(q.sort, ProductSort::Stock | ProductSort::Status);
+    let (filter, limit) = if by_stock || q.state.is_some() {
+        (where_all.clone(), page)
+    } else {
+        (
+            format!(
+                "p.rowid IN (SELECT p.rowid FROM products p LEFT JOIN categories c ON c.id = p.category_id
+                             WHERE {where_all} ORDER BY {order} {page})"
+            ),
+            String::new(),
+        )
+    };
     let sql = format!(
         "SELECT p.id, p.sku, p.name, p.kind, p.category_id, c.name, p.tax_bps, p.price_minor, p.min_price_minor,
                 p.min_stock_milli, {STOCK_EXPR} AS on_hand, p.active, p.version, {EXTRA_COLS}, {state} AS st
          FROM products p LEFT JOIN categories c ON c.id = p.category_id LEFT JOIN brands br ON br.id = p.brand_id
-         WHERE {where_all}
+         WHERE {filter}
          ORDER BY {order}
-         LIMIT {} OFFSET {}",
-        q.limit.min(5_000),
-        q.offset
+         {limit}"
     );
     let mut s = conn.prepare(&sql)?;
     let mut rows = s
