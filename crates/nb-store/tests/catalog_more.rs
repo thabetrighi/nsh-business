@@ -631,6 +631,12 @@ fn older_databases_get_lists_and_classes() -> R {
     );
     assert_eq!(
         n("SELECT COUNT(*) FROM scale_formats WHERE org_id = 'o1'")?,
+        2
+    );
+    assert_eq!(
+        n(
+            "SELECT COUNT(*) FROM scale_formats WHERE org_id = 'o1' AND prefix = '20' AND position = 1"
+        )?,
         1
     );
     Ok(())
@@ -751,5 +757,81 @@ fn a_new_product_with_everything() -> R {
     };
     let row = save_product(&mut s, meta(&setup, "product.save"), save)?;
     assert_eq!(product_detail(&s, id(&row.id))?.variants.len(), 3);
+    Ok(())
+}
+
+/// Labels as an Algerian shop's scale printed them (photographed by the
+/// owner): `20` + article `00122` + `00310` g + check digit.
+#[test]
+fn real_scale_labels_sell_at_their_weight() -> R {
+    use nb_store::usecases::sales::{
+        PaymentInput, SaleInput, SaleLineInput, complete_sale, open_shift,
+    };
+    let (mut s, setup) = store();
+    let mut black = product("Olive noir", "", 65_000);
+    black.base_unit = "kg".into();
+    black.base_precision = 3;
+    black.plu = Some("122".into());
+    let black = create_product(&mut s, meta(&setup, "product.create"), black)?;
+    let mut green = product("Olive vert", "", 75_000);
+    green.base_unit = "kg".into();
+    green.base_precision = 3;
+    green.plu = Some("00102".into());
+    let green = create_product(&mut s, meta(&setup, "product.create"), green)?;
+    let mut lines = Vec::new();
+    for (code, id, qty) in [
+        ("2000122003109", &black.id, "0.31"),
+        ("2000102002702", &green.id, "0.27"),
+    ] {
+        match scan(&s, code)? {
+            Scan::Weighed { product, qty: q } => {
+                assert_eq!(&product.id, id);
+                assert_eq!(q, qty);
+                lines.push(SaleLineInput {
+                    product_id: product.id,
+                    qty: q,
+                    ..Default::default()
+                });
+            }
+            other => panic!("{code}: {other:?}"),
+        }
+    }
+    // Not an article: never read as one.
+    assert!(matches!(
+        scan(&s, &ean13("200000000001"))?,
+        Scan::Unknown { .. }
+    ));
+    let reg = s
+        .read(|r| {
+            let o = nb_store::repo::org::the_org(r.conn())?.ok_or(Error::NotFound("org"))?;
+            nb_store::usecases::org::registers(r.conn(), o.org_id()?)
+        })?
+        .into_iter()
+        .next()
+        .map(|r| r.id)
+        .unwrap_or_default();
+    open_shift(&mut s, meta(&setup, "shift.open"), &reg, 0)?;
+    let sale = complete_sale(
+        &mut s,
+        meta(&setup, "sale"),
+        SaleInput {
+            register_id: reg,
+            warehouse_id: setup.warehouse.to_string(),
+            lines,
+            payments: vec![PaymentInput {
+                method: "card".into(),
+                amount_minor: 40_400,
+            }],
+            ..Default::default()
+        },
+    )?;
+    // 0.310 × 650.00 = 201.50 and 0.270 × 750.00 = 202.50, as on the labels.
+    assert_eq!(sale.total_minor, 20_150 + 20_250);
+    let amounts: Vec<i64> = nb_store::usecases::printing::print_sale(&s, &sale.number)?
+        .lines
+        .iter()
+        .map(|l| l.amount_minor)
+        .collect();
+    assert_eq!(amounts, [20_150, 20_250]);
     Ok(())
 }

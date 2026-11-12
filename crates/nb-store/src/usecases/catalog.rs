@@ -74,11 +74,15 @@ pub(crate) fn seed_defaults(
             )?;
         }
     }
-    w.tx().execute(
-        "INSERT INTO scale_formats (id, org_id, position, prefix, item_digits, value_digits, value_kind, decimals, created_at)
-         VALUES (?1, ?2, 0, '21', 5, 5, 'weight', 3, ?3)",
-        params![nb_core::OperationId::new().to_string(), org.to_string(), w.now()],
-    )?;
+    // Weight labels `21` and `20` + 5-digit article + 5-digit grams: what
+    // the scales sold in Algeria print out of the box.
+    for (position, prefix) in [(0, "21"), (1, "20")] {
+        w.tx().execute(
+            "INSERT INTO scale_formats (id, org_id, position, prefix, item_digits, value_digits, value_kind, decimals, created_at)
+             VALUES (?1, ?2, ?3, ?4, 5, 5, 'weight', 3, ?5)",
+            params![nb_core::OperationId::new().to_string(), org.to_string(), position, prefix, w.now()],
+        )?;
+    }
     Ok(())
 }
 
@@ -770,6 +774,9 @@ pub fn scan(store: &Store, code: &str) -> Result<Scan> {
             };
             // Article codes are compared as numbers: `00042` is `42`.
             let plu = item.trim_start_matches('0');
+            if plu.is_empty() {
+                continue; // article 0: no product carries it
+            }
             let id: Option<String> = r
                 .conn()
                 .query_row(
