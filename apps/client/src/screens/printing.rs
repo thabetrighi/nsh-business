@@ -656,6 +656,34 @@ fn local_date(iso: &str) -> (i32, u32, u32) {
     )
 }
 
+/// The time now in the store's time zone.
+pub fn now_local() -> (i32, u32, u32, u32, u32) {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0));
+    local(ms)
+}
+
+/// A cart printed before it is paid, with the shop's receipt layout.
+pub async fn prebill_maker(st: AppState, sale: Sale) -> Result<Maker, String> {
+    let (shop, docs, t) = shop_and_docs(st, DocKind::Receipt).await?;
+    let (sh, o, lang) = (shop_of(&shop, &docs.footer), options(&docs), lang_of(&shop));
+    // No customer balance on a cart not yet sold.
+    let o = Options {
+        balance: false,
+        ..o
+    };
+    Ok(std::sync::Arc::new(move |paper| {
+        draw(
+            &t,
+            &o,
+            &sale_data(&sh, &sale, lang, &o, DocKind::Receipt),
+            lang,
+            paper,
+        )
+    }))
+}
+
 /// A customer receipt's voucher.
 pub async fn voucher_maker(st: AppState, number: String) -> Result<Maker, String> {
     use nb_docs::templates::{Voucher, voucher_data};

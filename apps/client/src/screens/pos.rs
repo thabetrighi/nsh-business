@@ -44,6 +44,10 @@ use crate::ui::popup::dropdown;
 use crate::ui::surface::{card, card_header_icon, empty_state, page_pad};
 use crate::ui::tokens::{Status, Tone, radius, ty};
 
+#[path = "pos_parts.rs"]
+mod parts;
+use parts::*;
+
 fn first_error(st: AppState, e: &DbError) -> String {
     error_text(st, e.codes.first().map_or("internal", |c| c.1))
 }
@@ -200,6 +204,17 @@ struct Till {
     /// The sale whose print dialog shows (after a sale, or from the list).
     printing: Signal<Option<String>>,
     printing_open: Signal<bool>,
+    /// The receipt prints after this payment (pay and print).
+    print_after: Signal<bool>,
+    /// The one-number dialog: a line and what it changes.
+    quick: Signal<Option<(usize, Quick)>>,
+    quick_open: Signal<bool>,
+    customize_open: Signal<bool>,
+    keys_open: Signal<bool>,
+    /// The cart printed before paying.
+    prebill_open: Signal<bool>,
+    /// The category the products are filtered on.
+    category: Signal<Option<String>>,
 }
 
 /// A sale reopened in the cart: its number, what is left of it, and
@@ -387,6 +402,13 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         correcting: signal(None),
         printing: signal(None),
         printing_open: signal(false),
+        print_after: signal(false),
+        quick: signal(None),
+        quick_open: signal(false),
+        customize_open: signal(false),
+        keys_open: signal(false),
+        prebill_open: signal(false),
+        category: signal(None),
     };
     effect(move || {
         if !t.printing_open.get() {
@@ -411,6 +433,10 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             && !t.customer_open.get_untracked()
             && !t.sales_open.get_untracked()
             && !t.printing_open.get_untracked()
+            && !t.quick_open.get_untracked()
+            && !t.customize_open.get_untracked()
+            && !t.keys_open.get_untracked()
+            && !t.prebill_open.get_untracked()
     };
 
     // A quote or order sent to the till (from the sales documents): its
@@ -493,8 +519,8 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         }
     });
     on_key("f9", move |_| {
-        if selling() && no_dialog() && !t.cart.with_untracked(Vec::is_empty) {
-            t.paying.set(true);
+        if selling() && no_dialog() {
+            t.pay(st, false);
         }
     });
     on_key("f8", move |_| {
@@ -651,6 +677,7 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
                 )
                 .test_id("pos-free")
             })
+            .child(head_tools(t, st))
             .child(if compact {
                 icon_button(
                     || Icon::Lock,
@@ -683,7 +710,11 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             ))
             .into_element(),
         Some((reg, None)) => view().child(open_till(st, reg)).into_element(),
-        Some((_, Some(_))) => selling_view(st, t, compact).into_element(),
+        Some((_, Some(_))) => {
+            // Another layout or side: the screen is built again.
+            let _ = (st.biz.pos.layout.get(), st.biz.pos.cart_start.get());
+            selling_view(st, t, compact).into_element()
+        }
     });
     // The page fills the window: the products and the cart scroll in
     // their own areas, so the cart and its "pay" stay in place.
@@ -721,7 +752,7 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             view()
                 .flex_1()
                 .min_h(px(0.0))
-                .child(cart_panel(st, t, true))
+                .child(cart_panel(st, t, true, false))
                 .into_element()
         }))
         .child(modal(t.customer_open, compact, move || {
@@ -749,6 +780,35 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             }
             view().into_element()
         }))
+        .child(modal(t.quick_open, compact, move || {
+            match t.quick.get_untracked() {
+                Some((i, q)) => {
+                    quick_dialog(st, t, i, q, move || t.quick_open.set(false)).into_element()
+                }
+                None => view().into_element(),
+            }
+        }))
+        .child(modal(t.customize_open, compact, move || {
+            customize_dialog(st, move || t.customize_open.set(false)).into_element()
+        }))
+        .child(modal(t.keys_open, compact, move || {
+            keys_dialog(st, move || t.keys_open.set(false)).into_element()
+        }))
+        .child(modal(t.prebill_open, compact, move || {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(sale) = prebill_sale(st, t) {
+                return crate::screens::printing::document_dialog(
+                    st,
+                    st.tn("pos.prebill"),
+                    "pre-bill.pdf".into(),
+                    crate::printers::Role::Receipt,
+                    move || crate::screens::printing::prebill_maker(st, sale.clone()),
+                    move || t.prebill_open.set(false),
+                )
+                .into_element();
+            }
+            view().into_element()
+        }))
         .child(modal(closing, compact, move || {
             match state.get_untracked() {
                 Some((_, Some(shift))) => {
@@ -766,9 +826,9 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
     let found = resource(
         move || {
             st.session.get()?;
-            Some((text.get(), st.data_rev.get()))
+            Some((text.get(), t.category.get(), st.data_rev.get()))
         },
-        move |(q, _), _| {
+        move |(q, cat, _), _| {
             let db = st.db();
             async move {
                 db.call(move |s| {
@@ -776,6 +836,7 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
                         s,
                         &ProductQuery {
                             text: q,
+                            category_id: cat,
                             sort: ProductSort::Name,
                             limit: 60,
                             with_counts: false,
@@ -863,6 +924,7 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
             move || !compact,
             move || kbd(|| "F2".to_owned()).into_element(),
         ));
+    let pr = st.biz.pos;
     let grid = dynamic(move || {
         let all = rows.get();
         if all.is_empty() {
@@ -880,27 +942,106 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
             )
             .into_element();
         }
-        let mut g = view().flex_row().flex_wrap().gap(px(10.0));
-        for (i, p) in all.into_iter().enumerate() {
-            g = g.child(product_card(st, t, i, p, compact));
+        let layout = pr.layout.get();
+        // Sizes follow the setting.
+        let _ = (pr.tile.get(), pr.stock.get(), pr.sku.get());
+        match layout {
+            LIST => {
+                let mut g = view()
+                    .rounded(px(radius::md()))
+                    .border_1()
+                    .border_color(Tone::Border.color());
+                for (i, p) in all.into_iter().enumerate() {
+                    g = g.child(product_row(st, t, i, p, None));
+                }
+                g.into_element()
+            }
+            TILES => {
+                let mut g = view().flex_row().flex_wrap().gap(px(12.0));
+                for (i, p) in all.into_iter().enumerate() {
+                    g = g.child(product_tile(st, t, i, p));
+                }
+                g.into_element()
+            }
+            _ => {
+                let mut g = view().flex_row().flex_wrap().gap(px(10.0));
+                for (i, p) in all.into_iter().enumerate() {
+                    g = g.child(product_card(st, t, i, p, compact));
+                }
+                g.into_element()
+            }
         }
-        g.into_element()
     });
-    let mut products = card()
+    let chips = when(
+        move || pr.categories.get(),
+        move || category_chips(st, t).into_element(),
+    );
+    // Scanning first: the cart is the table in the middle, what is found
+    // shows under the search, the total and payment at the side.
+    if !compact && pr.layout.get() == SCAN {
+        let results = dynamic(move || {
+            if text.get().trim().is_empty() {
+                return view().into_element();
+            }
+            let all = rows.get();
+            let mut list = view()
+                .rounded(px(radius::md()))
+                .border_1()
+                .border_color(Tone::Border.color())
+                .bg(Tone::Surface.color())
+                .shadow_md();
+            for (i, p) in all.into_iter().take(8).enumerate() {
+                list = list.child(product_row(st, t, i, p, Some(text)));
+            }
+            // Over the table, under the search.
+            list.absolute()
+                .top(px(52.0))
+                .left_0()
+                .right_0()
+                .z_index(20)
+                .into_element()
+        });
+        let main = card()
+            .flex_1()
+            .min_h(px(0.0))
+            .p(px(16.0))
+            .gap(px(12.0))
+            .child(view().relative().z_index(10).child(search).child(results))
+            .child(
+                scroll()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .rounded(px(radius::md()))
+                    .border_1()
+                    .border_color(Tone::Border.color())
+                    .child(cart_table(st, t)),
+            );
+        let side = view()
+            .w(px(340.0))
+            .flex_shrink_0()
+            .min_h(px(0.0))
+            .child(cart_panel(st, t, false, true));
+        let mut row = view().flex_1().min_h(px(0.0)).flex_row().gap(px(20.0));
+        row = if pr.cart_start.get_untracked() {
+            row.child(side).child(main)
+        } else {
+            row.child(main).child(side)
+        };
+        return view().flex_1().min_h(px(0.0)).child(row);
+    }
+    let products = card()
         .flex_1()
         .min_h(px(0.0))
         .p(px(if compact { 12.0 } else { 16.0 }))
         .gap(px(12.0))
         .child(search)
+        .child(chips)
         .child(
             scroll()
                 .flex_1()
                 .min_h(px(0.0))
                 .child(view().pb(px(8.0)).child(grid)),
         );
-    if !compact {
-        products = products.child(shortcut_bar(st));
-    }
     if compact {
         view()
             .flex_1()
@@ -909,19 +1050,17 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
             .child(products)
             .child(cart_bar(st, t))
     } else {
-        view()
-            .flex_1()
+        let cart = view()
+            .w(px(400.0))
+            .flex_shrink_0()
             .min_h(px(0.0))
-            .flex_row()
-            .gap(px(20.0))
-            .child(products)
-            .child(
-                view()
-                    .w(px(400.0))
-                    .flex_shrink_0()
-                    .min_h(px(0.0))
-                    .child(cart_panel(st, t, false)),
-            )
+            .child(cart_panel(st, t, false, false));
+        let row = view().flex_1().min_h(px(0.0)).flex_row().gap(px(20.0));
+        if pr.cart_start.get_untracked() {
+            row.child(cart).child(products)
+        } else {
+            row.child(products).child(cart)
+        }
     }
 }
 
@@ -943,8 +1082,13 @@ fn product_card(st: AppState, t: Till, i: usize, p: ProductRow, compact: bool) -
         .test_id(&format!("pos-item-{i}"))
         // Cards grow to fill each row (a gap-free grid at any width).
         .flex_grow(1.0)
-        .basis(px(if compact { 140.0 } else { 168.0 }))
-        .max_w(px(260.0))
+        .basis(px(match (compact, st.biz.pos.tile.get_untracked()) {
+            (true, _) => 140.0,
+            (_, 0) => 132.0,
+            (_, 2) => 210.0,
+            _ => 168.0,
+        }))
+        .max_w(px(300.0))
         .min_h(px(100.0))
         .p(px(12.0))
         .gap(px(6.0))
@@ -1010,7 +1154,7 @@ fn product_card(st: AppState, t: Till, i: usize, p: ProductRow, compact: bool) -
                     FontWeight::BOLD,
                     || Tone::Primary,
                 )))
-                .child(if service {
+                .child(if service || !st.biz.pos.stock.get_untracked() {
                     view()
                 } else {
                     view().child(label_line(
@@ -1025,49 +1169,6 @@ fn product_card(st: AppState, t: Till, i: usize, p: ProductRow, compact: bool) -
                     ))
                 }),
         )
-}
-
-/// What each key does, under the products.
-fn shortcut_bar(st: AppState) -> View {
-    let mut v = view()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap(px(14.0))
-        .pt(px(10.0))
-        .border_t_1()
-        .border_color(Tone::Border.color())
-        .child(icon(Icon::Keyboard, 16.0, || Tone::Faint));
-    for (key, what) in [
-        ("F2", "pos.key.search"),
-        ("F4", "pos.key.free"),
-        ("F6", "pos.key.edit"),
-        ("Alt ↑↓", "pos.key.select"),
-        ("Alt +/−", "pos.key.qty"),
-        ("F10", "pos.key.customer"),
-        ("F5", "pos.key.discount"),
-        ("F7", "pos.key.hold"),
-        ("F3", "pos.key.held"),
-        ("F12", "pos.key.return"),
-        ("F1", "pos.key.sales"),
-        ("F8", "pos.key.clear"),
-        ("F9", "pos.key.pay"),
-    ] {
-        v = v.child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .child(kbd(move || key.to_owned()))
-                .child(label_line(
-                    st.t(what),
-                    ty::XS,
-                    FontWeight::NORMAL,
-                    Tone::Muted,
-                )),
-        );
-    }
-    v
 }
 
 /// Phones: the cart's count and total, and "pay", at the bottom.
@@ -1121,18 +1222,14 @@ fn cart_bar(st: AppState, t: Till) -> View {
                 Size::Lg,
                 Some(Icon::Banknote),
                 st.t("pos.pay"),
-                move || {
-                    if !t.cart.with_untracked(Vec::is_empty) {
-                        t.paying.set(true);
-                    }
-                },
+                move || t.pay(st, false),
             )
             .test_id("pos-pay"),
         )
 }
 
 /// The cart: its lines scroll; the totals and "pay" stay at the bottom.
-fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
+fn cart_panel(st: AppState, t: Till, in_sheet: bool, side_only: bool) -> View {
     let totals = computed(move || t.totals(currency(st)));
     let lines = dynamic(move || {
         let items = t.cart.get();
@@ -1239,7 +1336,10 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
             move || totals.get().is_some_and(|t| t.discounts.minor() > 0),
             move || row("pos.discounts", Box::new(pick(|t| -t.discounts.minor()))).into_element(),
         ))
-        .child(
+        .child(dynamic(move || {
+            if st.biz.pos.big_total.get() {
+                return total_band(st, t).mt(px(6.0)).into_element();
+            }
             view()
                 .flex_row()
                 .items_center()
@@ -1255,24 +1355,10 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
                     ty::H2,
                     FontWeight::BOLD,
                     || Tone::Ink,
-                )),
-        );
-    let pay = view().p(px(16.0)).child(
-        button(
-            Variant::Primary,
-            Size::Lg,
-            Some(Icon::Banknote),
-            st.t("pos.pay"),
-            move || {
-                if !t.cart.with_untracked(Vec::is_empty) {
-                    t.cart_open.set(false);
-                    t.paying.set(true);
-                }
-            },
-        )
-        .test_id(if in_sheet { "sheet-pay" } else { "pos-pay" })
-        .w_full(),
-    );
+                ))
+                .into_element()
+        }));
+    let pay = view().p(px(16.0)).child(pay_buttons(st, t, in_sheet));
     let count = move || {
         tr_args(
             st.lang(),
@@ -1307,6 +1393,18 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
                             } else {
                                 "cart-hold"
                             }),
+                        )
+                        .child(
+                            icon_button(
+                                || Icon::Printer,
+                                st.t("pos.prebill"),
+                                Variant::Ghost,
+                                move || {
+                                    t.cart_open.set(false);
+                                    t.prebill_open.set(true);
+                                },
+                            )
+                            .test_id("cart-prebill"),
                         )
                         .child(
                             button(
@@ -1352,14 +1450,22 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
                 .into_element(),
             None => view().into_element(),
         }))
-        .child(
+        .child(if side_only {
+            // The lines are the table beside: here what acts on the cart.
             scroll()
                 .flex_1()
                 .min_h(px(0.0))
                 .border_t_1()
                 .border_color(Tone::Border.color())
-                .child(lines),
-        )
+                .child(side_actions(st, t))
+        } else {
+            scroll()
+                .flex_1()
+                .min_h(px(0.0))
+                .border_t_1()
+                .border_color(Tone::Border.color())
+                .child(lines)
+        })
         .child(sums)
         .child(pay)
 }
@@ -1425,6 +1531,8 @@ fn cart_line(st: AppState, t: Till, i: usize, it: Item, line_total: i64) -> View
         })
         .cursor_pointer()
         .on_press(move || t.selected.set(Some(i)))
+        .on_context_menu(move |e: &ContextMenuEvent| line_menu(st, t, i, e.page_position))
+        .on_long_press(move || t.edit(i))
         .child(
             view()
                 .flex_row()
@@ -1477,7 +1585,7 @@ fn cart_line(st: AppState, t: Till, i: usize, it: Item, line_total: i64) -> View
                         .bg(Tone::Surface.color())
                         .cursor_pointer()
                         .hover(|s| s.border_color(Tone::Primary.color()))
-                        .on_press(move || t.edit(i))
+                        .on_press(move || t.quick(i, Quick::Qty))
                         .child(label_line(
                             move || format!("{} {unit}", qty_text(st, qty)),
                             ty::SM,
@@ -2123,8 +2231,13 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                         };
                         show_toast(st, text);
                         #[cfg(not(target_arch = "wasm32"))]
-                        if st.biz.auto_print.get_untracked() {
-                            if st.biz.preview_first.get_untracked() {
+                        if t.print_after.get_untracked() {
+                            // No receipt printer: the dialog (preview, PDF).
+                            let printer = crate::printers::for_role(
+                                &st.biz.printers.get_untracked(),
+                                crate::printers::Role::Receipt,
+                            );
+                            if st.biz.preview_first.get_untracked() || printer.is_none() {
                                 t.printing.set(Some(r.number.clone()));
                                 t.printing_open.set(true);
                             } else {

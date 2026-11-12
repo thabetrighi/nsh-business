@@ -292,7 +292,7 @@ pub mod send {
             1
         };
         for _ in 0..runs {
-            let out = std::process::Command::new(&cmd)
+            let out = quiet(&cmd)
                 .args(&args)
                 .output()
                 .map_err(|e| e.to_string())?;
@@ -303,20 +303,59 @@ pub mod send {
         Ok(())
     }
 
-    /// The system's printers (names of queues), best effort.
+    /// A command that shows no console window (Windows opens one for
+    /// every console program started from a windowed app).
+    fn quiet(program: &str) -> std::process::Command {
+        #[allow(unused_mut)]
+        let mut c = std::process::Command::new(program);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
+        c
+    }
+
+    /// The printers' names in `reg query` output of the user's devices
+    /// (`    Name    REG_SZ    winspool,Ne01:`).
+    pub fn parse_reg_devices(out: &str) -> Vec<String> {
+        out.lines()
+            .filter_map(|l| l.split_once("REG_SZ").map(|(name, _)| name.trim()))
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The system's printers read once (then kept): `refresh` reads again.
+    pub fn system_printers_cached(refresh: bool) -> Vec<String> {
+        static KEPT: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+        if !refresh
+            && let Ok(k) = KEPT.lock()
+            && let Some(v) = k.as_ref()
+        {
+            return v.clone();
+        }
+        let v = system_printers();
+        if let Ok(mut k) = KEPT.lock() {
+            *k = Some(v.clone());
+        }
+        v
+    }
+
+    /// The system's printers (names of queues), best effort. On Windows
+    /// from the registry (instant, no PowerShell window).
     pub fn system_printers() -> Vec<String> {
-        let out = if cfg!(target_os = "windows") {
-            std::process::Command::new("powershell")
-                .args([
-                    "-NoProfile",
-                    "-Command",
-                    "Get-Printer | Select-Object -ExpandProperty Name",
-                ])
-                .output()
-        } else {
-            std::process::Command::new("lpstat").arg("-e").output()
-        };
-        match out {
+        if cfg!(target_os = "windows") {
+            let key = r"HKCU\Software\Microsoft\Windows NT\CurrentVersion\Devices";
+            return match quiet("reg").args(["query", key]).output() {
+                Ok(o) if o.status.success() => {
+                    parse_reg_devices(&String::from_utf8_lossy(&o.stdout))
+                }
+                _ => Vec::new(),
+            };
+        }
+        match quiet("lpstat").arg("-e").output() {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
                 .lines()
                 .map(str::trim)
@@ -331,6 +370,16 @@ pub mod send {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_printers_come_from_the_registry() {
+        let out = "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices\r\n    \
+                   XP-80C    REG_SZ    winspool,USB001\r\n    Microsoft Print to PDF    REG_SZ    winspool,Ne01:\r\n";
+        assert_eq!(
+            send::parse_reg_devices(out),
+            ["XP-80C", "Microsoft Print to PDF"]
+        );
+    }
 
     #[test]
     fn printers_keep_as_json_and_old_settings_carry_over() {

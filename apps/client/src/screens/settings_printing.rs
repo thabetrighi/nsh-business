@@ -49,6 +49,8 @@ fn sheet_text(st: AppState, s: Sheet) -> String {
 /// The settings tab.
 pub fn printing_settings(st: AppState, compact: bool) -> View {
     let b = st.biz;
+    // The system's printers are read now, so the printer form opens at once.
+    std::thread::spawn(|| crate::printers::send::system_printers_cached(true));
     // The printer being edited: its index, or `usize::MAX` for a new one.
     let editing: Signal<Option<usize>> = signal(None);
     let editing_open = signal(false);
@@ -305,7 +307,7 @@ fn printer_dialog(
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::printers::send::system_printers());
+            let _ = tx.send(crate::printers::send::system_printers_cached(false));
         });
         let task = spawn(async move {
             if let Ok(list) = rx.await {

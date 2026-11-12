@@ -38,17 +38,23 @@ fn from_png(bytes: &[u8]) -> Result<Gray, DocError> {
     let px: Vec<u8> = match info.color_type {
         png::ColorType::Grayscale => buf[..n].to_vec(),
         png::ColorType::GrayscaleAlpha => buf
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .take(n)
             .map(|p| over_white(p[0], p[1]))
             .collect(),
         png::ColorType::Rgb => buf
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .take(n)
             .map(|p| luma(p[0], p[1], p[2]))
             .collect(),
         png::ColorType::Rgba => buf
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .take(n)
             .map(|p| over_white(luma(p[0], p[1], p[2]), p[3]))
             .collect(),

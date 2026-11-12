@@ -393,7 +393,7 @@ test("a cash sale at the till, from opening to closing", async () => {
   await app.press("id:cart-less-0");
   await app.waitUntil(() => !app.texts().some((t) => plain(t).startsWith("2 × ")));
   // Tap the quantity: type it, change the price and the name.
-  await app.press("id:cart-qty-0");
+  await app.press("id:cart-edit-0");
   await app.waitFor("id:line-apply");
   await app.clear("id:line-qty");
   await app.type("id:line-qty", "3");
@@ -621,7 +621,7 @@ test("a cashier's large discount is approved by a supervisor's PIN", async () =>
   await app.press("id:till-open");
   await app.waitFor("id:pos-item-0");
   await app.press("id:pos-item-0");
-  await app.press("id:cart-qty-0");
+  await app.press("id:cart-edit-0");
   await app.waitFor("id:line-discount");
   await app.type("id:line-discount", "20");
   await app.press("id:line-apply");
@@ -1096,4 +1096,43 @@ test("an invoice template is copied, edited live and used for printing", async (
   // Removed: back to the built-in layout.
   await app.press("id:tpl-delete-2");
   await app.waitUntil(() => !app.texts().includes("Moderne (copie)"));
+});
+
+test("the till is arranged for scanning: quantity in one press, pay and print", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  // Arranged: the cart as a table.
+  await app.press("id:pos-customize");
+  await app.press("id:pos-layout-2");
+  await app.press("id:pos-customize-done");
+  await app.type("id:pos-search", "Bimo");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-item-0");
+  await app.waitFor("id:cart-line-0");
+  // One press on the quantity: the number alone.
+  await app.press("id:cart-qty-0");
+  await app.waitFor("id:quick-value");
+  await app.press("id:quick-3");
+  await app.press("id:quick-apply");
+  await app.waitUntil(() => !app.shows("id:quick-value"));
+  await app.waitUntil(() => app.texts().some((t) => plain(t).startsWith("3 ")));
+  // The keys behind the help icon.
+  await app.press("id:pos-keys");
+  await app.waitFor("text:Raccourcis clavier");
+  await app.press("text:Fermer");
+  // Pay and print: the receipt dialog follows the sale (no printer: a PDF).
+  await app.press("id:pos-pay-print");
+  await app.waitFor("id:pay-confirm");
+  await app.press("id:pay-confirm");
+  await app.waitFor("id:print-preview");
+  await app.press("id:dialog-close");
+  // Back to cards for the other tests on this device.
+  await app.press("id:pos-customize");
+  await app.press("id:pos-layout-0");
+  await app.press("id:pos-customize-done");
 });
