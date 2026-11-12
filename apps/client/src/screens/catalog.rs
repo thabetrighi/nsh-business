@@ -5,10 +5,10 @@
 use nb_domain::units::{Dimension, STANDARD_UNITS, standard_factor};
 use nb_i18n::tr_args;
 use nb_store::usecases::catalog::{
-    CategoryInput, CategoryRow, ImportReport, PriceListRow, archive_category, create_price_list,
-    import_products, list_categories, list_price_lists, save_category,
+    CategoryInput, CategoryRow, PriceListRow, archive_category, create_price_list, list_categories,
+    list_price_lists, save_category,
 };
-use nsh_core::element::{KeyboardType, View, input};
+use nsh_core::element::{KeyboardType, View};
 use nsh_core::prelude::*;
 
 use crate::nav::Route;
@@ -21,7 +21,7 @@ use crate::ui::kit::{Size, Variant, badge, button, label, label_line};
 use crate::ui::overlay::{dialog_frame, modal, show_toast};
 use crate::ui::popup::{Action, dropdown, row_menu};
 use crate::ui::surface::{card, card_header_icon, empty_state};
-use crate::ui::tokens::{Status, Tone, fs, radius, ty};
+use crate::ui::tokens::{Status, Tone, ty};
 
 /// Shows the first rule broken by a failed call.
 fn toast_error(st: AppState, e: &crate::db::DbError) {
@@ -610,178 +610,4 @@ pub fn price_lists(st: AppState, compact: bool) -> View {
             )
             .into_element()
         }))
-}
-
-// ---------------------------------------------------------------- import
-
-/// The import dialog: paste CSV text (any platform) or choose a file
-/// (desktop); all lines are checked before anything is written.
-pub fn import_dialog(st: AppState, close: impl Fn() + Clone + 'static) -> View {
-    let Some(session) = st.session.get_untracked() else {
-        return view();
-    };
-    let text = signal(String::new());
-    let errors: Signal<Vec<String>> = signal(Vec::new());
-    let busy = signal(false);
-    let meta = session.meta("product.import");
-    let warehouse = session.warehouse();
-    let run = {
-        let close = close.clone();
-        move || {
-            if busy.get_untracked() {
-                return;
-            }
-            busy.set(true);
-            errors.set(Vec::new());
-            let t = text.get_untracked();
-            let close = close.clone();
-            let db = st.db();
-            let task = spawn(async move {
-                let r = db
-                    .call(move |s| import_products(s, meta, &t, warehouse))
-                    .await;
-                busy.set(false);
-                match r {
-                    Ok(ImportReport {
-                        created, errors: e, ..
-                    }) if e.is_empty() => {
-                        st.changed();
-                        close();
-                        show_toast(
-                            st,
-                            tr_args(
-                                st.lang(),
-                                "import.done",
-                                &[("count", &st.fmt().integer(i64::from(created)))],
-                            ),
-                        );
-                    }
-                    Ok(report) => errors.set(
-                        report
-                            .errors
-                            .iter()
-                            .take(50)
-                            .map(|e| {
-                                tr_args(
-                                    st.lang(),
-                                    "import.line",
-                                    &[
-                                        ("line", &st.fmt().integer(e.line as i64)),
-                                        ("message", &error_text(st, &e.code)),
-                                    ],
-                                )
-                            })
-                            .collect(),
-                    ),
-                    Err(e) => errors.set(vec![error_text(
-                        st,
-                        e.codes.first().map_or("internal", |c| c.1),
-                    )]),
-                }
-            });
-            drop(task); // runs to completion: tasks end with their owner, not their handle
-        }
-    };
-    let choose = move || {
-        let task = spawn(async move {
-            let dialog =
-                nsh_core::file_dialog::OpenDialog::files().title(st.tn("import.choose_file"));
-            if let Ok(Some(paths)) = pick_paths(dialog).await
-                && let Some(p) = paths.first()
-            {
-                match std::fs::read_to_string(p) {
-                    Ok(t) => text.set(t),
-                    Err(_) => errors.set(vec![st.tn("import.unreadable")]),
-                }
-            }
-        });
-        drop(task); // runs to completion: tasks end with their owner, not their handle
-    };
-    let body = view()
-        .gap(px(14.0))
-        .child(label(
-            st.t("import.format"),
-            ty::SM,
-            FontWeight::NORMAL,
-            Tone::Muted,
-        ))
-        .child(
-            view()
-                .h(px(180.0))
-                .p(px(10.0))
-                .rounded(px(radius::md()))
-                .border_1()
-                .border_color(Tone::BorderStrong.color())
-                .bg(Tone::Surface.color())
-                .child(
-                    input()
-                        .test_id("import-text")
-                        .flex_1()
-                        .multiline(true)
-                        .value(move || text.get())
-                        .on_change(move |t: &str| text.set(t.to_owned()))
-                        .placeholder(st.t("import.paste"))
-                        .text_size(px(fs(ty::SM)))
-                        .text_color(Tone::Ink.color()),
-                ),
-        )
-        .child(view().flex_row().child(button(
-            Variant::Secondary,
-            Size::Sm,
-            Some(Icon::FileUp),
-            st.t("import.choose_file"),
-            choose,
-        )))
-        .child(dynamic(move || {
-            let list = errors.get();
-            if list.is_empty() {
-                return view().into_element();
-            }
-            let mut v = view()
-                .gap(px(4.0))
-                .p(px(12.0))
-                .rounded(px(radius::md()))
-                .bg(Tone::DangerSoft.color())
-                .child(label(
-                    st.t("import.nothing_written"),
-                    ty::SM,
-                    FontWeight::SEMIBOLD,
-                    Tone::Danger,
-                ));
-            for line in list {
-                v = v.child(label(
-                    move || line.clone(),
-                    ty::XS,
-                    FontWeight::MEDIUM,
-                    Tone::Danger,
-                ));
-            }
-            v.test_id("import-errors").into_element()
-        }));
-    let footer = view()
-        .child(button(
-            Variant::Secondary,
-            Size::Md,
-            None,
-            st.t("form.cancel"),
-            close.clone(),
-        ))
-        .child(
-            button(
-                Variant::Primary,
-                Size::Md,
-                Some(Icon::Upload),
-                st.t("import.run"),
-                run,
-            )
-            .test_id("import-run"),
-        );
-    dialog_frame(
-        st,
-        st.t("import.title"),
-        st.t("import.description"),
-        body,
-        footer,
-        close,
-    )
 }

@@ -173,7 +173,94 @@ pub fn list_suppliers(
 }
 
 /// Creates a supplier (numbered F-00001…) or changes one.
+/// Writes a supplier in the caller's transaction (checked by the caller).
+pub(crate) fn save_supplier_in(w: &mut Writer<'_>, input: &SupplierInput) -> Result<String> {
+    w.require(Permission::SuppliersEdit, &Target::org())?;
+    let org = w.org()?.to_string();
+    let t = |s: &str| s.trim().to_owned();
+    let id = match input.id.as_deref().filter(|i| !i.is_empty()) {
+        Some(id) => {
+            load_supplier(w.tx(), id)?;
+            w.tx().execute(
+                "UPDATE suppliers SET kind = ?2, name = ?3, phone = ?4, email = ?5, address = ?6, city = ?7,
+                        nif = ?8, nis = ?9, rc = ?10, ai = ?11, payment_days = ?12, status = ?13, note = ?14,
+                        updated_at = ?15, version = version + 1
+                 WHERE id = ?1",
+                params![
+                    id,
+                    input.kind,
+                    t(&input.name),
+                    t(&input.phone),
+                    t(&input.email),
+                    t(&input.address),
+                    t(&input.city),
+                    t(&input.nif),
+                    t(&input.nis),
+                    t(&input.rc),
+                    t(&input.ai),
+                    input.payment_days,
+                    input.status,
+                    t(&input.note),
+                    w.now()
+                ],
+            )?;
+            w.audit("update", "supplier", id, &input)?;
+            id.to_owned()
+        }
+        None => {
+            w.tx().execute(
+                "INSERT INTO supplier_counters (org_id, last) VALUES (?1, 1)
+                 ON CONFLICT (org_id) DO UPDATE SET last = last + 1",
+                [&org],
+            )?;
+            let n: i64 = w.tx().query_row(
+                "SELECT last FROM supplier_counters WHERE org_id = ?1",
+                [&org],
+                |r| r.get(0),
+            )?;
+            let id = nb_core::uuid::Uuid::now_v7().to_string();
+            w.tx().execute(
+                "INSERT INTO suppliers (id, org_id, code, kind, name, phone, email, address, city, nif, nis, rc, ai,
+                        payment_days, status, note, created_at, created_by, updated_at, device_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?17, ?19)",
+                params![
+                    id,
+                    org,
+                    format!("F-{n:05}"),
+                    input.kind,
+                    t(&input.name),
+                    t(&input.phone),
+                    t(&input.email),
+                    t(&input.address),
+                    t(&input.city),
+                    t(&input.nif),
+                    t(&input.nis),
+                    t(&input.rc),
+                    t(&input.ai),
+                    input.payment_days,
+                    input.status,
+                    t(&input.note),
+                    w.now(),
+                    w.actor_text(),
+                    w.device().id.to_string()
+                ],
+            )?;
+            w.audit("create", "supplier", &id, &input)?;
+            id
+        }
+    };
+    let row = load_supplier(w.tx(), &id)?;
+    w.event("supplier.saved", "supplier", &id, &row)?;
+    Ok(id)
+}
+
 pub fn save_supplier(store: &mut Store, meta: OpMeta, input: SupplierInput) -> Result<SupplierRow> {
+    check_supplier(&input)?;
+    let id = store.write(meta, |w| save_supplier_in(w, &input))?;
+    get_supplier(store, &id)
+}
+
+pub(crate) fn check_supplier(input: &SupplierInput) -> Result<()> {
     let mut errors = Vec::new();
     if input.name.trim().is_empty() {
         errors.push(RuleError::on("name", "required"));
@@ -194,86 +281,7 @@ pub fn save_supplier(store: &mut Store, meta: OpMeta, input: SupplierInput) -> R
     if !errors.is_empty() {
         return Err(errors.into());
     }
-    let id = store.write(meta, |w| {
-        w.require(Permission::SuppliersEdit, &Target::org())?;
-        let org = w.org()?.to_string();
-        let t = |s: &str| s.trim().to_owned();
-        let id = match input.id.as_deref().filter(|i| !i.is_empty()) {
-            Some(id) => {
-                load_supplier(w.tx(), id)?;
-                w.tx().execute(
-                    "UPDATE suppliers SET kind = ?2, name = ?3, phone = ?4, email = ?5, address = ?6, city = ?7,
-                            nif = ?8, nis = ?9, rc = ?10, ai = ?11, payment_days = ?12, status = ?13, note = ?14,
-                            updated_at = ?15, version = version + 1
-                     WHERE id = ?1",
-                    params![
-                        id,
-                        input.kind,
-                        t(&input.name),
-                        t(&input.phone),
-                        t(&input.email),
-                        t(&input.address),
-                        t(&input.city),
-                        t(&input.nif),
-                        t(&input.nis),
-                        t(&input.rc),
-                        t(&input.ai),
-                        input.payment_days,
-                        input.status,
-                        t(&input.note),
-                        w.now()
-                    ],
-                )?;
-                w.audit("update", "supplier", id, &input)?;
-                id.to_owned()
-            }
-            None => {
-                w.tx().execute(
-                    "INSERT INTO supplier_counters (org_id, last) VALUES (?1, 1)
-                     ON CONFLICT (org_id) DO UPDATE SET last = last + 1",
-                    [&org],
-                )?;
-                let n: i64 = w.tx().query_row(
-                    "SELECT last FROM supplier_counters WHERE org_id = ?1",
-                    [&org],
-                    |r| r.get(0),
-                )?;
-                let id = nb_core::uuid::Uuid::now_v7().to_string();
-                w.tx().execute(
-                    "INSERT INTO suppliers (id, org_id, code, kind, name, phone, email, address, city, nif, nis, rc, ai,
-                            payment_days, status, note, created_at, created_by, updated_at, device_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?17, ?19)",
-                    params![
-                        id,
-                        org,
-                        format!("F-{n:05}"),
-                        input.kind,
-                        t(&input.name),
-                        t(&input.phone),
-                        t(&input.email),
-                        t(&input.address),
-                        t(&input.city),
-                        t(&input.nif),
-                        t(&input.nis),
-                        t(&input.rc),
-                        t(&input.ai),
-                        input.payment_days,
-                        input.status,
-                        t(&input.note),
-                        w.now(),
-                        w.actor_text(),
-                        w.device().id.to_string()
-                    ],
-                )?;
-                w.audit("create", "supplier", &id, &input)?;
-                id
-            }
-        };
-        let row = load_supplier(w.tx(), &id)?;
-        w.event("supplier.saved", "supplier", &id, &row)?;
-        Ok(id)
-    })?;
-    get_supplier(store, &id)
+    Ok(())
 }
 
 /// Suppliers whose balance differs from their payable lines.
@@ -1219,6 +1227,44 @@ pub fn supplier_statement(store: &Store, supplier: &str) -> Result<Vec<SupplierS
 }
 
 /// What a supplier was owed before the books started here.
+/// A supplier's opening balance in the caller's transaction (checked by
+/// the caller as [`supplier_opening`] does).
+pub(crate) fn supplier_opening_in(
+    w: &mut Writer<'_>,
+    supplier: &str,
+    owed_minor: i64,
+    reason: &str,
+    currency: nb_core::Currency,
+    offset: i32,
+) -> Result<i64> {
+    w.require(Permission::DebtsAdjust, &Target::org())?;
+    let s = load_supplier(w.tx(), supplier)?;
+    let branch = org::branches(w.tx(), w.org()?)?
+        .into_iter()
+        .next()
+        .ok_or(Error::NotFound("branch"))?;
+    post_operations_for(
+        w,
+        &branch,
+        offset,
+        &[Operation::SupplierOpening {
+            owed: Money::from_minor(owed_minor, currency),
+        }],
+        &format!("{} — {}", s.name, reason.trim()),
+        "supplier.opening",
+        None,
+        Some(&s.id),
+    )?;
+    let balance: i64 = w.tx().query_row(
+        "SELECT balance_minor FROM suppliers WHERE id = ?1",
+        [supplier],
+        |r| r.get(0),
+    )?;
+    w.event("supplier.opening", "supplier", supplier, &balance)?;
+    w.audit("opening", "supplier", supplier, &owed_minor)?;
+    Ok(balance)
+}
+
 pub fn supplier_opening(
     store: &mut Store,
     meta: OpMeta,
@@ -1235,31 +1281,6 @@ pub fn supplier_opening(
     let (_, currency) = store.read(|r| the_org(r.conn()))?;
     let offset = store.utc_offset_min;
     store.write(meta, |w| {
-        w.require(Permission::DebtsAdjust, &Target::org())?;
-        let s = load_supplier(w.tx(), supplier)?;
-        let branch = org::branches(w.tx(), w.org()?)?
-            .into_iter()
-            .next()
-            .ok_or(Error::NotFound("branch"))?;
-        post_operations_for(
-            w,
-            &branch,
-            offset,
-            &[Operation::SupplierOpening {
-                owed: Money::from_minor(owed_minor, currency),
-            }],
-            &format!("{} — {}", s.name, reason.trim()),
-            "supplier.opening",
-            None,
-            Some(&s.id),
-        )?;
-        let balance: i64 = w.tx().query_row(
-            "SELECT balance_minor FROM suppliers WHERE id = ?1",
-            [supplier],
-            |r| r.get(0),
-        )?;
-        w.event("supplier.opening", "supplier", supplier, &balance)?;
-        w.audit("opening", "supplier", supplier, &owed_minor)?;
-        Ok(balance)
+        supplier_opening_in(w, supplier, owed_minor, reason, currency, offset)
     })
 }

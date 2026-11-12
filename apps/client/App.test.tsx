@@ -940,3 +940,20 @@ test("a sealed backup is made, checked and restored", async () => {
   await app.waitFor("text:Données restaurées.");
   await app.waitFor("text:Ventes brutes");
 });
+
+test("customers are imported with their balances after a check", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("text:Clients et crédit");
+  await app.press("id:nav-customers");
+  await app.waitFor("id:customers-import");
+  await app.press("id:customers-import");
+  await app.waitFor("id:import-text");
+  await app.paste("id:import-text", { text: "Nom;Téléphone;Solde\nAhmed Import;0555;1200\nKarim Import;0666;\n" });
+  // The columns are guessed; the first rows show as they will be read.
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "Ahmed Import · 0555 · 1200"));
+  await app.press("id:import-check");
+  await app.waitFor("id:import-ready");
+  await app.press("id:import-run");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "2 client(s) importé(s)"));
+});

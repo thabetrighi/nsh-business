@@ -335,6 +335,102 @@ pub struct AdjustResult {
 /// Gives up part of a customer's debt, grants an allowance on it, or
 /// records what it owed before: with a supervisor's right
 /// (`debts.adjust`), a reason, and its entry, once per operation.
+/// A customer adjustment in the caller's transaction (checked by the
+/// caller as [`adjust_debt`] does).
+pub(crate) fn adjust_in(
+    w: &mut Writer<'_>,
+    input: &AdjustInput,
+    currency: nb_core::Currency,
+    offset: i32,
+) -> Result<AdjustResult> {
+    let opening = input.kind == "opening";
+    let approval = input.approval.as_deref().map(parse_id).transpose()?;
+    w.require_approved(Permission::DebtsAdjust, &Target::org(), approval)?;
+    let customer = crate::usecases::customers::load(w.tx(), &input.customer_id)?;
+    if !opening && input.amount_minor > customer.balance_minor {
+        return Err(RuleError::on("amount", "adjust.more_than_owed").into());
+    }
+    let branch = org::branches(w.tx(), w.org()?)?
+        .into_iter()
+        .next()
+        .ok_or(Error::NotFound("branch"))?;
+    let id = nb_core::uuid::Uuid::now_v7().to_string();
+    let m = |v: i64| Money::from_minor(v, currency);
+    let op = match input.kind.as_str() {
+        "write_off" => Operation::WriteOff {
+            amount: m(input.amount_minor),
+        },
+        "allowance" => Operation::Allowance {
+            amount: m(input.amount_minor),
+        },
+        _ => Operation::CustomerOpening {
+            owed: m(input.amount_minor.max(0)),
+            owing: m((-input.amount_minor).max(0)),
+        },
+    };
+    let entry_number = post_operations_for(
+        w,
+        &branch,
+        offset,
+        &[op],
+        &format!("{} — {}", customer.name, input.reason.trim()),
+        op.code(),
+        None,
+        Some(&customer.id),
+    )?;
+    w.tx().execute(
+        "INSERT INTO customer_adjustments (id, org_id, customer_id, kind, amount_minor, reason, approval_id,
+                entry_number, operation_id, created_at, created_by, device_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            id,
+            w.org()?.to_string(),
+            customer.id,
+            input.kind,
+            input.amount_minor,
+            input.reason.trim(),
+            input.approval,
+            entry_number,
+            w.meta().id.to_string(),
+            w.now(),
+            w.actor_text(),
+            w.device().id.to_string()
+        ],
+    )?;
+    // What it takes off settles the invoices, oldest first.
+    let mut settled = Vec::new();
+    if !opening {
+        let mut left = input.amount_minor;
+        for inv in open_invoices_of(w.tx(), &customer.id, w.now())? {
+            if left == 0 {
+                break;
+            }
+            let take = inv.open_minor.min(left);
+            left -= take;
+            w.tx().execute(
+                "INSERT INTO adjustment_allocations (adjustment_id, sale_id, amount_minor) VALUES (?1, ?2, ?3)",
+                params![id, inv.sale_id, take],
+            )?;
+            crate::usecases::installments::settle_plan_by(w, None, Some(&id), &inv.sale_id, take)?;
+            settled.push((inv.number, take));
+        }
+    }
+    let balance: i64 = w.tx().query_row(
+        "SELECT balance_minor FROM customers WHERE id = ?1",
+        [&customer.id],
+        |r| r.get(0),
+    )?;
+    let out = AdjustResult {
+        id: id.clone(),
+        entry_number,
+        settled,
+        balance_minor: balance,
+    };
+    w.event("customer.adjusted", "customer_adjustment", &id, &out)?;
+    w.audit(&input.kind, "customer", &customer.id, &input)?;
+    Ok(out)
+}
+
 pub fn adjust_debt(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Result<AdjustResult> {
     if input.reason.trim().is_empty() {
         return Err(RuleError::on("reason", "required").into());
@@ -349,93 +445,7 @@ pub fn adjust_debt(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Resul
     }
     let (_, currency) = store.read(|r| the_org(r.conn()))?;
     let offset = store.read(|r| Ok(r.utc_offset_min))?;
-    store.write(meta, |w| {
-        let approval = input.approval.as_deref().map(parse_id).transpose()?;
-        w.require_approved(Permission::DebtsAdjust, &Target::org(), approval)?;
-        let customer = crate::usecases::customers::load(w.tx(), &input.customer_id)?;
-        if !opening && input.amount_minor > customer.balance_minor {
-            return Err(RuleError::on("amount", "adjust.more_than_owed").into());
-        }
-        let branch = org::branches(w.tx(), w.org()?)?
-            .into_iter()
-            .next()
-            .ok_or(Error::NotFound("branch"))?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
-        let m = |v: i64| Money::from_minor(v, currency);
-        let op = match input.kind.as_str() {
-            "write_off" => Operation::WriteOff {
-                amount: m(input.amount_minor),
-            },
-            "allowance" => Operation::Allowance {
-                amount: m(input.amount_minor),
-            },
-            _ => Operation::CustomerOpening {
-                owed: m(input.amount_minor.max(0)),
-                owing: m((-input.amount_minor).max(0)),
-            },
-        };
-        let entry_number = post_operations_for(
-            w,
-            &branch,
-            offset,
-            &[op],
-            &format!("{} — {}", customer.name, input.reason.trim()),
-            op.code(),
-            None,
-            Some(&customer.id),
-        )?;
-        w.tx().execute(
-            "INSERT INTO customer_adjustments (id, org_id, customer_id, kind, amount_minor, reason, approval_id,
-                    entry_number, operation_id, created_at, created_by, device_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                id,
-                w.org()?.to_string(),
-                customer.id,
-                input.kind,
-                input.amount_minor,
-                input.reason.trim(),
-                input.approval,
-                entry_number,
-                w.meta().id.to_string(),
-                w.now(),
-                w.actor_text(),
-                w.device().id.to_string()
-            ],
-        )?;
-        // What it takes off settles the invoices, oldest first.
-        let mut settled = Vec::new();
-        if !opening {
-            let mut left = input.amount_minor;
-            for inv in open_invoices_of(w.tx(), &customer.id, w.now())? {
-                if left == 0 {
-                    break;
-                }
-                let take = inv.open_minor.min(left);
-                left -= take;
-                w.tx().execute(
-                    "INSERT INTO adjustment_allocations (adjustment_id, sale_id, amount_minor) VALUES (?1, ?2, ?3)",
-                    params![id, inv.sale_id, take],
-                )?;
-                crate::usecases::installments::settle_plan_by(w, None, Some(&id), &inv.sale_id, take)?;
-                settled.push((inv.number, take));
-            }
-        }
-        let balance: i64 = w.tx().query_row(
-            "SELECT balance_minor FROM customers WHERE id = ?1",
-            [&customer.id],
-            |r| r.get(0),
-        )?;
-        let out = AdjustResult {
-            id: id.clone(),
-            entry_number,
-            settled,
-            balance_minor: balance,
-        };
-        w.event("customer.adjusted", "customer_adjustment", &id, &out)?;
-        w.audit(&input.kind, "customer", &customer.id, &input)?;
-        Ok(out)
-    })
+    store.write(meta, |w| adjust_in(w, &input, currency, offset))
 }
 
 // ---------------------------------------------------------------------------

@@ -315,18 +315,34 @@ pub fn suppliers_page(st: AppState, compact: bool) -> View {
         .child(summary)
         .child(list)
         .child(pager(st, paging, move || page_data.get().total, compact));
+    let importing = signal(false);
     let actions = view().child(when(
         move || st.can("suppliers.edit"),
         move || {
-            button(
-                Variant::Primary,
-                Size::Md,
-                Some(Icon::Plus),
-                st.t("suppliers.new"),
-                move || editing.set(Some(None)),
-            )
-            .test_id("supplier-new")
-            .into_element()
+            view()
+                .flex_row()
+                .gap(px(8.0))
+                .child(
+                    button(
+                        Variant::Secondary,
+                        Size::Md,
+                        Some(Icon::FileUp),
+                        st.t("import.button"),
+                        move || importing.set(true),
+                    )
+                    .test_id("suppliers-import"),
+                )
+                .child(
+                    button(
+                        Variant::Primary,
+                        Size::Md,
+                        Some(Icon::Plus),
+                        st.t("suppliers.new"),
+                        move || editing.set(Some(None)),
+                    )
+                    .test_id("supplier-new"),
+                )
+                .into_element()
         },
     ));
     view()
@@ -340,6 +356,14 @@ pub fn suppliers_page(st: AppState, compact: bool) -> View {
         ))
         .child(modal(showing_open, compact, move || {
             supplier_card(st, showing, editing, move || showing_open.set(false)).into_element()
+        }))
+        .child(modal(importing, compact, move || {
+            crate::screens::import::import_dialog(
+                st,
+                nb_domain::import::Kind::Suppliers,
+                move || importing.set(false),
+            )
+            .into_element()
         }))
         .child(modal(editing_open, compact, move || {
             match editing.get_untracked() {

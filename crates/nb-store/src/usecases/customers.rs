@@ -252,7 +252,7 @@ pub fn create_group(store: &mut Store, meta: OpMeta, name: &str) -> Result<Custo
     })
 }
 
-fn check(input: &CustomerInput) -> Result<()> {
+pub(crate) fn check(input: &CustomerInput) -> Result<()> {
     let mut errors = Vec::new();
     if input.name.trim().is_empty() {
         errors.push(RuleError::on("name", "required"));
@@ -280,113 +280,116 @@ fn check(input: &CustomerInput) -> Result<()> {
     }
 }
 
+/// Writes a customer in the caller's transaction (checked by the caller).
+pub(crate) fn save_customer_in(w: &mut Writer<'_>, input: &CustomerInput) -> Result<String> {
+    w.require(Permission::CustomersEdit, &Target::org())?;
+    let org = w.org()?.to_string();
+    if let Some(g) = input.group_id.as_deref().filter(|g| !g.is_empty()) {
+        let n: i64 = w.tx().query_row(
+            "SELECT COUNT(*) FROM customer_groups WHERE id = ?1 AND org_id = ?2",
+            params![g, org],
+            |r| r.get(0),
+        )?;
+        if n == 0 {
+            return Err(RuleError::on("group", "invalid_value").into());
+        }
+    }
+    let before = match input.id.as_deref().filter(|i| !i.is_empty()) {
+        Some(id) => Some(load(w.tx(), id)?),
+        None => None,
+    };
+    let raises = input.credit_limit_minor > before.as_ref().map_or(0, |b| b.credit_limit_minor);
+    if raises {
+        w.require(Permission::CreditLimits, &Target::org())?;
+    }
+    let group = input.group_id.clone().filter(|g| !g.is_empty());
+    let t = |s: &str| s.trim().to_owned();
+    let id = match before {
+        Some(b) => {
+            w.tx().execute(
+                "UPDATE customers SET kind = ?2, name = ?3, group_id = ?4, phone = ?5, email = ?6, address = ?7,
+                        city = ?8, nif = ?9, nis = ?10, rc = ?11, ai = ?12, credit_limit_minor = ?13,
+                        payment_days = ?14, status = ?15, note = ?16, updated_at = ?17, version = version + 1
+                 WHERE id = ?1",
+                params![
+                    b.id,
+                    input.kind,
+                    t(&input.name),
+                    group,
+                    t(&input.phone),
+                    t(&input.email),
+                    t(&input.address),
+                    t(&input.city),
+                    t(&input.nif),
+                    t(&input.nis),
+                    t(&input.rc),
+                    t(&input.ai),
+                    input.credit_limit_minor,
+                    input.payment_days,
+                    input.status,
+                    t(&input.note),
+                    w.now()
+                ],
+            )?;
+            w.audit("update", "customer", &b.id, &input)?;
+            b.id
+        }
+        None => {
+            w.tx().execute(
+                "INSERT INTO customer_counters (org_id, last) VALUES (?1, 1)
+                 ON CONFLICT (org_id) DO UPDATE SET last = last + 1",
+                [&org],
+            )?;
+            let n: i64 = w.tx().query_row(
+                "SELECT last FROM customer_counters WHERE org_id = ?1",
+                [&org],
+                |r| r.get(0),
+            )?;
+            let id = nb_core::uuid::Uuid::now_v7().to_string();
+            w.tx().execute(
+                "INSERT INTO customers (id, org_id, code, kind, name, group_id, phone, email, address, city, nif, nis,
+                        rc, ai, credit_limit_minor, payment_days, status, note, created_at, created_by, updated_at,
+                        device_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+                         ?19, ?21)",
+                params![
+                    id,
+                    org,
+                    format!("C-{n:05}"),
+                    input.kind,
+                    t(&input.name),
+                    group,
+                    t(&input.phone),
+                    t(&input.email),
+                    t(&input.address),
+                    t(&input.city),
+                    t(&input.nif),
+                    t(&input.nis),
+                    t(&input.rc),
+                    t(&input.ai),
+                    input.credit_limit_minor,
+                    input.payment_days,
+                    input.status,
+                    t(&input.note),
+                    w.now(),
+                    w.actor_text(),
+                    w.device().id.to_string()
+                ],
+            )?;
+            w.audit("create", "customer", &id, &input)?;
+            id
+        }
+    };
+    let row = load(w.tx(), &id)?;
+    w.event("customer.saved", "customer", &id, &row)?;
+    Ok(id)
+}
+
 /// Creates a customer (numbered C-00001…) or changes one. Setting or
 /// raising a credit limit needs `credit.limits`.
 pub fn save_customer(store: &mut Store, meta: OpMeta, input: CustomerInput) -> Result<CustomerRow> {
     check(&input)?;
-    let id = store.write(meta, |w| {
-        w.require(Permission::CustomersEdit, &Target::org())?;
-        let org = w.org()?.to_string();
-        if let Some(g) = input.group_id.as_deref().filter(|g| !g.is_empty()) {
-            let n: i64 = w.tx().query_row(
-                "SELECT COUNT(*) FROM customer_groups WHERE id = ?1 AND org_id = ?2",
-                params![g, org],
-                |r| r.get(0),
-            )?;
-            if n == 0 {
-                return Err(RuleError::on("group", "invalid_value").into());
-            }
-        }
-        let before = match input.id.as_deref().filter(|i| !i.is_empty()) {
-            Some(id) => Some(load(w.tx(), id)?),
-            None => None,
-        };
-        let raises = input.credit_limit_minor > before.as_ref().map_or(0, |b| b.credit_limit_minor);
-        if raises {
-            w.require(Permission::CreditLimits, &Target::org())?;
-        }
-        let group = input.group_id.clone().filter(|g| !g.is_empty());
-        let t = |s: &str| s.trim().to_owned();
-        let id = match before {
-            Some(b) => {
-                w.tx().execute(
-                    "UPDATE customers SET kind = ?2, name = ?3, group_id = ?4, phone = ?5, email = ?6, address = ?7,
-                            city = ?8, nif = ?9, nis = ?10, rc = ?11, ai = ?12, credit_limit_minor = ?13,
-                            payment_days = ?14, status = ?15, note = ?16, updated_at = ?17, version = version + 1
-                     WHERE id = ?1",
-                    params![
-                        b.id,
-                        input.kind,
-                        t(&input.name),
-                        group,
-                        t(&input.phone),
-                        t(&input.email),
-                        t(&input.address),
-                        t(&input.city),
-                        t(&input.nif),
-                        t(&input.nis),
-                        t(&input.rc),
-                        t(&input.ai),
-                        input.credit_limit_minor,
-                        input.payment_days,
-                        input.status,
-                        t(&input.note),
-                        w.now()
-                    ],
-                )?;
-                w.audit("update", "customer", &b.id, &input)?;
-                b.id
-            }
-            None => {
-                w.tx().execute(
-                    "INSERT INTO customer_counters (org_id, last) VALUES (?1, 1)
-                     ON CONFLICT (org_id) DO UPDATE SET last = last + 1",
-                    [&org],
-                )?;
-                let n: i64 = w.tx().query_row(
-                    "SELECT last FROM customer_counters WHERE org_id = ?1",
-                    [&org],
-                    |r| r.get(0),
-                )?;
-                let id = nb_core::uuid::Uuid::now_v7().to_string();
-                w.tx().execute(
-                    "INSERT INTO customers (id, org_id, code, kind, name, group_id, phone, email, address, city, nif, nis,
-                            rc, ai, credit_limit_minor, payment_days, status, note, created_at, created_by, updated_at,
-                            device_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                             ?19, ?21)",
-                    params![
-                        id,
-                        org,
-                        format!("C-{n:05}"),
-                        input.kind,
-                        t(&input.name),
-                        group,
-                        t(&input.phone),
-                        t(&input.email),
-                        t(&input.address),
-                        t(&input.city),
-                        t(&input.nif),
-                        t(&input.nis),
-                        t(&input.rc),
-                        t(&input.ai),
-                        input.credit_limit_minor,
-                        input.payment_days,
-                        input.status,
-                        t(&input.note),
-                        w.now(),
-                        w.actor_text(),
-                        w.device().id.to_string()
-                    ],
-                )?;
-                w.audit("create", "customer", &id, &input)?;
-                id
-            }
-        };
-        let row = load(w.tx(), &id)?;
-        w.event("customer.saved", "customer", &id, &row)?;
-        Ok(id)
-    })?;
+    let id = store.write(meta, |w| save_customer_in(w, &input))?;
     get_customer(store, &id)
 }
 

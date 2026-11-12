@@ -874,7 +874,12 @@ pub fn products(st: AppState, compact: bool) -> View {
                 .child(pager(st, paging, move || total.get(), compact)),
         )
         .child(modal(importing, compact, move || {
-            crate::screens::catalog::import_dialog(st, move || importing.set(false)).into_element()
+            crate::screens::import::import_dialog(
+                st,
+                nb_domain::import::Kind::Products,
+                move || importing.set(false),
+            )
+            .into_element()
         }));
     // The editor takes the page while open; the list (and its filters)
     // waits underneath, as it was.

@@ -11,6 +11,7 @@ pub mod customers;
 pub mod debts;
 pub mod documents;
 pub mod expenses;
+pub mod import;
 pub mod installments;
 pub mod inventory;
 pub mod ledger;

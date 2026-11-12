@@ -1149,7 +1149,7 @@ pub struct ImportReport {
     pub errors: Vec<ImportError>,
 }
 
-fn money_text(s: &str, currency: Currency) -> std::result::Result<i64, RuleError> {
+pub(crate) fn money_text(s: &str, currency: Currency) -> std::result::Result<i64, RuleError> {
     let t: String = s
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '\u{A0}')
@@ -1166,6 +1166,25 @@ fn money_text(s: &str, currency: Currency) -> std::result::Result<i64, RuleError
 pub fn import_products(
     store: &mut Store,
     meta: OpMeta,
+    text: &str,
+    warehouse: nb_domain::WarehouseId,
+) -> Result<ImportReport> {
+    products_import(store, Some(meta), text, warehouse)
+}
+
+/// Checks an import without writing: the errors, or how many it would
+/// create.
+pub fn check_products_import(
+    store: &mut Store,
+    text: &str,
+    warehouse: nb_domain::WarehouseId,
+) -> Result<ImportReport> {
+    products_import(store, None, text, warehouse)
+}
+
+fn products_import(
+    store: &mut Store,
+    meta: Option<OpMeta>,
     text: &str,
     warehouse: nb_domain::WarehouseId,
 ) -> Result<ImportReport> {
@@ -1294,6 +1313,10 @@ pub fn import_products(
     if !report.errors.is_empty() || prepared.is_empty() {
         return Ok(report);
     }
+    let Some(meta) = meta else {
+        report.created = u32::try_from(prepared.len()).unwrap_or(u32::MAX);
+        return Ok(report);
+    };
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
         let org = w.org()?;

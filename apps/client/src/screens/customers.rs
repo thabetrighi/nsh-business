@@ -205,18 +205,34 @@ pub fn customers_page(st: AppState, compact: bool) -> View {
         .child(summary)
         .child(list)
         .child(pager(st, paging, move || page_data.get().total, compact));
+    let importing = signal(false);
     let actions = view().child(when(
         move || may_edit.get(),
         move || {
-            button(
-                Variant::Primary,
-                Size::Md,
-                Some(Icon::Plus),
-                st.t("customers.new"),
-                move || editing.set(Some(None)),
-            )
-            .test_id("customer-new")
-            .into_element()
+            view()
+                .flex_row()
+                .gap(px(8.0))
+                .child(
+                    button(
+                        Variant::Secondary,
+                        Size::Md,
+                        Some(Icon::FileUp),
+                        st.t("import.button"),
+                        move || importing.set(true),
+                    )
+                    .test_id("customers-import"),
+                )
+                .child(
+                    button(
+                        Variant::Primary,
+                        Size::Md,
+                        Some(Icon::Plus),
+                        st.t("customers.new"),
+                        move || editing.set(Some(None)),
+                    )
+                    .test_id("customer-new"),
+                )
+                .into_element()
         },
     ));
     view()
@@ -236,6 +252,14 @@ pub fn customers_page(st: AppState, compact: bool) -> View {
                 Some(c) => customer_dialog(st, c, move || editing_open.set(false)).into_element(),
                 None => view().into_element(),
             }
+        }))
+        .child(modal(importing, compact, move || {
+            crate::screens::import::import_dialog(
+                st,
+                nb_domain::import::Kind::Customers,
+                move || importing.set(false),
+            )
+            .into_element()
         }))
 }
 
