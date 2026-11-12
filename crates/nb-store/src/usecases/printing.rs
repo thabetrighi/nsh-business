@@ -18,6 +18,14 @@ pub struct PrintLine {
     pub discount_minor: i64,
     /// What the line came to, as charged.
     pub amount_minor: i64,
+    /// The product's reference (empty for a free line).
+    #[serde(default)]
+    pub sku: String,
+    #[serde(default)]
+    pub tax_bps: i64,
+    /// The line before tax.
+    #[serde(default)]
+    pub net_minor: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,8 +129,10 @@ pub fn print_sale(store: &Store, number: &str) -> Result<PrintSale> {
             },
         )?;
         let mut s = c.prepare(
-            "SELECT name, unit, qty_milli, unit_price_minor, line_discount_minor, gross_minor
-             FROM sale_lines WHERE sale_id = ?1 ORDER BY position",
+            "SELECT l.name, l.unit, l.qty_milli, l.unit_price_minor, l.line_discount_minor,
+                    l.gross_minor, COALESCE(p.sku, ''), l.tax_bps, l.net_minor
+             FROM sale_lines l LEFT JOIN products p ON p.id = l.product_id
+             WHERE l.sale_id = ?1 ORDER BY l.position",
         )?;
         let lines = s
             .query_map([&id], |r| {
@@ -133,6 +143,9 @@ pub fn print_sale(store: &Store, number: &str) -> Result<PrintSale> {
                     unit_price_minor: r.get(3)?,
                     discount_minor: r.get(4)?,
                     amount_minor: r.get(5)?,
+                    sku: r.get(6)?,
+                    tax_bps: r.get(7)?,
+                    net_minor: r.get(8)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;

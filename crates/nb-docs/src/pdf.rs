@@ -73,16 +73,67 @@ pub fn pdf(doc: &Doc) -> Result<Vec<u8>, DocError> {
                 .ok_or_else(|| DocError("page size".into()))?;
             let mut page = pdf.start_page_with(PageSettings::new(size));
             let mut s = page.surface();
-            s.set_fill(Some(Fill::default()));
+            let in_page = |y: f32| single || (y - margin >= top && y - margin < bottom);
+            let fill_of = |c: crate::Rgb| Fill {
+                paint: krilla::color::rgb::Color::new(c[0], c[1], c[2]).into(),
+                ..Default::default()
+            };
+            // Boxes and bars first: text goes on top of them.
+            for &(rx, ry, rw, rh, col) in &l.rects {
+                if !in_page(ry) {
+                    continue;
+                }
+                s.set_fill(Some(fill_of(col)));
+                let mut pb = PathBuilder::new();
+                if let Some(r) = Rect::from_xywh(rx, ry - shift, rw, rh) {
+                    pb.push_rect(r);
+                }
+                if let Some(path) = pb.finish() {
+                    s.draw_path(&path);
+                }
+            }
+            for im in &l.images {
+                if !in_page(im.y) {
+                    continue;
+                }
+                let rgba: Vec<u8> = im.gray.iter().flat_map(|&g| [g, g, g, 255]).collect();
+                let image = Image::from_rgba8(rgba, im.src_w, im.src_h);
+                if let Some(size) = krilla::geom::Size::from_wh(im.w, im.h) {
+                    s.push_transform(&Transform::from_translate(im.x, im.y - shift));
+                    s.draw_image(image, size);
+                    s.pop();
+                }
+            }
+            s.set_fill(None);
+            s.set_stroke(Some(Stroke {
+                width: 0.5,
+                paint: krilla::color::rgb::Color::new(110, 110, 110).into(),
+                ..Default::default()
+            }));
+            for &(ry, from, to) in &l.rules {
+                if !in_page(ry) {
+                    continue;
+                }
+                let mut pb = PathBuilder::new();
+                pb.move_to(from, ry - shift);
+                pb.line_to(to, ry - shift);
+                if let Some(path) = pb.finish() {
+                    s.draw_path(&path);
+                }
+            }
+            s.set_stroke(None);
+            let mut current: Option<crate::Rgb> = None;
             for g in &l.glyphs {
-                let in_page =
-                    single || (g.baseline - margin >= top && g.baseline - margin < bottom);
-                if !in_page {
+                if !in_page(g.baseline) {
                     continue;
                 }
                 let Some(font) = fonts.get(&g.font_id).cloned() else {
                     continue;
                 };
+                if current != Some(g.color) {
+                    s.set_fill(Some(fill_of(g.color)));
+                    current = Some(g.color);
+                }
                 let glyph = KrillaGlyph::new(
                     GlyphId::new(u32::from(g.glyph_id)),
                     g.advance / g.size,
@@ -100,51 +151,6 @@ pub fn pdf(doc: &Doc) -> Result<Vec<u8>, DocError> {
                     g.size,
                     false,
                 );
-            }
-            s.set_fill(None);
-            s.set_stroke(Some(Stroke {
-                width: 0.5,
-                ..Default::default()
-            }));
-            for &(ry, from, to) in &l.rules {
-                if !single && !(ry - margin >= top && ry - margin < bottom) {
-                    continue;
-                }
-                let mut pb = PathBuilder::new();
-                pb.move_to(from, ry - shift);
-                pb.line_to(to, ry - shift);
-                if let Some(path) = pb.finish() {
-                    s.draw_path(&path);
-                }
-            }
-            s.set_stroke(None);
-            s.set_fill(Some(Fill::default()));
-            for &(rx, ry, rw, rh) in &l.rects {
-                if !single && !(ry - margin >= top && ry - margin < bottom) {
-                    continue;
-                }
-                let mut pb = PathBuilder::new();
-                if let Some(r) = Rect::from_xywh(rx, ry - shift, rw, rh) {
-                    pb.push_rect(r);
-                }
-                if let Some(path) = pb.finish() {
-                    s.draw_path(&path);
-                }
-            }
-            for &(ix, iy, iw, ih, index) in &l.images {
-                if !single && !(iy - margin >= top && iy - margin < bottom) {
-                    continue;
-                }
-                let Some(crate::Block::Image { gray, w, h, .. }) = doc.blocks.get(index) else {
-                    continue;
-                };
-                let rgba: Vec<u8> = gray.iter().flat_map(|&g| [g, g, g, 255]).collect();
-                let image = Image::from_rgba8(rgba, *w, *h);
-                if let Some(size) = krilla::geom::Size::from_wh(iw, ih) {
-                    s.push_transform(&Transform::from_translate(ix, iy - shift));
-                    s.draw_image(image, size);
-                    s.pop();
-                }
             }
             s.finish();
             page.finish();

@@ -2012,6 +2012,7 @@ dependencies = [
  "cosmic-text",
  "krilla",
  "nb-core",
+ "nb-domain",
  "nb-i18n",
  "png 0.18.1",
  "zune-jpeg",

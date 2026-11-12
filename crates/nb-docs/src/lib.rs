@@ -21,6 +21,7 @@ mod layout;
 pub mod logo;
 mod pdf;
 mod preview;
+pub mod render;
 pub mod templates;
 
 pub use escpos::{EscPos, OPEN_DRAWER, decode as decode_escpos, escpos, escpos_with};
@@ -177,6 +178,54 @@ pub enum Block {
     },
     /// Empty space, in points.
     Gap(f32),
+    /// Blocks side by side, each column a share of the width (in reading
+    /// order: the first is on the right in Arabic).
+    Columns {
+        cols: Vec<(f32, Vec<Block>)>,
+        gap: f32,
+    },
+    /// Blocks on a filled and/or bordered box, `pad` points inside.
+    Panel {
+        blocks: Vec<Block>,
+        fill: Option<Rgb>,
+        border: Option<Rgb>,
+        pad: f32,
+    },
+    /// Blocks whose text is drawn in `color`.
+    Paint { color: Rgb, blocks: Vec<Block> },
+}
+
+/// A colour: red, green, blue.
+pub type Rgb = [u8; 3];
+
+/// Black, the ink of thermal printers.
+pub const INK: Rgb = [0, 0, 0];
+
+/// `#RRGGBB` as a colour (black when it is not one).
+pub fn rgb(hex: &str) -> Rgb {
+    let h = hex.trim_start_matches('#');
+    let part = |i: usize| {
+        h.get(i..i + 2)
+            .and_then(|p| u8::from_str_radix(p, 16).ok())
+            .unwrap_or(0)
+    };
+    if h.len() == 6 {
+        [part(0), part(2), part(4)]
+    } else {
+        INK
+    }
+}
+
+/// `c` mixed with white: `keep` of 255 of the colour (a tint).
+pub fn tint(c: Rgb, keep: u8) -> Rgb {
+    let mix =
+        |v: u8| ((u16::from(v) * u16::from(keep) + 255 * (255 - u16::from(keep))) / 255) as u8;
+    [mix(c[0]), mix(c[1]), mix(c[2])]
+}
+
+/// Perceived lightness, 0–255.
+pub fn luma(c: Rgb) -> u8 {
+    ((u32::from(c[0]) * 299 + u32::from(c[1]) * 587 + u32::from(c[2]) * 114) / 1000) as u8
 }
 
 impl Block {
@@ -212,7 +261,14 @@ impl Doc {
     /// The document's text, line by line in logical order (tests, search).
     pub fn plain_text(&self) -> String {
         let mut out = String::new();
-        for b in &self.blocks {
+        plain(&self.blocks, &mut out);
+        nb_i18n::bidi::strip_controls(&out)
+    }
+}
+
+fn plain(blocks: &[Block], out: &mut String) {
+    {
+        for b in blocks {
             match b {
                 Block::Text { text, .. } => out.push_str(text),
                 Block::Pair { start, end, .. } => {
@@ -231,10 +287,19 @@ impl Doc {
                 },
                 Block::Image { .. } => out.push_str("[image]"),
                 Block::Gap(_) => continue,
+                Block::Columns { cols, .. } => {
+                    for (_, c) in cols {
+                        plain(c, out);
+                    }
+                    continue;
+                }
+                Block::Panel { blocks, .. } | Block::Paint { blocks, .. } => {
+                    plain(blocks, out);
+                    continue;
+                }
             }
             out.push('\n');
         }
-        nb_i18n::bidi::strip_controls(&out)
     }
 }
 

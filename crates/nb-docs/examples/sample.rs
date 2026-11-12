@@ -19,13 +19,24 @@ fn shop() -> Shop {
 }
 
 fn sale(lines: usize) -> Sale {
+    let names = [
+        "حليب كامل الدسم Soummam 1L",
+        "زيت المائدة Elio 5L",
+        "سكر أبيض 1 كغ",
+        "قهوة Facto 250g",
+        "ياغورت Danone ×8",
+        "دقيق ممتاز 10 كغ",
+    ];
     let l = |i: usize| Line {
-        name: format!("حليب كامل الدسم Soummam 1L #{i}"),
+        name: names[i % names.len()].into(),
         qty_milli: 1_250,
         unit: "kg".into(),
         unit_price_minor: 18_000,
         amount_minor: 22_500,
-        discount_minor: 0,
+        discount_minor: if i == 1 { 500 } else { 0 },
+        sku: format!("61300{i:02}"),
+        tax_bps: 1_900,
+        net_minor: 18_908,
     };
     let n = lines as i64;
     Sale {
@@ -131,6 +142,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Lang::Ar,
                 Paper::A4,
                 &Options::default(),
+            ),
+        ),
+        (
+            "invoice-classic-ar-a4",
+            nb_docs::render::render(
+                &nb_domain::template::builtin(nb_domain::template::DocKind::Invoice)[1].1,
+                &nb_docs::templates::sale_data(
+                    &shop(),
+                    &sale(6),
+                    Lang::Ar,
+                    &Options::default(),
+                    nb_domain::template::DocKind::Invoice,
+                ),
+                Lang::Ar,
+                Paper::A4,
             ),
         ),
         (

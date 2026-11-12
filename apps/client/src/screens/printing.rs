@@ -121,6 +121,9 @@ pub fn document(p: &Printable, kind: Kind, paper: Paper) -> Doc {
                 unit_price_minor: l.unit_price_minor,
                 amount_minor: l.amount_minor,
                 discount_minor: l.discount_minor,
+                sku: l.sku.clone(),
+                tax_bps: l.tax_bps,
+                net_minor: l.net_minor,
             })
             .collect(),
         discount_minor: s.discount_minor,
@@ -861,26 +864,13 @@ pub struct LabelItem {
 }
 
 fn shelf(st: AppState, item: &LabelItem) -> ShelfLabel {
-    let bars = item.barcode.as_ref().and_then(|code| {
-        let m = if code.len() == 13 && code.bytes().all(|b| b.is_ascii_digit()) {
-            nb_domain::barcode::ean13_modules(code).map(|m| {
-                // Quiet zones around the bars.
-                let mut v = vec![false; 9];
-                v.extend(m);
-                v.extend([false; 9]);
-                v
-            })
-        } else {
-            nb_docs::barcode::code128(code)
-        };
-        m.map(|m| (m, code.clone()))
-    });
     ShelfLabel {
         name: item.name.clone(),
         price_minor: item.price_minor,
         unit: item.unit.clone(),
         currency: currency(st),
-        bars,
+        barcode: item.barcode.clone(),
+        sku: String::new(),
     }
 }
 
@@ -1070,6 +1060,9 @@ mod tests {
                     unit_price_minor: 1_190,
                     discount_minor: 0,
                     amount_minor: 3_570,
+                    sku: "613000".into(),
+                    tax_bps: 1_900,
+                    net_minor: 3_000,
                 }],
                 discount_minor: 0,
                 net_minor: 3_000,
@@ -1175,8 +1168,8 @@ mod tests {
                 price_minor: 65_000,
                 unit: "kg".into(),
                 currency: nb_core::Currency::DZD,
-                bars: nb_domain::barcode::ean13_modules("2000122003109")
-                    .map(|m| (m, "2000122003109".into())),
+                barcode: Some("2000122003109".into()),
+                sku: String::new(),
             },
             Lang::Fr,
             pr.sheet.paper(),

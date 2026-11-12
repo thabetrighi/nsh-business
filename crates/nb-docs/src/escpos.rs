@@ -5,7 +5,7 @@
 use cosmic_text::{Color, SwashCache};
 
 use crate::layout::{layout, with_fonts};
-use crate::{Doc, DocError};
+use crate::{Doc, DocError, Rgb, luma};
 
 /// What a thermal printout is: the bytes to send, and the picture they
 /// print (for a preview, or a test).
@@ -23,76 +23,61 @@ pub const OPEN_DRAWER: [u8; 5] = [0x1B, 0x70, 0x00, 0x19, 0xFA];
 /// 203 dpi: dots per point.
 pub(crate) const DOTS_PER_PT: f32 = 203.0 / 72.0;
 
-/// Draws `doc` on `dots` across at `scale` dots per point; 8-bit
-/// coverage then a threshold.
-pub(crate) fn raster(doc: &Doc, dots: u32, margin_dots: f32, scale: f32) -> Vec<Vec<bool>> {
+/// Draws `doc` in colour on a canvas `px` across at `scale` pixels per
+/// point: text anti-aliased, boxes and pictures in their colours.
+/// `dither`: pictures as dots of black (thermal heads print no grey).
+pub(crate) fn paint(
+    doc: &Doc,
+    px: u32,
+    margin: f32,
+    scale: f32,
+    dither: bool,
+) -> (usize, usize, Vec<Rgb>) {
     with_fonts(|fs| {
-        let mut l = layout(fs, doc, dots as f32, margin_dots, scale);
+        let mut l = layout(fs, doc, px as f32, margin, scale);
         let h = l.height.ceil().max(1.0) as usize;
-        let w = dots as usize;
-        let mut gray = vec![0u8; w * h];
-        let mut cache = SwashCache::new();
-        for (buf, ox, oy) in &mut l.buffers {
-            let (ox, oy) = (*ox as i32, *oy as i32);
-            buf.draw(
-                fs,
-                &mut cache,
-                Color::rgb(0, 0, 0),
-                |x, y, cw, ch, color| {
-                    for dy in 0..ch as i32 {
-                        for dx in 0..cw as i32 {
-                            let (px, py) = (ox + x + dx, oy + y + dy);
-                            if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
-                                let i = py as usize * w + px as usize;
-                                gray[i] = gray[i].max(color.a());
-                            }
-                        }
-                    }
-                },
-            );
+        let w = px as usize;
+        let mut c: Vec<Rgb> = vec![[255, 255, 255]; w * h];
+        let fill = |c: &mut Vec<Rgb>, x: f32, y: f32, rw: f32, rh: f32, col: Rgb| {
+            let (x0, y0) = (x.round().max(0.0) as usize, y.round().max(0.0) as usize);
+            let x1 = ((x + rw).round().max(0.0) as usize).min(w);
+            let y1 = ((y + rh).round().max(0.0) as usize).min(h);
+            for yy in y0..y1 {
+                for xx in x0..x1 {
+                    c[yy * w + xx] = col;
+                }
+            }
+        };
+        for &(rx, ry, rw, rh, col) in &l.rects {
+            fill(&mut c, rx, ry, rw, rh, col);
         }
         for &(ry, from, to) in &l.rules {
             let ry = ry as usize;
             if ry >= h {
                 continue;
             }
-            for x in (from as usize)..(to as usize).min(w) {
+            for x in (from.max(0.0) as usize)..(to as usize).min(w) {
                 if (x / 4) % 2 == 0 {
-                    gray[ry * w + x] = 255;
+                    c[ry * w + x] = [110, 110, 110];
                 }
             }
         }
-        for &(rx, ry, rw, rh) in &l.rects {
-            let (x0, y0) = (rx.round().max(0.0) as usize, ry.round().max(0.0) as usize);
-            let (x1, y1) = (
-                ((rx + rw).round().max(0.0) as usize).min(w),
-                ((ry + rh).round().max(0.0) as usize).min(h),
-            );
-            for yy in y0..y1 {
-                for xx in x0..x1 {
-                    gray[yy * w + xx] = 255;
-                }
-            }
-        }
-        // Pictures: nearest pixel, then an ordered dither so grey shows
-        // as dots on a printer that only prints black.
+        // Pictures: nearest pixel; for a thermal head an ordered dither so
+        // grey shows as dots.
         const BAYER: [[u16; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-        for &(ix, iy, iw, ih, index) in &l.images {
-            let Some(crate::Block::Image {
-                gray: px,
-                w: sw,
-                h: sh,
-                ..
-            }) = doc.blocks.get(index)
-            else {
-                continue;
-            };
-            let (sw, sh) = (*sw as usize, *sh as usize);
-            if sw == 0 || sh == 0 || px.len() < sw * sh {
+        for im in &l.images {
+            let (sw, sh) = (im.src_w as usize, im.src_h as usize);
+            if sw == 0 || sh == 0 || im.gray.len() < sw * sh {
                 continue;
             }
-            let (x0, y0) = (ix.round().max(0.0) as usize, iy.round().max(0.0) as usize);
-            let (dw, dh) = (iw.round().max(1.0) as usize, ih.round().max(1.0) as usize);
+            let (x0, y0) = (
+                im.x.round().max(0.0) as usize,
+                im.y.round().max(0.0) as usize,
+            );
+            let (dw, dh) = (
+                im.w.round().max(1.0) as usize,
+                im.h.round().max(1.0) as usize,
+            );
             for dy in 0..dh {
                 let yy = y0 + dy;
                 if yy >= h {
@@ -104,19 +89,55 @@ pub(crate) fn raster(doc: &Doc, dots: u32, margin_dots: f32, scale: f32) -> Vec<
                     if xx >= w {
                         break;
                     }
-                    let sx = (dx * sw / dw).min(sw - 1);
-                    let ink = 255 - u16::from(px[sy * sw + sx]);
-                    let level = (BAYER[yy % 4][xx % 4] * 16) + 8;
-                    if ink > level {
-                        gray[yy * w + xx] = 255;
-                    }
+                    let g = im.gray[sy * sw + (dx * sw / dw).min(sw - 1)];
+                    c[yy * w + xx] = if dither {
+                        let ink = 255 - u16::from(g);
+                        if ink > BAYER[yy % 4][xx % 4] * 16 + 8 {
+                            [0, 0, 0]
+                        } else {
+                            [255, 255, 255]
+                        }
+                    } else {
+                        [g, g, g]
+                    };
                 }
             }
         }
-        (0..h)
-            .map(|y| (0..w).map(|x| gray[y * w + x] >= 110).collect())
-            .collect()
+        let mut cache = SwashCache::new();
+        for (buf, ox, oy, col) in &mut l.buffers {
+            let (ox, oy) = (*ox as i32, *oy as i32);
+            let ink = Color::rgb(col[0], col[1], col[2]);
+            buf.draw(fs, &mut cache, ink, |x, y, cw, ch, color| {
+                let a = u16::from(color.a());
+                if a == 0 {
+                    return;
+                }
+                let src = [color.r(), color.g(), color.b()];
+                for dy in 0..ch as i32 {
+                    for dx in 0..cw as i32 {
+                        let (px, py) = (ox + x + dx, oy + y + dy);
+                        if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
+                            let d = &mut c[py as usize * w + px as usize];
+                            for k in 0..3 {
+                                d[k] = ((u16::from(src[k]) * a + u16::from(d[k]) * (255 - a)) / 255)
+                                    as u8;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        (w, h, c)
     })
+}
+
+/// Draws `doc` on `dots` across at `scale` dots per point, as the printer
+/// prints it: a dot is black where the drawing is dark.
+pub(crate) fn raster(doc: &Doc, dots: u32, margin_dots: f32, scale: f32) -> Vec<Vec<bool>> {
+    let (w, h, c) = paint(doc, dots, margin_dots, scale, true);
+    (0..h)
+        .map(|y| (0..w).map(|x| luma(c[y * w + x]) < 145).collect())
+        .collect()
 }
 
 /// A roll printout of `doc`: raster bands, feed, cut; `drawer` opens the

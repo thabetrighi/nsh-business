@@ -1,15 +1,21 @@
-//! The default documents (M12.8): a sale's receipt for the till (any roll
-//! width) and its invoice on a sheet (A4 or A5), and a product's shelf
-//! label, in the shop's language. What shows is the shop's choice
-//! ([`Options`]). Amounts arrive in minor units and are formatted here;
-//! nothing is computed but what the sale already says (the customer's
-//! running balance included).
+//! The documents' values (M12.8): a sale (receipt or invoice), a customer
+//! receipt, an instalment schedule, a shelf label, a report — formatted in
+//! the shop's language as [`DocData`] for a template to show. Amounts
+//! arrive in minor units and are formatted here; nothing is computed but
+//! what the document already says. The shop's switches ([`Options`]) apply
+//! to every template. The functions named after each document print it
+//! with the built-in template.
 
 use nb_core::{Currency, Money, Quantity};
 use nb_i18n::{Format, Lang, tr, tr_args};
 
+use std::collections::BTreeMap;
+
+use nb_domain::template::{DocKind, ItemField, Section, Template, TotalLine, builtin};
+
 use crate::logo::Gray;
-use crate::{Block, Cell, Doc, Paper, Place};
+use crate::render::{DocData, render};
+use crate::{Doc, Paper};
 
 /// The shop as its documents present it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -77,6 +83,12 @@ pub struct Line {
     /// What the line came to (after its discount).
     pub amount_minor: i64,
     pub discount_minor: i64,
+    /// The product's reference.
+    pub sku: String,
+    /// VAT rate in basis points.
+    pub tax_bps: i64,
+    /// The line before tax.
+    pub net_minor: i64,
 }
 
 /// A sale as its documents show it.
@@ -159,499 +171,327 @@ impl Ctx {
     }
 }
 
-fn logo_block(o: &Options, width: f32) -> Option<Block> {
-    o.logo.as_ref().map(|g| Block::Image {
-        gray: g.px.clone(),
-        w: g.w,
-        h: g.h,
-        // Never blown up past one and a half of its own size.
-        width: width.min(g.w as f32 * 72.0 / 203.0 * 1.5),
-    })
-}
-
-fn header(c: &Ctx, shop: &Shop, o: &Options, big: f32, small: f32, logo_w: f32) -> Vec<Block> {
-    let mut b = Vec::new();
-    if let Some(l) = logo_block(o, logo_w) {
-        b.push(l);
-    }
-    b.push(Block::text(&shop.name, big, true, Place::Center));
-    if !o.tagline.is_empty() {
-        b.push(Block::text(&o.tagline, small, false, Place::Center));
-    }
-    if !shop.address.is_empty() {
-        b.push(Block::text(&shop.address, small, false, Place::Center));
-    }
-    if !shop.phone.is_empty() {
-        // One piece: a phone number never breaks across lines.
-        b.push(Block::text(
-            format!(
-                "{} {}",
-                c.t("print.phone"),
-                nb_i18n::bidi::isolate_ltr(&unbroken(&shop.phone))
-            ),
-            small,
-            false,
-            Place::Center,
-        ));
-    }
-    if o.legal_ids {
-        let ids: Vec<String> = [
-            ("NIF", &shop.nif),
-            ("NIS", &shop.nis),
-            ("RC", &shop.rc),
-            ("AI", &shop.ai),
-        ]
-        .into_iter()
-        .filter(|(_, v)| !v.is_empty())
-        .map(|(k, v)| nb_i18n::bidi::isolate_ltr(&unbroken(&format!("{k}: {v}"))))
-        .collect();
-        if !ids.is_empty() {
-            b.push(Block::text(
-                ids.join(" · "),
-                small - 1.0,
-                false,
-                Place::Center,
-            ));
-        }
-    }
-    b
-}
-
 /// No break inside: spaces become no-break spaces.
 fn unbroken(s: &str) -> String {
     s.replace(' ', "\u{a0}")
 }
 
-/// Date and time as one left-to-right piece.
-fn when(c: &Ctx, s: &Sale) -> String {
-    let (y, m, d, h, mi) = s.when;
-    let plain =
-        nb_i18n::bidi::strip_controls(&format!("{} {}", c.f.date(y, m, d), c.f.time(h, mi)));
-    nb_i18n::bidi::isolate_ltr(&unbroken(&plain))
-}
-
-/// Everything handed over, less the change: what was paid.
-fn paid(s: &Sale) -> i64 {
-    s.payments.iter().map(|p| p.1).sum::<i64>() - s.change_minor
-}
-
-fn totals(c: &Ctx, s: &Sale, o: &Options, size: f32, receipt: bool) -> Vec<Block> {
-    let mut b = Vec::new();
-    if s.discount_minor > 0 {
-        b.push(Block::pair(
-            c.t("print.discount"),
-            c.m(-s.discount_minor),
-            size,
-            false,
-        ));
-    }
-    if !receipt || o.vat {
-        b.push(Block::pair(c.t("print.net"), c.m(s.net_minor), size, false));
-        for (bps, _, tax) in &s.taxes {
-            if *tax != 0 {
-                b.push(Block::pair(
-                    tr_args(c.lang, "print.vat", &[("rate", &c.rate(*bps))]),
-                    c.m(*tax),
-                    size,
-                    false,
-                ));
-            }
-        }
-    }
-    if s.stamp_minor > 0 {
-        b.push(Block::pair(
-            c.t("print.stamp"),
-            c.m(s.stamp_minor),
-            size,
-            false,
-        ));
-    }
-    b.push(Block::pair(
-        c.t("print.total"),
-        c.m(s.total_minor),
-        size + 4.0,
-        true,
-    ));
-    for (method, amount) in &s.payments {
-        b.push(Block::pair(c.method(method), c.m(*amount), size, false));
-    }
-    if s.change_minor > 0 {
-        b.push(Block::pair(
-            c.t("print.change"),
-            c.m(s.change_minor),
-            size,
-            false,
-        ));
-    }
-    match (o.balance, s.balance) {
-        (true, Some((before, after))) => {
-            b.push(Block::Rule);
-            b.push(Block::pair(
-                c.t("print.balance.before"),
-                c.m(before),
-                size,
-                false,
-            ));
-            b.push(Block::pair(
-                c.t("print.balance.this"),
-                c.m(s.total_minor),
-                size,
-                false,
-            ));
-            b.push(Block::pair(
-                c.t("print.balance.sum"),
-                c.m(before + s.total_minor),
-                size,
-                false,
-            ));
-            if s.settled_minor > 0 {
-                b.push(Block::pair(
-                    c.t("print.balance.settled"),
-                    c.m(s.settled_minor),
-                    size,
-                    false,
-                ));
-            }
-            b.push(Block::pair(
-                c.t("print.balance.paid"),
-                c.m(paid(s)),
-                size,
-                false,
-            ));
-            b.push(Block::pair(
-                c.t("print.balance.after"),
-                c.m(after),
-                size,
-                true,
-            ));
-        }
-        _ => {
-            if s.owed_minor > 0 {
-                b.push(Block::pair(
-                    c.t("print.owed"),
-                    c.m(s.owed_minor),
-                    size,
-                    true,
-                ));
-            }
-        }
-    }
-    b
-}
-
-fn count_line(c: &Ctx, s: &Sale, size: f32) -> Block {
-    Block::text(
-        tr_args(
-            c.lang,
-            "print.count",
-            &[(
-                "count",
-                &nb_i18n::bidi::isolate_ltr(&c.n(s.lines.len() as i64)),
-            )],
-        ),
-        size,
-        false,
-        Place::Start,
+fn when_of(c: &Ctx, (y, m, d, h, mi): (i32, u32, u32, u32, u32)) -> (String, String) {
+    let date = nb_i18n::bidi::strip_controls(&c.f.date(y, m, d));
+    let time = nb_i18n::bidi::strip_controls(&c.f.time(h, mi));
+    (
+        nb_i18n::bidi::isolate_ltr(&unbroken(&date)),
+        nb_i18n::bidi::isolate_ltr(&unbroken(&time)),
     )
 }
 
-fn barcode(s: &Sale, width: f32) -> Option<Block> {
-    crate::barcode::code128(&s.number).map(|modules| Block::Bars {
-        modules,
-        width,
-        height: 28.0,
-        caption: Some(s.number.clone()),
-    })
+fn ltr(s: &str) -> String {
+    nb_i18n::bidi::isolate_ltr(&unbroken(s))
 }
 
-fn qty_text(c: &Ctx, l: &Line) -> String {
-    let q = nb_i18n::bidi::isolate_ltr(&c.q(l.qty_milli));
-    if l.unit.is_empty() || l.unit == "pc" || l.unit == "u" {
-        q
-    } else {
-        format!("{q} {}", l.unit)
-    }
+fn legal_ids(shop: &Shop) -> String {
+    [
+        ("NIF", &shop.nif),
+        ("NIS", &shop.nis),
+        ("RC", &shop.rc),
+        ("AI", &shop.ai),
+    ]
+    .into_iter()
+    .filter(|(_, v)| !v.is_empty())
+    .map(|(k, v)| ltr(&format!("{k}: {v}")))
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
-/// A sale's receipt for a thermal roll.
-pub fn receipt(shop: &Shop, sale: &Sale, lang: Lang, paper: Paper, o: &Options) -> Doc {
-    let c = Ctx::new(lang, sale.currency);
-    let narrow = paper.is_narrow();
-    let (big, body, small) = if narrow {
-        (13.0, 9.0, 8.0)
-    } else {
-        (15.0, 10.0, 9.0)
+/// What every document shares: the shop, the switches, the date.
+fn common(
+    c: &Ctx,
+    shop: &Shop,
+    o: &Options,
+    title: String,
+    number: &str,
+    when: (i32, u32, u32, u32, u32),
+    cashier: &str,
+) -> DocData {
+    let (date, time) = when_of(c, when);
+    let mut d = DocData {
+        logo: o.logo.clone(),
+        legal_ids: legal_ids(shop),
+        ..DocData::default()
     };
-    let (pw, _) = paper.sheet();
-    let mut b = header(&c, shop, o, big, small, pw * 0.6);
-    b.push(Block::Rule);
-    b.push(Block::pair(
-        tr_args(lang, "print.receipt_no", &[("number", &sale.number)]),
-        when(&c, sale),
-        small,
-        false,
-    ));
-    if o.cashier {
-        b.push(Block::pair(
-            tr_args(lang, "print.cashier", &[("name", &sale.cashier)]),
-            sale.register.clone(),
-            small,
-            false,
-        ));
-    }
-    if let Some((name, _)) = &sale.customer {
-        b.push(Block::text(
-            tr_args(lang, "print.customer", &[("name", name)]),
-            small,
-            true,
-            Place::Start,
-        ));
-    }
-    if o.table {
-        // Item | quantity | (price) | amount, as on the tills people know.
-        let shares: &[f32] = if narrow {
-            &[0.50, 0.18, 0.32]
-        } else {
-            &[0.40, 0.16, 0.21, 0.23]
-        };
-        let heads: &[&str] = if narrow {
-            &["print.col.item", "print.col.qty", "print.col.amount"]
-        } else {
-            &[
-                "print.col.item",
-                "print.col.qty",
-                "print.col.unit_price",
-                "print.col.amount",
-            ]
-        };
-        b.push(Block::Line);
-        b.push(Block::Row {
-            cells: heads
-                .iter()
-                .zip(shares)
-                .enumerate()
-                .map(|(i, (k, sh))| {
-                    Cell::new(c.t(k), *sh, if i == 0 { Place::Start } else { Place::End })
-                })
-                .collect(),
-            size: small,
-            bold: true,
-        });
-        b.push(Block::Line);
-        for l in &sale.lines {
-            let mut cells = vec![
-                Cell::new(&l.name, shares[0], Place::Start),
-                // The figure alone: a unit would wrap in so narrow a column.
-                Cell::new(
-                    nb_i18n::bidi::isolate_ltr(&c.q(l.qty_milli)),
-                    shares[1],
-                    Place::End,
-                ),
-            ];
-            if !narrow {
-                cells.push(Cell::new(c.a(l.unit_price_minor), shares[2], Place::End));
-            }
-            cells.push(Cell::new(
-                c.a(l.amount_minor),
-                shares[shares.len() - 1],
-                Place::End,
-            ));
-            b.push(Block::Row {
-                cells,
-                size: body,
-                bold: false,
-            });
-            if l.discount_minor > 0 {
-                b.push(Block::pair(
-                    c.t("print.line_discount"),
-                    c.m(-l.discount_minor),
-                    small,
-                    false,
-                ));
-            }
-        }
-        b.push(Block::Line);
-    } else {
-        b.push(Block::Rule);
-        for l in &sale.lines {
-            b.push(Block::text(&l.name, body, false, Place::Start));
-            b.push(Block::pair(
-                format!("{} × {}", qty_text(&c, l), c.m(l.unit_price_minor)),
-                c.m(l.amount_minor),
-                body,
-                false,
-            ));
-            if l.discount_minor > 0 {
-                b.push(Block::pair(
-                    c.t("print.line_discount"),
-                    c.m(-l.discount_minor),
-                    small,
-                    false,
-                ));
-            }
-        }
-        b.push(Block::Rule);
-    }
-    if o.count {
-        b.push(count_line(&c, sale, small));
-    }
-    b.extend(totals(&c, sale, o, body, true));
-    b.push(Block::Rule);
     let footer = if shop.footer.is_empty() {
         c.t("print.thanks")
     } else {
         shop.footer.clone()
     };
-    b.push(Block::text(footer, small, true, Place::Center));
-    if !o.notice.is_empty() {
-        b.push(Block::text(&o.notice, small - 0.5, false, Place::Center));
+    for (k, v) in [
+        ("shop.name", shop.name.clone()),
+        ("shop.tagline", o.tagline.clone()),
+        ("shop.address", shop.address.clone()),
+        ("shop.phone", shop.phone.clone()),
+        ("shop.email", String::new()),
+        ("shop.nif", shop.nif.clone()),
+        ("shop.nis", shop.nis.clone()),
+        ("shop.rc", shop.rc.clone()),
+        ("shop.ai", shop.ai.clone()),
+        ("doc.title", title),
+        ("doc.number", number.to_owned()),
+        ("doc.date", format!("{date} {time}")),
+        ("doc.time", time),
+        ("doc.cashier", cashier.to_owned()),
+        ("notice", o.notice.clone()),
+        ("footer", footer),
+    ] {
+        d.vars.insert(k.into(), v);
     }
-    if o.barcode
-        && let Some(bars) = barcode(sale, pw * 0.8)
-    {
-        b.push(bars);
-    }
-    b.push(Block::Gap(6.0));
-    Doc {
-        paper,
-        rtl: lang == Lang::Ar,
-        blocks: b,
-    }
+    d
 }
 
-/// A row of the totals on a sheet: the label and the amount in the last
-/// columns.
-fn total_row(label: String, value: String, size: f32, bold: bool) -> Block {
-    Block::Row {
-        cells: vec![
-            Cell::new("", 0.52, Place::Start),
-            Cell::new(label, 0.26, Place::Start),
-            Cell::new(value, 0.22, Place::End),
-        ],
-        size,
-        bold,
-    }
-}
-
-/// A sale's invoice on a sheet (A4 or A5): the shop and its logo, the
-/// customer, the lines as a table, the VAT by rate, the totals.
-pub fn invoice(shop: &Shop, sale: &Sale, lang: Lang, paper: Paper, o: &Options) -> Doc {
-    let c = Ctx::new(lang, sale.currency);
-    let a5 = paper == Paper::A5;
-    let (big, body, small) = if a5 {
-        (14.0, 9.0, 8.0)
-    } else {
-        (18.0, 10.0, 9.0)
-    };
-    // Invoices always carry the legal identity.
-    let legal = Options {
-        legal_ids: true,
-        ..o.clone()
-    };
-    let mut b = header(&c, shop, &legal, big, small, if a5 { 90.0 } else { 120.0 });
-    b.push(Block::Line);
-    b.push(Block::Gap(6.0));
-    b.push(Block::pair(
-        tr_args(lang, "print.invoice_no", &[("number", &sale.number)]),
-        tr_args(lang, "print.date", &[("date", &when(&c, sale))]),
-        big - 4.0,
-        true,
+fn details(c: &Ctx, d: &mut DocData, number_key: &str, o: &Options, register: &str) {
+    let number = d.var("doc.number").unwrap_or_default();
+    d.details.push((c.t(number_key), ltr(&number)));
+    d.details.push((
+        c.t("print.label.date"),
+        d.var("doc.date").unwrap_or_default(),
     ));
     if o.cashier {
-        b.push(Block::text(
-            tr_args(lang, "print.cashier", &[("name", &sale.cashier)]),
-            small,
-            false,
-            Place::Start,
+        d.details.push((
+            c.t("print.label.cashier"),
+            d.var("doc.cashier").unwrap_or_default(),
         ));
-    }
-    if let Some((name, ids)) = &sale.customer {
-        b.push(Block::Gap(4.0));
-        b.push(Block::text(
-            tr_args(lang, "print.customer", &[("name", name)]),
-            body,
-            true,
-            Place::Start,
-        ));
-        if !ids.is_empty() {
-            b.push(Block::text(ids.clone(), small, false, Place::Start));
+        if !register.is_empty() {
+            d.details
+                .push((c.t("print.label.register"), register.to_owned()));
         }
     }
-    b.push(Block::Gap(8.0));
-    let shares = [0.06, 0.40, 0.14, 0.18, 0.22];
-    let head = |key: &str, i: usize, place: Place| Cell::new(c.t(key), shares[i], place);
-    b.push(Block::Line);
-    b.push(Block::Row {
-        cells: vec![
-            Cell::new("#", shares[0], Place::Start),
-            head("print.col.item", 1, Place::Start),
-            head("print.col.qty", 2, Place::End),
-            head("print.col.price", 3, Place::End),
-            head("print.col.amount", 4, Place::End),
-        ],
-        size: small,
-        bold: true,
+}
+
+fn customer_lines(d: &mut DocData, name: &str, ids: &str) {
+    d.customer.push(name.to_owned());
+    if !ids.is_empty() {
+        d.customer.push(ltr(ids));
+    }
+    d.vars.insert("customer.name".into(), name.to_owned());
+    d.vars.insert("customer.ids".into(), ids.to_owned());
+    d.vars.insert("customer.phone".into(), String::new());
+}
+
+/// A sale's values (a receipt or an invoice).
+pub fn sale_data(shop: &Shop, s: &Sale, lang: Lang, o: &Options, kind: DocKind) -> DocData {
+    let c = Ctx::new(lang, s.currency);
+    let title = c.t(if kind == DocKind::Invoice {
+        "print.title.invoice"
+    } else {
+        "print.title.receipt"
     });
-    b.push(Block::Line);
-    for (i, l) in sale.lines.iter().enumerate() {
-        b.push(Block::Row {
-            cells: vec![
-                Cell::new(
-                    nb_i18n::bidi::isolate_ltr(&c.n(i as i64 + 1)),
-                    shares[0],
-                    Place::Start,
-                ),
-                Cell::new(&l.name, shares[1], Place::Start),
-                Cell::new(qty_text(&c, l), shares[2], Place::End),
-                Cell::new(c.a(l.unit_price_minor), shares[3], Place::End),
-                Cell::new(c.a(l.amount_minor), shares[4], Place::End),
-            ],
-            size: body,
-            bold: false,
-        });
+    let mut d = common(&c, shop, o, title, &s.number, s.when, &s.cashier);
+    details(
+        &c,
+        &mut d,
+        if kind == DocKind::Invoice {
+            "print.label.invoice_no"
+        } else {
+            "print.label.receipt_no"
+        },
+        o,
+        &s.register,
+    );
+    if let Some((name, ids)) = &s.customer {
+        customer_lines(&mut d, name, ids);
     }
-    b.push(Block::Line);
+    d.vars.insert("doc.register".into(), s.register.clone());
+    for (i, l) in s.lines.iter().enumerate() {
+        let q = ltr(&c.q(l.qty_milli));
+        let unit = if l.unit == "pc" || l.unit == "u" {
+            String::new()
+        } else {
+            l.unit.clone()
+        };
+        let mut r = BTreeMap::new();
+        r.insert(ItemField::Index, ltr(&c.n(i as i64 + 1)));
+        r.insert(ItemField::Name, l.name.clone());
+        r.insert(ItemField::Sku, ltr(&l.sku));
+        r.insert(ItemField::Qty, q.clone());
+        r.insert(ItemField::Unit, unit.clone());
+        r.insert(
+            ItemField::QtyUnit,
+            if unit.is_empty() {
+                q
+            } else {
+                format!("{q} {unit}")
+            },
+        );
+        r.insert(ItemField::Price, c.a(l.unit_price_minor));
+        r.insert(
+            ItemField::Discount,
+            if l.discount_minor > 0 {
+                c.a(-l.discount_minor)
+            } else {
+                String::new()
+            },
+        );
+        r.insert(
+            ItemField::TaxRate,
+            if l.tax_bps > 0 {
+                c.rate(l.tax_bps)
+            } else {
+                String::new()
+            },
+        );
+        r.insert(ItemField::Net, c.a(l.net_minor));
+        r.insert(ItemField::Amount, c.a(l.amount_minor));
+        d.rows.push(r);
+    }
     if o.count {
-        b.push(count_line(&c, sale, small));
+        d.vars.insert(
+            "items.count".into(),
+            tr_args(
+                lang,
+                "print.count",
+                &[("count", &ltr(&c.n(s.lines.len() as i64)))],
+            ),
+        );
     }
-    // The totals in the last columns, as a column of figures.
-    for blk in totals(&c, sale, o, body, false) {
-        match blk {
-            Block::Pair {
-                start,
-                end,
-                size,
-                bold,
-            } => b.push(total_row(start, end, size, bold)),
-            other => b.push(other),
+    let mut t = |k: TotalLine, label: String, value: String, strong: bool| {
+        d.totals.push((k, label, value, strong));
+    };
+    if s.discount_minor > 0 {
+        t(
+            TotalLine::Discount,
+            c.t("print.discount"),
+            c.m(-s.discount_minor),
+            false,
+        );
+    }
+    // VAT always on invoices; on receipts as the shop chose.
+    if kind == DocKind::Invoice || o.vat {
+        t(TotalLine::Net, c.t("print.net"), c.m(s.net_minor), false);
+        for (bps, _, tax) in &s.taxes {
+            if *tax != 0 {
+                t(
+                    TotalLine::Vat,
+                    tr_args(lang, "print.vat", &[("rate", &c.rate(*bps))]),
+                    c.m(*tax),
+                    false,
+                );
+            }
         }
     }
-    b.push(Block::Gap(12.0));
-    b.push(Block::text(
-        tr_args(
-            lang,
-            "print.total_words",
-            &[("amount", &c.m(sale.total_minor))],
-        ),
-        small,
-        false,
-        Place::Start,
-    ));
-    if !o.notice.is_empty() {
-        b.push(Block::Gap(6.0));
-        b.push(Block::text(&o.notice, small, false, Place::Start));
+    if s.stamp_minor > 0 {
+        t(
+            TotalLine::Stamp,
+            c.t("print.stamp"),
+            c.m(s.stamp_minor),
+            false,
+        );
     }
-    if o.barcode
-        && let Some(bars) = barcode(sale, 160.0)
-    {
-        b.push(Block::Gap(8.0));
-        b.push(bars);
+    t(
+        TotalLine::Total,
+        c.t("print.total"),
+        c.m(s.total_minor),
+        true,
+    );
+    for (m, a) in &s.payments {
+        t(TotalLine::Payments, c.method(m), c.m(*a), false);
     }
-    Doc {
+    if s.change_minor > 0 {
+        t(
+            TotalLine::Change,
+            c.t("print.change"),
+            c.m(s.change_minor),
+            false,
+        );
+    }
+    let paid = s.payments.iter().map(|p| p.1).sum::<i64>() - s.change_minor;
+    let with_balance = o.balance && s.balance.is_some();
+    if s.owed_minor > 0 && !with_balance {
+        t(TotalLine::Owed, c.t("print.owed"), c.m(s.owed_minor), true);
+    }
+    if let (true, Some((before, after))) = (o.balance, s.balance) {
+        let mut b = vec![
+            (c.t("print.balance.before"), c.m(before), false),
+            (c.t("print.balance.this"), c.m(s.total_minor), false),
+            (c.t("print.balance.sum"), c.m(before + s.total_minor), false),
+        ];
+        if s.settled_minor > 0 {
+            b.push((c.t("print.balance.settled"), c.m(s.settled_minor), false));
+        }
+        b.push((c.t("print.balance.paid"), c.m(paid), false));
+        b.push((c.t("print.balance.after"), c.m(after), true));
+        d.balance = b;
+        d.vars.insert("balance.before".into(), c.m(before));
+        d.vars.insert("balance.after".into(), c.m(after));
+    }
+    for (k, v) in [
+        ("total", c.m(s.total_minor)),
+        ("paid", c.m(paid)),
+        ("change", c.m(s.change_minor)),
+        ("owed", c.m(s.owed_minor)),
+    ] {
+        d.vars.insert(k.into(), v);
+    }
+    d
+}
+
+/// The shop's switches over a template: what the shop turned off stays
+/// off, whatever the template says.
+pub fn apply(t: &Template, o: &Options) -> Template {
+    let mut t = t.clone();
+    t.sections.retain(|s| match s {
+        Section::Balance => o.balance,
+        Section::Barcode { value } => o.barcode || !value.contains("{doc.number}"),
+        _ => true,
+    });
+    for s in &mut t.sections {
+        if let Section::Header { legal_ids } = s
+            && !o.legal_ids
+            && t.kind == DocKind::Receipt
+        {
+            *legal_ids = false;
+        }
+    }
+    if !o.table && t.kind == DocKind::Receipt {
+        for s in &mut t.sections {
+            if let Section::Items { columns } = s {
+                columns.retain(|c| {
+                    matches!(
+                        c.field,
+                        ItemField::Name | ItemField::Qty | ItemField::QtyUnit | ItemField::Amount
+                    )
+                });
+            }
+        }
+    }
+    if o.logo.is_none() {
+        t.style.logo = false;
+    }
+    t
+}
+
+fn first(kind: DocKind) -> Template {
+    builtin(kind).remove(0).1
+}
+
+/// A sale's receipt for a thermal roll, with the built-in template.
+pub fn receipt(shop: &Shop, sale: &Sale, lang: Lang, paper: Paper, o: &Options) -> Doc {
+    let t = apply(&first(DocKind::Receipt), o);
+    render(
+        &t,
+        &sale_data(shop, sale, lang, o, DocKind::Receipt),
+        lang,
         paper,
-        rtl: lang == Lang::Ar,
-        blocks: b,
-    }
+    )
+}
+
+/// A sale's invoice on a sheet (A4 or A5), with the built-in template.
+pub fn invoice(shop: &Shop, sale: &Sale, lang: Lang, paper: Paper, o: &Options) -> Doc {
+    let t = apply(&first(DocKind::Invoice), o);
+    render(
+        &t,
+        &sale_data(shop, sale, lang, o, DocKind::Invoice),
+        lang,
+        paper,
+    )
 }
 
 /// A product's shelf label: name, price (and per unit), its barcode.
@@ -662,40 +502,41 @@ pub struct ShelfLabel {
     /// The unit the price is for (`kg`, `L`…); empty for a piece.
     pub unit: String,
     pub currency: Currency,
-    /// The barcode's modules (EAN-13 or Code 128) and its digits.
-    pub bars: Option<(Vec<bool>, String)>,
+    /// The barcode's digits (EAN-13 or any text for Code 128).
+    pub barcode: Option<String>,
+    pub sku: String,
 }
 
-/// A shelf or product label on `paper` (a label size).
-pub fn shelf_label(l: &ShelfLabel, lang: Lang, paper: Paper, shop: Option<&str>) -> Doc {
+/// A label's values.
+pub fn label_data(l: &ShelfLabel, lang: Lang, shop: Option<&str>) -> DocData {
     let c = Ctx::new(lang, l.currency);
-    let (w, h) = paper.sheet();
-    // Type follows the label's size: a 40 × 30 mm label takes ~11 pt.
-    let base = (h / 8.0).clamp(7.0, 16.0);
-    let mut b = Vec::new();
-    if let Some(s) = shop {
-        b.push(Block::text(s, base * 0.7, false, Place::Center));
-    }
-    b.push(Block::text(&l.name, base, true, Place::Center));
     let price = if l.unit.is_empty() || l.unit == "pc" || l.unit == "u" {
         c.m(l.price_minor)
     } else {
         format!("{} / {}", c.m(l.price_minor), l.unit)
     };
-    b.push(Block::text(price, base * 1.3, true, Place::Center));
-    if let Some((modules, digits)) = &l.bars {
-        b.push(Block::Bars {
-            modules: modules.clone(),
-            width: w * 0.85,
-            height: (h * 0.28).max(12.0),
-            caption: Some(digits.clone()),
-        });
+    let mut d = DocData::default();
+    for (k, v) in [
+        ("shop.name", shop.unwrap_or_default().to_owned()),
+        ("item.name", l.name.clone()),
+        ("item.price", price),
+        ("item.unit", l.unit.clone()),
+        ("item.barcode", l.barcode.clone().unwrap_or_default()),
+        ("item.sku", l.sku.clone()),
+    ] {
+        d.vars.insert(k.into(), v);
     }
-    Doc {
+    d
+}
+
+/// A shelf or product label on `paper`, with the built-in template.
+pub fn shelf_label(l: &ShelfLabel, lang: Lang, paper: Paper, shop: Option<&str>) -> Doc {
+    render(
+        &first(DocKind::Label),
+        &label_data(l, lang, shop),
+        lang,
         paper,
-        rtl: lang == Lang::Ar,
-        blocks: b,
-    }
+    )
 }
 
 /// A customer receipt (سند القبض / bon de versement).
@@ -718,158 +559,64 @@ pub struct Voucher {
     pub unallocated_minor: i64,
 }
 
-fn when_of(c: &Ctx, (y, m, d, h, mi): (i32, u32, u32, u32, u32)) -> String {
-    let plain =
-        nb_i18n::bidi::strip_controls(&format!("{} {}", c.f.date(y, m, d), c.f.time(h, mi)));
-    nb_i18n::bidi::isolate_ltr(&unbroken(&plain))
-}
-
-/// A receipt voucher, on a roll or a sheet: who paid, how much, how, and
-/// what it paid.
-pub fn voucher(shop: &Shop, v: &Voucher, lang: Lang, paper: Paper, o: &Options) -> Doc {
+/// A voucher's values.
+pub fn voucher_data(shop: &Shop, v: &Voucher, lang: Lang, o: &Options) -> DocData {
     let c = Ctx::new(lang, v.currency);
-    let sheet = !paper.is_thermal();
-    let (big, body, small) = if sheet {
-        (18.0, 11.0, 9.0)
-    } else if paper.is_narrow() {
-        (13.0, 9.0, 8.0)
-    } else {
-        (15.0, 10.0, 9.0)
-    };
-    let (pw, _) = paper.sheet();
-    let mut b = header(
+    let mut d = common(
         &c,
         shop,
         o,
-        big,
-        small,
-        if sheet { 120.0 } else { pw * 0.6 },
-    );
-    b.push(Block::Line);
-    b.push(Block::text(
         c.t("print.voucher.title"),
-        big - 2.0,
-        true,
-        Place::Center,
-    ));
-    b.push(Block::pair(
-        tr_args(lang, "print.voucher_no", &[("number", &v.number)]),
-        when_of(&c, v.when),
-        small,
-        false,
-    ));
-    if o.cashier && !v.cashier.is_empty() {
-        b.push(Block::text(
-            tr_args(lang, "print.cashier", &[("name", &v.cashier)]),
-            small,
-            false,
-            Place::Start,
-        ));
+        &v.number,
+        v.when,
+        &v.cashier,
+    );
+    details(&c, &mut d, "print.label.voucher_no", o, "");
+    customer_lines(&mut d, &v.customer.0, &v.customer.1);
+    for (k, val) in [
+        ("amount", c.m(v.amount_minor)),
+        ("method", c.method(&v.method)),
+        ("reference", v.reference.clone()),
+        ("note", v.note.clone()),
+    ] {
+        d.vars.insert(k.into(), val);
     }
-    b.push(Block::Rule);
-    b.push(Block::text(
-        tr_args(lang, "print.voucher.from", &[("name", &v.customer.0)]),
-        body,
-        true,
-        Place::Start,
-    ));
-    if !v.customer.1.is_empty() {
-        b.push(Block::text(
-            v.customer.1.clone(),
-            small,
-            false,
-            Place::Start,
-        ));
+    let mut row = |name: String, amount: i64| {
+        let mut r = BTreeMap::new();
+        r.insert(ItemField::Index, ltr(&c.n(d.rows.len() as i64 + 1)));
+        r.insert(ItemField::Name, name);
+        r.insert(ItemField::Amount, c.a(amount));
+        d.rows.push(r);
+    };
+    for (n, a) in &v.invoices {
+        row(ltr(n), *a);
     }
-    b.push(Block::Gap(4.0));
-    // The amount on its own line, large: it is what the voucher is for.
-    b.push(Block::text(
-        c.t("print.voucher.amount"),
-        small,
-        false,
-        Place::Center,
-    ));
-    b.push(Block::text(
-        c.m(v.amount_minor),
-        body + 6.0,
-        true,
-        Place::Center,
-    ));
-    b.push(Block::pair(
-        c.t("print.voucher.method"),
-        c.method(&v.method),
-        body,
-        false,
-    ));
-    if !v.reference.is_empty() {
-        b.push(Block::pair(
-            c.t("print.voucher.reference"),
-            v.reference.clone(),
-            small,
-            false,
-        ));
-    }
-    if !v.invoices.is_empty() || !v.installments.is_empty() {
-        b.push(Block::Rule);
-        b.push(Block::text(
-            c.t("print.voucher.for"),
-            small,
-            true,
-            Place::Start,
-        ));
-        for (n, a) in &v.invoices {
-            b.push(Block::pair(n.clone(), c.m(*a), small, false));
-        }
-        for (plan, seq, a) in &v.installments {
-            b.push(Block::pair(
-                tr_args(
-                    lang,
-                    "print.voucher.installment",
-                    &[
-                        ("plan", &nb_i18n::bidi::isolate_ltr(plan)),
-                        ("seq", &nb_i18n::bidi::isolate_ltr(&c.n(i64::from(*seq)))),
-                    ],
-                ),
-                c.m(*a),
-                small,
-                false,
-            ));
-        }
+    for (plan, seq, a) in &v.installments {
+        row(
+            tr_args(
+                lang,
+                "print.voucher.installment",
+                &[("plan", &ltr(plan)), ("seq", &ltr(&c.n(i64::from(*seq))))],
+            ),
+            *a,
+        );
     }
     if v.unallocated_minor > 0 {
-        b.push(Block::pair(
-            c.t("print.voucher.advance"),
-            c.m(v.unallocated_minor),
-            small,
-            false,
-        ));
+        row(c.t("print.voucher.advance"), v.unallocated_minor);
     }
-    if !v.note.is_empty() {
-        b.push(Block::text(v.note.clone(), small, false, Place::Start));
-    }
-    b.push(Block::Gap(if sheet { 36.0 } else { 18.0 }));
-    b.push(Block::pair(
-        c.t("print.voucher.sign_customer"),
-        c.t("print.voucher.sign_shop"),
-        small,
-        false,
+    d.totals.push((
+        TotalLine::Total,
+        c.t("print.voucher.amount"),
+        c.m(v.amount_minor),
+        true,
     ));
-    b.push(Block::Gap(if sheet { 48.0 } else { 24.0 }));
-    if o.barcode
-        && let Some(modules) = crate::barcode::code128(&v.number)
-    {
-        b.push(Block::Bars {
-            modules,
-            width: if sheet { 160.0 } else { pw * 0.8 },
-            height: 24.0,
-            caption: Some(v.number.clone()),
-        });
-    }
-    Doc {
-        paper,
-        rtl: lang == Lang::Ar,
-        blocks: b,
-    }
+    d
+}
+
+/// A receipt voucher, with the built-in template.
+pub fn voucher(shop: &Shop, v: &Voucher, lang: Lang, paper: Paper, o: &Options) -> Doc {
+    let t = apply(&first(DocKind::Voucher), o);
+    render(&t, &voucher_data(shop, v, lang, o), lang, paper)
 }
 
 /// An instalment of a schedule.
@@ -898,177 +645,106 @@ pub struct Schedule {
     pub dues: Vec<Due>,
 }
 
-/// An instalment schedule on a sheet (or a roll): the plan, every
-/// instalment with what is paid, the signatures.
-pub fn schedule(shop: &Shop, s: &Schedule, lang: Lang, paper: Paper, o: &Options) -> Doc {
+/// A schedule's values.
+pub fn schedule_data(shop: &Shop, s: &Schedule, lang: Lang, o: &Options) -> DocData {
     let c = Ctx::new(lang, s.currency);
-    let sheet = !paper.is_thermal();
-    let (big, body, small) = if sheet {
-        (18.0, 10.0, 9.0)
-    } else {
-        (14.0, 9.0, 8.0)
-    };
-    let (pw, _) = paper.sheet();
-    let legal = Options {
-        legal_ids: true,
-        ..o.clone()
-    };
-    let mut b = header(
+    let mut d = common(
         &c,
         shop,
-        &legal,
-        big,
-        small,
-        if sheet { 120.0 } else { pw * 0.6 },
-    );
-    b.push(Block::Line);
-    b.push(Block::text(
+        o,
         c.t("print.schedule.title"),
-        big - 2.0,
-        true,
-        Place::Center,
+        &s.number,
+        s.when,
+        "",
+    );
+    let paid: i64 = s.dues.iter().map(|x| x.paid_minor).sum();
+    d.details
+        .push((c.t("print.label.schedule_no"), ltr(&s.number)));
+    d.details
+        .push((c.t("print.label.version"), ltr(&c.n(i64::from(s.version)))));
+    d.details.push((
+        c.t("print.label.date"),
+        d.var("doc.date").unwrap_or_default(),
     ));
-    b.push(Block::pair(
-        tr_args(
-            lang,
-            "print.schedule_no",
-            &[
-                ("number", &nb_i18n::bidi::isolate_ltr(&s.number)),
-                (
-                    "version",
-                    &nb_i18n::bidi::isolate_ltr(&c.n(i64::from(s.version))),
-                ),
-            ],
-        ),
-        when_of(&c, s.when),
-        small,
-        false,
-    ));
-    b.push(Block::text(
-        tr_args(lang, "print.customer", &[("name", &s.customer.0)]),
-        body,
-        true,
-        Place::Start,
-    ));
-    if !s.customer.1.is_empty() {
-        b.push(Block::text(
-            s.customer.1.clone(),
-            small,
-            false,
-            Place::Start,
-        ));
+    d.details
+        .push((c.t("print.label.sale"), ltr(&s.sale_number)));
+    customer_lines(&mut d, &s.customer.0, &s.customer.1);
+    for (k, v) in [
+        ("doc.version", c.n(i64::from(s.version))),
+        ("sale.number", s.sale_number.clone()),
+        ("sale.total", c.m(s.total_minor)),
+        ("down", c.m(s.down_minor)),
+        ("financed", c.m(s.financed_minor)),
+        ("paid", c.m(paid)),
+        ("left", c.m((s.financed_minor - paid).max(0))),
+    ] {
+        d.vars.insert(k.into(), v);
     }
-    b.push(Block::Gap(4.0));
-    b.push(Block::pair(
-        tr_args(lang, "print.schedule.sale", &[("number", &s.sale_number)]),
-        c.m(s.total_minor),
-        small,
-        false,
-    ));
-    if s.down_minor > 0 {
-        b.push(Block::pair(
-            c.t("print.schedule.down"),
-            c.m(s.down_minor),
-            small,
-            false,
-        ));
+    for x in &s.dues {
+        let (y, m, dd) = x.date;
+        let mut r = BTreeMap::new();
+        r.insert(ItemField::Index, ltr(&c.n(i64::from(x.seq))));
+        r.insert(ItemField::Due, ltr(&c.f.date(y, m, dd)));
+        r.insert(ItemField::Amount, c.a(x.amount_minor));
+        r.insert(ItemField::Paid, c.a(x.paid_minor));
+        r.insert(ItemField::State, c.t(&format!("plans.state.{}", x.state)));
+        d.rows.push(r);
     }
-    b.push(Block::pair(
-        c.t("print.schedule.financed"),
-        c.m(s.financed_minor),
-        body,
-        true,
-    ));
-    b.push(Block::Gap(6.0));
-    let shares: &[f32] = if sheet {
-        &[0.08, 0.27, 0.22, 0.22, 0.21]
-    } else {
-        &[0.10, 0.30, 0.30, 0.30]
+    let mut t = |label: String, value: String, strong: bool| {
+        d.totals.push((TotalLine::Total, label, value, strong))
     };
-    let mut heads = vec![
-        Cell::new("#", shares[0], Place::Start),
-        Cell::new(c.t("print.schedule.due"), shares[1], Place::Start),
-        Cell::new(c.t("print.col.amount"), shares[2], Place::End),
-        Cell::new(c.t("print.schedule.paid"), shares[3], Place::End),
-    ];
-    if sheet {
-        heads.push(Cell::new(
-            c.t("print.schedule.state"),
-            shares[4],
-            Place::End,
-        ));
+    t(c.t("print.schedule.sale_total"), c.m(s.total_minor), false);
+    if s.down_minor > 0 {
+        t(c.t("print.schedule.down"), c.m(s.down_minor), false);
     }
-    b.push(Block::Line);
-    b.push(Block::Row {
-        cells: heads,
-        size: small,
-        bold: true,
-    });
-    b.push(Block::Line);
-    for d in &s.dues {
-        let (y, m, dd) = d.date;
-        let mut cells = vec![
-            Cell::new(
-                nb_i18n::bidi::isolate_ltr(&c.n(i64::from(d.seq))),
-                shares[0],
-                Place::Start,
-            ),
-            Cell::new(
-                nb_i18n::bidi::isolate_ltr(&c.f.date(y, m, dd)),
-                shares[1],
-                Place::Start,
-            ),
-            Cell::new(c.a(d.amount_minor), shares[2], Place::End),
-            Cell::new(c.a(d.paid_minor), shares[3], Place::End),
-        ];
-        if sheet {
-            cells.push(Cell::new(
-                c.t(&format!("plans.state.{}", d.state)),
-                shares[4],
-                Place::End,
-            ));
-        }
-        b.push(Block::Row {
-            cells,
-            size: body,
-            bold: false,
-        });
-    }
-    b.push(Block::Line);
-    let paid: i64 = s.dues.iter().map(|d| d.paid_minor).sum();
-    b.push(Block::pair(
-        c.t("print.schedule.paid_total"),
-        c.m(paid),
-        body,
-        false,
-    ));
-    b.push(Block::pair(
+    t(c.t("print.schedule.financed"), c.m(s.financed_minor), false);
+    t(c.t("print.schedule.paid_total"), c.m(paid), false);
+    t(
         c.t("print.schedule.left"),
         c.m((s.financed_minor - paid).max(0)),
-        body + 2.0,
         true,
-    ));
-    if !o.notice.is_empty() {
-        b.push(Block::Gap(6.0));
-        b.push(Block::text(&o.notice, small, false, Place::Start));
-    }
-    b.push(Block::Gap(if sheet { 36.0 } else { 18.0 }));
-    b.push(Block::pair(
-        c.t("print.voucher.sign_customer"),
-        c.t("print.voucher.sign_shop"),
-        small,
-        false,
-    ));
-    b.push(Block::Gap(24.0));
-    Doc {
-        paper,
-        rtl: lang == Lang::Ar,
-        blocks: b,
-    }
+    );
+    d
 }
 
-/// A report's table on sheets (M13.5): the title, what it covers, the
-/// header row, then every row: names at the start, figures at the end.
+/// An instalment schedule, with the built-in template.
+pub fn schedule(shop: &Shop, s: &Schedule, lang: Lang, paper: Paper, o: &Options) -> Doc {
+    let t = apply(&first(DocKind::Schedule), o);
+    render(&t, &schedule_data(shop, s, lang, o), lang, paper)
+}
+
+/// A report's values: its title, what it covers, its rows (header first).
+pub fn report_data(
+    shop: &Shop,
+    title: &str,
+    period: &str,
+    rows: &[Vec<String>],
+    o: &Options,
+) -> DocData {
+    let mut d = DocData {
+        logo: o.logo.clone(),
+        legal_ids: legal_ids(shop),
+        ..DocData::default()
+    };
+    for (k, v) in [
+        ("shop.name", shop.name.clone()),
+        ("shop.tagline", o.tagline.clone()),
+        ("shop.address", shop.address.clone()),
+        ("shop.phone", shop.phone.clone()),
+        ("report.title", title.to_owned()),
+        ("report.period", period.to_owned()),
+        ("report.rows", rows.len().saturating_sub(1).to_string()),
+        ("doc.title", title.to_owned()),
+    ] {
+        d.vars.insert(k.into(), v);
+    }
+    if let Some((h, r)) = rows.split_first() {
+        d.table = Some((h.clone(), r.to_vec()));
+    }
+    d
+}
+
+/// A report's table on sheets (M13.5), with the built-in template.
 pub fn report_table(
     shop: &str,
     title: &str,
@@ -1077,63 +753,15 @@ pub fn report_table(
     lang: Lang,
     paper: Paper,
 ) -> Doc {
-    let mut b = vec![
-        Block::text(shop, 9.0, false, Place::Start),
-        Block::text(title, 16.0, true, Place::Start),
-    ];
-    if !subtitle.is_empty() {
-        b.push(Block::text(subtitle, 9.0, false, Place::Start));
-    }
-    b.push(Block::Gap(8.0));
-    let Some((heads, body)) = rows.split_first() else {
-        return Doc {
-            paper,
-            rtl: lang == Lang::Ar,
-            blocks: b,
-        };
+    let s = Shop {
+        name: shop.to_owned(),
+        ..Shop::default()
     };
-    let n = heads.len().max(1);
-    // The first column (a name) takes more room than figures.
-    let first = if n == 1 {
-        1.0
-    } else {
-        (0.34_f32).max(1.0 / n as f32)
-    };
-    let rest = if n == 1 {
-        0.0
-    } else {
-        (1.0 - first) / (n - 1) as f32
-    };
-    let share = |i: usize| if i == 0 { first } else { rest };
-    let size = if n > 6 { 7.5 } else { 8.5 };
-    b.push(Block::Line);
-    b.push(Block::Row {
-        cells: heads
-            .iter()
-            .enumerate()
-            .map(|(i, h)| Cell::new(h, share(i), if i == 0 { Place::Start } else { Place::End }))
-            .collect(),
-        size,
-        bold: true,
-    });
-    b.push(Block::Line);
-    for row in body {
-        b.push(Block::Row {
-            cells: row
-                .iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    Cell::new(v, share(i), if i == 0 { Place::Start } else { Place::End })
-                })
-                .collect(),
-            size,
-            bold: false,
-        });
-    }
-    b.push(Block::Line);
-    Doc {
+    let o = Options::default();
+    render(
+        &first(DocKind::Report),
+        &report_data(&s, title, subtitle, rows, &o),
+        lang,
         paper,
-        rtl: lang == Lang::Ar,
-        blocks: b,
-    }
+    )
 }

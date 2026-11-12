@@ -609,6 +609,9 @@ fn sample_doc(st: AppState, d: &DocSettings) -> nb_docs::Doc {
         unit_price_minor: price,
         amount_minor: price * qty / 1000,
         discount_minor: 0,
+        sku: String::new(),
+        tax_bps: 0,
+        net_minor: price * qty / 1000,
     };
     let sale = Sale {
         number: "FV-01-26-A000123".into(),

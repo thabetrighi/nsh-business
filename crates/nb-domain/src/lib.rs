@@ -19,6 +19,7 @@ pub mod purchase;
 pub mod sale;
 pub mod stock;
 pub mod tax;
+pub mod template;
 pub mod units;
 pub mod valuation;
 

@@ -26,6 +26,9 @@ fn sale(lines: usize) -> Sale {
         unit_price_minor: 18_000,
         amount_minor: 22_500,
         discount_minor: 0,
+        sku: format!("SKU-{i}"),
+        tax_bps: 1_900,
+        net_minor: 18_908,
     };
     let n = lines as i64;
     Sale {
@@ -225,7 +228,8 @@ fn a_shelf_label_prints_as_tspl() -> Result<(), nb_docs::DocError> {
         price_minor: 65_000,
         unit: "kg".into(),
         currency: Currency::DZD,
-        bars: nb_docs::barcode::code128("2000122").map(|m| (m, "2000122".into())),
+        barcode: Some("2000122".into()),
+        sku: String::new(),
     };
     let doc = shelf_label(&l, Lang::Ar, paper, Some("ساسي"));
     let bytes = nb_docs::label::tspl(&doc, 3, 2)?;
