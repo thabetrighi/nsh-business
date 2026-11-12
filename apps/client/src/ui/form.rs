@@ -260,3 +260,37 @@ pub fn labelled(
     }
     v
 }
+
+/// A group of a form's fields under a heading with its icon (identity,
+/// contact, credit…): long forms read as a few short ones.
+pub fn section(
+    icon_of: super::icon::Icon,
+    title: impl Fn() -> String + 'static,
+    body: View,
+) -> View {
+    view()
+        .gap(px(12.0))
+        .p(px(16.0))
+        .rounded(px(radius::lg()))
+        .border_1()
+        .border_color(Tone::Border.color())
+        .bg(Tone::Surface.color())
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    view()
+                        .w(px(26.0))
+                        .h(px(26.0))
+                        .rounded(px(radius::md()))
+                        .items_center()
+                        .justify_center()
+                        .bg(Tone::PrimarySoft.color())
+                        .child(super::icon::icon(icon_of, 14.0, || Tone::Primary)),
+                )
+                .child(label(title, ty::SM, FontWeight::BOLD, Tone::Ink)),
+        )
+        .child(body.gap(px(12.0)))
+}

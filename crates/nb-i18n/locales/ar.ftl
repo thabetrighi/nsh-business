@@ -2174,3 +2174,9 @@ purchases.col.supplier = المورد
 purchases.col.ref = مرجع المورد
 purchases.col.open = الباقي للدفع
 purchases.file = المشتريات
+
+## Form sections
+form.section.identity = الهوية
+form.section.contact = الاتصال والعنوان
+form.section.legal = المعرّفات القانونية
+form.section.terms = المعرّفات وشروط الدفع

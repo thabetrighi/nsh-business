@@ -2174,3 +2174,9 @@ purchases.col.supplier = Supplier
 purchases.col.ref = Supplier ref.
 purchases.col.open = Left to pay
 purchases.file = purchases
+
+## Form sections
+form.section.identity = Identity
+form.section.contact = Contact and address
+form.section.legal = Legal identifiers
+form.section.terms = Identifiers and terms

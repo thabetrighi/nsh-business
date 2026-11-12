@@ -2174,3 +2174,9 @@ purchases.col.supplier = Fournisseur
 purchases.col.ref = Réf. fournisseur
 purchases.col.open = Reste à payer
 purchases.file = achats
+
+## Form sections
+form.section.identity = Identité
+form.section.contact = Contact et adresse
+form.section.legal = Identifiants légaux
+form.section.terms = Identifiants et conditions

@@ -564,9 +564,8 @@ fn customer_dialog(
         ],
         company,
     );
-    let legal = when(
-        move || company.get(),
-        move || {
+    let legal_fields = move || {
+        {
             view()
                 .gap(px(12.0))
                 .child(two(
@@ -605,9 +604,8 @@ fn customer_dialog(
                         "customer-ai",
                     ),
                 ))
-                .into_element()
-        },
-    );
+        }
+    };
     let group_choice = labelled(
         st.t("customers.group"),
         dropdown(
@@ -629,113 +627,133 @@ fn customer_dialog(
         ),
         None,
     );
-    let body = view()
-        .gap(px(14.0))
-        .child(kind_choice)
-        .child(field(
+    use crate::ui::form::section;
+    let identity = section(
+        Icon::User,
+        st.t("form.section.identity"),
+        view().child(kind_choice).child(field(
             st.t("customers.name"),
             name,
             String::new,
             String::new,
             KeyboardType::Default,
             "customer-name",
-        ))
-        .child(two(
-            field(
-                st.t("customers.phone"),
-                phone,
-                String::new,
-                String::new,
-                KeyboardType::Phone,
-                "customer-phone",
-            ),
-            field(
-                st.t("customers.email"),
-                email,
-                String::new,
-                String::new,
-                KeyboardType::Email,
-                "customer-email",
-            ),
-        ))
-        .child(two(
-            field(
-                st.t("customers.city"),
-                city,
+        )),
+    );
+    let contact = section(
+        Icon::MapPin,
+        st.t("form.section.contact"),
+        view()
+            .child(two(
+                field(
+                    st.t("customers.phone"),
+                    phone,
+                    String::new,
+                    String::new,
+                    KeyboardType::Phone,
+                    "customer-phone",
+                ),
+                field(
+                    st.t("customers.email"),
+                    email,
+                    String::new,
+                    String::new,
+                    KeyboardType::Email,
+                    "customer-email",
+                ),
+            ))
+            .child(two(
+                field(
+                    st.t("customers.city"),
+                    city,
+                    String::new,
+                    String::new,
+                    KeyboardType::Default,
+                    "customer-city",
+                ),
+                group_choice,
+            ))
+            .child(field(
+                st.t("customers.address"),
+                address,
                 String::new,
                 String::new,
                 KeyboardType::Default,
-                "customer-city",
-            ),
-            group_choice,
-        ))
-        .child(field(
-            st.t("customers.address"),
-            address,
-            String::new,
-            String::new,
-            KeyboardType::Default,
-            "customer-address",
-        ))
-        .child(legal)
-        .child(
-            view()
-                .gap(px(12.0))
-                .pt(px(12.0))
-                .border_t_1()
-                .border_color(Tone::Border.color())
-                .child(label_line(
-                    st.t("customers.credit_section"),
-                    ty::SM,
-                    FontWeight::SEMIBOLD,
-                    Tone::Ink,
-                ))
-                .child(two(
-                    field(
-                        st.t("customers.limit"),
-                        limit,
-                        || "0,00".to_owned(),
-                        String::new,
-                        KeyboardType::Decimal,
-                        "customer-limit",
-                    ),
-                    field(
-                        st.t("customers.days"),
-                        days,
-                        || "0".to_owned(),
-                        String::new,
-                        KeyboardType::Number,
-                        "customer-days",
-                    ),
-                ))
-                .child(label(
-                    st.t("customers.limit.help"),
-                    ty::XS,
-                    FontWeight::NORMAL,
-                    Tone::Muted,
-                ))
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(10.0))
-                        .child(switch(blocked, st.t("customers.block")).test_id("customer-block"))
-                        .child(label_line(
-                            st.t("customers.block"),
-                            ty::SM,
-                            FontWeight::MEDIUM,
-                            Tone::Body,
-                        )),
+                "customer-address",
+            )),
+    );
+    let legal = when(
+        move || company.get(),
+        move || {
+            section(
+                Icon::Landmark,
+                st.t("form.section.legal"),
+                view().child(legal_fields()),
+            )
+            .into_element()
+        },
+    );
+    let credit = section(
+        Icon::Wallet,
+        st.t("customers.credit_section"),
+        view()
+            .child(two(
+                field(
+                    st.t("customers.limit"),
+                    limit,
+                    || "0,00".to_owned(),
+                    String::new,
+                    KeyboardType::Decimal,
+                    "customer-limit",
                 ),
-        )
-        .child(field(
-            st.t("customers.note"),
+                field(
+                    st.t("customers.days"),
+                    days,
+                    || "0".to_owned(),
+                    String::new,
+                    KeyboardType::Number,
+                    "customer-days",
+                ),
+            ))
+            .child(label(
+                st.t("customers.limit.help"),
+                ty::XS,
+                FontWeight::NORMAL,
+                Tone::Muted,
+            ))
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(switch(blocked, st.t("customers.block")).test_id("customer-block"))
+                    .child(label_line(
+                        st.t("customers.block"),
+                        ty::SM,
+                        FontWeight::MEDIUM,
+                        Tone::Body,
+                    )),
+            ),
+    );
+    let notes = section(
+        Icon::NotebookPen,
+        st.t("customers.note"),
+        view().child(field(
+            String::new,
             note,
             String::new,
             String::new,
             KeyboardType::Default,
             "customer-note",
-        ))
+        )),
+    );
+    let body = view()
+        .gap(px(14.0))
+        .child(identity)
+        .child(contact)
+        .child(legal)
+        .child(credit)
+        .child(notes)
         .child(error_line(error));
     let footer = view()
         .child(button(

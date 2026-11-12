@@ -454,58 +454,72 @@ fn supplier_dialog(
     let f = |caption: &'static str, sig: Signal<String>, kb: KeyboardType, id: &'static str| {
         field(st.t(caption), sig, String::new, String::new, kb, id)
     };
+    use crate::ui::form::section;
     let body = view()
         .gap(px(14.0))
-        .child(segmented(
-            vec![
-                (false, Box::new(st.t("customers.kind.person"))),
-                (true, Box::new(st.t("customers.kind.company"))),
-            ],
-            company,
+        .child(section(
+            Icon::Truck,
+            st.t("form.section.identity"),
+            view()
+                .child(segmented(
+                    vec![
+                        (false, Box::new(st.t("customers.kind.person"))),
+                        (true, Box::new(st.t("customers.kind.company"))),
+                    ],
+                    company,
+                ))
+                .child(f(
+                    "customers.name",
+                    name,
+                    KeyboardType::Default,
+                    "supplier-name",
+                )),
         ))
-        .child(f(
-            "customers.name",
-            name,
-            KeyboardType::Default,
-            "supplier-name",
+        .child(section(
+            Icon::MapPin,
+            st.t("form.section.contact"),
+            view()
+                .child(two(
+                    f(
+                        "customers.phone",
+                        phone,
+                        KeyboardType::Phone,
+                        "supplier-phone",
+                    ),
+                    f(
+                        "customers.email",
+                        email,
+                        KeyboardType::Email,
+                        "supplier-email",
+                    ),
+                ))
+                .child(f(
+                    "customers.city",
+                    city,
+                    KeyboardType::Default,
+                    "supplier-city",
+                ))
+                .child(f(
+                    "customers.address",
+                    address,
+                    KeyboardType::Default,
+                    "supplier-address",
+                )),
         ))
-        .child(two(
-            f(
-                "customers.phone",
-                phone,
-                KeyboardType::Phone,
-                "supplier-phone",
-            ),
-            f(
-                "customers.email",
-                email,
-                KeyboardType::Email,
-                "supplier-email",
-            ),
-        ))
-        .child(two(
-            f(
-                "customers.city",
-                city,
-                KeyboardType::Default,
-                "supplier-city",
-            ),
-            f(
-                "customers.days",
-                days,
-                KeyboardType::Number,
-                "supplier-days",
-            ),
-        ))
-        .child(f(
-            "customers.address",
-            address,
-            KeyboardType::Default,
-            "supplier-address",
-        ))
-        .child(two(
-            f("customers.nif", nif, KeyboardType::Number, "supplier-nif"),
-            f("customers.rc", rc, KeyboardType::Default, "supplier-rc"),
+        .child(section(
+            Icon::Landmark,
+            st.t("form.section.terms"),
+            view()
+                .child(two(
+                    f("customers.nif", nif, KeyboardType::Number, "supplier-nif"),
+                    f("customers.rc", rc, KeyboardType::Default, "supplier-rc"),
+                ))
+                .child(f(
+                    "customers.days",
+                    days,
+                    KeyboardType::Number,
+                    "supplier-days",
+                )),
         ))
         .child(error_line(error));
     let footer = view()
