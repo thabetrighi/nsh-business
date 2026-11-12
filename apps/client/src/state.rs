@@ -25,6 +25,10 @@ pub enum Intent {
     AddProduct,
     /// Invoice this approved quote or order at the till (its id).
     Invoice(String),
+    /// Reopen this sale at the till to correct it (its number).
+    Reopen(String),
+    /// The products of this category (its id).
+    ProductsIn(String),
 }
 
 /// Light, dark, or as the system.

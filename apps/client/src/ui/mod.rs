@@ -5,6 +5,7 @@ pub mod form;
 pub mod icon;
 pub mod kit;
 pub mod media;
+pub mod menu;
 pub mod overlay;
 pub mod popup;
 pub mod surface;

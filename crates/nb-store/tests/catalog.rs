@@ -294,3 +294,46 @@ fn ten_thousand_products_search_quickly() -> R {
     assert!(took.as_millis() < 1_500, "search took {took:?}");
     Ok(())
 }
+
+/// Several products move to a category at once (the list's bulk action).
+#[test]
+fn products_move_to_a_category_together() -> R {
+    use nb_store::usecases::catalog::{CategoryInput, save_category};
+    use nb_store::usecases::products::set_products_category;
+    let (mut s, setup) = store();
+    let a = create_product(&mut s, meta(&setup, "p"), product("Lait", "", 100))?;
+    let b = create_product(&mut s, meta(&setup, "p"), product("Yaourt", "", 50))?;
+    let dairy = save_category(
+        &mut s,
+        meta(&setup, "c"),
+        CategoryInput {
+            id: None,
+            name: "Laitiers".into(),
+            parent_id: None,
+        },
+    )?;
+    let ids = [a.product_id()?, b.product_id()?];
+    assert_eq!(
+        set_products_category(&mut s, meta(&setup, "m"), &ids, Some(&dairy.id))?,
+        2
+    );
+    let page = list_products(
+        &s,
+        &ProductQuery {
+            category_id: Some(dairy.id.clone()),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(page.rows.len(), 2);
+    // Out of any category again; an unknown category is refused.
+    set_products_category(&mut s, meta(&setup, "m"), &ids, None)?;
+    assert!(set_products_category(&mut s, meta(&setup, "m"), &ids, Some("nope")).is_err());
+    assert_eq!(
+        count(
+            &s,
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'set_category'"
+        ),
+        4
+    );
+    Ok(())
+}

@@ -117,6 +117,7 @@ pub fn table(
     id_of: impl Fn(usize) -> Option<u64> + Clone + 'static,
     cell: impl Fn(Position, &'static str) -> AnyElement + 'static,
     test_id: &'static str,
+    menu: Option<Rc<dyn Fn(usize) -> Vec<super::menu::Act>>>,
 ) -> View {
     let columns = Rc::new(columns);
     let row_h = sp(48.0);
@@ -240,6 +241,15 @@ pub fn table(
         }
         for c in cols.iter() {
             row = row.child(cell_frame(c).child(cell(at, c.key)));
+        }
+        // A right click: what may be done to the row (copying included).
+        if let Some(m) = menu.clone() {
+            row = row.on_context_menu(move |e: &ContextMenuEvent| {
+                drop(nsh_core::element::desktop::popup_menu_at(
+                    super::menu::menu_items(m(at.index())),
+                    e.page_position,
+                ))
+            });
         }
         row
     })

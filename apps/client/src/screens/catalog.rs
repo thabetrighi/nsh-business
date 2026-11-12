@@ -128,6 +128,14 @@ fn category_row(
                 Action::new(Icon::Plus, st.tn("categories.add_sub"), move || {
                     start(None, Some(sub.clone()))
                 }),
+                Action::new(Icon::Package, st.tn("categories.products_of"), {
+                    let id = del.clone();
+                    move || {
+                        st.intent
+                            .set(Some(crate::state::Intent::ProductsIn(id.clone())));
+                        st.route.set(Route::Products);
+                    }
+                }),
                 Action::new(Icon::Trash, st.tn("categories.archive"), move || {
                     let Some(session) = st.session.get_untracked() else {
                         return;
@@ -152,7 +160,32 @@ fn category_row(
         },
         st.t("action.row_actions"),
     );
-    view()
+    let (e2, s2, id2, n2) = (
+        row.clone(),
+        row.id.clone(),
+        row.id.clone(),
+        row.name.clone(),
+    );
+    let acts = move || {
+        use crate::ui::menu::Act;
+        let (e, s, id) = (e2.clone(), s2.clone(), id2.clone());
+        vec![
+            Act::new(st.tn("categories.edit"), move || {
+                start(Some(e.clone()), None)
+            }),
+            Act::new(st.tn("categories.add_sub"), move || {
+                start(None, Some(s.clone()))
+            }),
+            Act::new(st.tn("categories.products_of"), move || {
+                st.intent
+                    .set(Some(crate::state::Intent::ProductsIn(id.clone())));
+                st.route.set(Route::Products);
+            }),
+            Act::Line,
+            Act::copy(st.tn("action.copy_name"), n2.clone()),
+        ]
+    };
+    crate::ui::menu::with_menu(view(), acts)
         .test_id(&format!("category-{i}"))
         .flex_row()
         .items_center()

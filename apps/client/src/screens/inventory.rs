@@ -319,6 +319,27 @@ pub fn stock_page(st: AppState, compact: bool) -> View {
             move |i| Some(i as u64),
             cell,
             "stock-table",
+            Some(std::rc::Rc::new(move |i: usize| {
+                use crate::ui::menu::{Act, tsv};
+                let Some(r) = rows.with_untracked(|v| v.get(i).cloned()) else {
+                    return Vec::new();
+                };
+                vec![
+                    Act::copy(st.tn("action.copy_name"), r.name.clone()),
+                    Act::copy(st.tn("action.copy_sku"), r.sku.clone()),
+                    Act::copy(
+                        st.tn("action.copy_row"),
+                        tsv(&[vec![
+                            r.sku.clone(),
+                            r.name.clone(),
+                            r.category.clone().unwrap_or_default(),
+                            qty_text(st, r.on_hand_milli, &r.unit),
+                            qty_text(st, r.available_milli, &r.unit),
+                            money(st, r.value_minor),
+                        ]]),
+                    ),
+                ]
+            })),
         )
         .into_element()
     });

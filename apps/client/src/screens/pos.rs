@@ -444,6 +444,17 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
     // the page (the effect runs again when it clears the request, which
     // would end a task of its own).
     let page_owner = Owner::current();
+    // A sale sent from the sales list to be corrected at the till.
+    effect(move || {
+        let Some(crate::state::Intent::Reopen(number)) = st.intent.get() else {
+            return;
+        };
+        if !matches!(state.get(), Some((_, Some(_)))) {
+            return;
+        }
+        st.intent.set(None);
+        page_owner.run(|| reopen(st, t, number));
+    });
     effect(move || {
         let Some(crate::state::Intent::Invoice(id)) = st.intent.get() else {
             return;

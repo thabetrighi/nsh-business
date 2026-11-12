@@ -112,7 +112,7 @@ fn span_picker(
 }
 
 /// Saves `rows` as a CSV file the person chooses.
-fn export(st: AppState, name: String, rows: Vec<Vec<String>>) {
+pub(crate) fn export(st: AppState, name: String, rows: Vec<Vec<String>>) {
     let text = to_csv(&rows);
     let task = spawn(async move {
         let dialog = nsh_core::file_dialog::SaveDialog::new()
@@ -132,11 +132,11 @@ fn export(st: AppState, name: String, rows: Vec<Vec<String>>) {
 
 /// What a report exports: the file's name (no extension), its title and
 /// what it covers, and its rows (the header first).
-type Export = (String, String, String, Vec<Vec<String>>);
+pub(crate) type Export = (String, String, String, Vec<Vec<String>>);
 
 /// Saves the report as a PDF table the person names.
 #[cfg(not(target_arch = "wasm32"))]
-fn export_pdf(st: AppState, (name, title, subtitle, rows): Export) {
+pub(crate) fn export_pdf(st: AppState, (name, title, subtitle, rows): Export) {
     let lang = st.lang();
     let task = spawn(async move {
         let (shop, docs, t) = st
@@ -195,7 +195,7 @@ fn export_pdf(st: AppState, (name, title, subtitle, rows): Export) {
 }
 
 /// CSV and PDF buttons for a report.
-fn export_buttons(
+pub(crate) fn export_buttons(
     st: AppState,
     ids: (&'static str, &'static str),
     make: impl Fn() -> Option<Export> + Clone + 'static,

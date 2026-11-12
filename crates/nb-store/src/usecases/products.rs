@@ -6,6 +6,7 @@ use nb_domain::product::{ProductDraft, ProductKind, ValidProduct};
 use nb_domain::stock::MovementKind;
 use nb_domain::units::{ProductUnit, UnitSet};
 use nb_domain::{ProductId, RuleError, WarehouseId};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::repo::catalog::{self, ProductPage, ProductQuery, ProductRow};
@@ -541,6 +542,47 @@ pub fn archive_products(store: &mut Store, meta: OpMeta, ids: &[ProductId]) -> R
                 &id.to_string(),
                 &serde_json::json!({}),
             )?;
+        }
+        Ok(u32::try_from(ids.len()).unwrap_or(u32::MAX))
+    })
+}
+
+/// Moves products to a category (`None`: out of any), several at once.
+pub fn set_products_category(
+    store: &mut Store,
+    meta: OpMeta,
+    ids: &[ProductId],
+    category_id: Option<&str>,
+) -> Result<u32> {
+    store.write(meta, |w| {
+        w.require(Permission::ProductsEdit, &Target::org())?;
+        let org = w.org()?.to_string();
+        if let Some(c) = category_id {
+            let known: Option<i64> = w
+                .tx()
+                .query_row(
+                    "SELECT 1 FROM categories WHERE id = ?1 AND org_id = ?2 AND deleted_at IS NULL",
+                    rusqlite::params![c, org],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if known.is_none() {
+                return Err(Error::NotFound("category"));
+            }
+        }
+        for id in ids {
+            let n = w.tx().execute(
+                "UPDATE products SET category_id = ?1, updated_at = ?2, version = version + 1
+                 WHERE id = ?3 AND org_id = ?4 AND deleted_at IS NULL",
+                rusqlite::params![category_id, w.now(), id.to_string(), org],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound("product"));
+            }
+            catalog::reindex(w.tx(), *id)?;
+            let what = serde_json::json!({ "category": category_id });
+            w.event("product.updated", "product", &id.to_string(), &what)?;
+            w.audit("set_category", "product", &id.to_string(), &what)?;
         }
         Ok(u32::try_from(ids.len()).unwrap_or(u32::MAX))
     })

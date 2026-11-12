@@ -336,7 +336,31 @@ fn customer_row(
             )),
     );
     let id = c.id.clone();
-    view()
+    let acts = {
+        let c = c.clone();
+        move || {
+            use crate::ui::menu::{Act, tsv};
+            let mut v = vec![Act::copy(st.tn("action.copy_name"), c.name.clone())];
+            if !c.phone.is_empty() {
+                v.push(Act::copy(st.tn("action.copy_phone"), c.phone.clone()));
+            }
+            if !c.nif.is_empty() {
+                v.push(Act::copy(st.tn("action.copy_nif"), c.nif.clone()));
+            }
+            v.push(Act::copy(
+                st.tn("action.copy_row"),
+                tsv(&[vec![
+                    c.code.clone(),
+                    c.name.clone(),
+                    c.phone.clone(),
+                    c.city.clone(),
+                    c.nif.clone(),
+                ]]),
+            ));
+            v
+        }
+    };
+    crate::ui::menu::with_menu(view(), acts)
         .test_id(&format!("customer-{i}"))
         .flex_row()
         .items_center()

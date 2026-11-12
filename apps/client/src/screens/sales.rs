@@ -29,6 +29,7 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{
     Size, Variant, badge, button, figure, icon_button, label, label_line, segmented,
 };
+use crate::ui::menu::{Act, more_button, tsv, with_menu};
 use crate::ui::overlay::{dialog_frame, modal, show_toast};
 use crate::ui::popup::dropdown;
 use crate::ui::surface::{card, empty_state};
@@ -145,6 +146,9 @@ pub fn sales_page(st: AppState, compact: bool) -> View {
     // The sale whose print dialog is open.
     let printing: Signal<Option<String>> = signal(None);
     let printing_open = signal(false);
+    // The sale whose details show.
+    let viewing: Signal<Option<String>> = signal(None);
+    let viewing_open = signal(false);
     let paging = Paging::new(25);
     effect(move || {
         text.with(|_| ());
@@ -260,12 +264,55 @@ pub fn sales_page(st: AppState, compact: bool) -> View {
                     .test_id(&format!("sale-print-{i}")),
                 );
             }
-            v = v.child(list_row(
-                format!("sale-{i}"),
-                r.number,
-                detail,
-                Icon::Receipt,
-                tail,
+            // What may be done to it: the "⋯" and a right click.
+            let acts = {
+                let r = r.clone();
+                let detail = detail.clone();
+                move || {
+                    let (n1, n2, n3) = (r.number.clone(), r.number.clone(), r.number.clone());
+                    let corrected = r.edited_into.is_some();
+                    vec![
+                        Act::new(st.tn("sales.act.details"), move || {
+                            viewing.set(Some(n1.clone()));
+                            viewing_open.set(true);
+                        }),
+                        Act::new(st.tn("action.print"), move || {
+                            printing.set(Some(n2.clone()));
+                            printing_open.set(true);
+                        }),
+                        Act::new(st.tn("sales.act.correct"), move || {
+                            st.intent.set(Some(Intent::Reopen(n3.clone())));
+                            st.route.set(Route::Sell);
+                        })
+                        .when(st.can("sales.sell") && !corrected),
+                        Act::Line,
+                        Act::copy(st.tn("sales.act.copy_number"), r.number.clone()),
+                        Act::copy(
+                            st.tn("sales.act.copy_total"),
+                            Money::from_minor(r.total_minor, currency(st)).to_plain_string(),
+                        ),
+                        Act::copy(
+                            st.tn("action.copy_row"),
+                            tsv(&[vec![
+                                r.number.clone(),
+                                detail.clone(),
+                                Money::from_minor(r.total_minor, currency(st)).to_plain_string(),
+                            ]]),
+                        ),
+                    ]
+                }
+            };
+            tail = tail.child(more_button(st, acts.clone(), &format!("sale-more-{i}")));
+            let number = r.number.clone();
+            v = v.child(with_menu(
+                list_row(format!("sale-{i}"), r.number, detail, Icon::Receipt, tail)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(Tone::Subtle.color()))
+                    .on_press(move || {
+                        viewing.set(Some(number.clone()));
+                        viewing_open.set(true);
+                    }),
+                acts,
             ));
         }
         v.into_element()
@@ -281,16 +328,69 @@ pub fn sales_page(st: AppState, compact: bool) -> View {
         .child(summary_bar(st, "sales.count", count, sum))
         .child(list)
         .child(pager(st, paging, move || page_data.get().total, compact));
-    let actions = view().child(
-        button(
-            Variant::Primary,
-            Size::Md,
-            Some(Icon::Cart),
-            st.t("sales.to_till"),
-            move || st.route.set(Route::Sell),
+    // The sales found, all of them (not only the page), as a file.
+    let export_rows = move || {
+        let q = SalesQuery {
+            search: text.get_untracked(),
+            limit: 100_000,
+            offset: 0,
+        };
+        let task = spawn(async move {
+            let Ok(p) = st.db().call(move |s| list_sales(s, &q)).await else {
+                return;
+            };
+            let c = currency(st);
+            let mut rows = vec![vec![
+                st.tn("sales.col.number"),
+                st.tn("sales.col.date"),
+                st.tn("sales.col.customer"),
+                st.tn("sales.col.lines"),
+                st.tn("sales.col.methods"),
+                st.tn("sales.col.total"),
+                st.tn("sales.col.on_account"),
+            ]];
+            for r in p.rows {
+                rows.push(vec![
+                    r.number,
+                    date_time(st, r.created_at),
+                    r.customer_name.unwrap_or_default(),
+                    r.lines.to_string(),
+                    r.methods
+                        .iter()
+                        .map(|m| method_text(st, m))
+                        .collect::<Vec<_>>()
+                        .join(" + "),
+                    Money::from_minor(r.total_minor, c).to_plain_string(),
+                    Money::from_minor(r.credit_minor, c).to_plain_string(),
+                ]);
+            }
+            crate::screens::reports::export(st, format!("{}.csv", st.tn("sales.file")), rows);
+        });
+        drop(task); // runs to completion: tasks end with their owner, not their handle
+    };
+    let actions = view()
+        .flex_row()
+        .gap(px(8.0))
+        .child(
+            button(
+                Variant::Secondary,
+                Size::Md,
+                Some(Icon::Download),
+                st.t("reports.export"),
+                export_rows,
+            )
+            .test_id("sales-export"),
         )
-        .test_id("sales-till"),
-    );
+        .child(
+            button(
+                Variant::Primary,
+                Size::Md,
+                Some(Icon::Cart),
+                st.t("sales.to_till"),
+                move || st.route.set(Route::Sell),
+            )
+            .test_id("sales-till"),
+        );
     let dialog = modal(printing_open, compact, move || {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(number) = printing.get_untracked() {
@@ -311,6 +411,217 @@ pub fn sales_page(st: AppState, compact: bool) -> View {
             compact,
         ))
         .child(dialog)
+        .child(modal(viewing_open, compact, move || {
+            match viewing.get_untracked() {
+                Some(n) => sale_detail(st, n, printing, printing_open, move || {
+                    viewing_open.set(false)
+                })
+                .into_element(),
+                None => view().into_element(),
+            }
+        }))
+}
+
+/// A sale as it was recorded: its lines, figures and payments, with what
+/// may be done to it.
+fn sale_detail(
+    st: AppState,
+    number: String,
+    printing: Signal<Option<String>>,
+    printing_open: Signal<bool>,
+    close: impl Fn() + Clone + 'static,
+) -> View {
+    let n = number.clone();
+    let data = resource(
+        move || Some(n.clone()),
+        move |n, _| async move {
+            st.db()
+                .call(move |s| nb_store::usecases::printing::print_sale(s, &n))
+                .await
+                .map_err(|e| first_error(st, &e))
+        },
+    );
+    let body = dynamic(move || {
+        let Some(s) = data.get() else {
+            return label(
+                st.t("print.preparing"),
+                ty::SM,
+                FontWeight::NORMAL,
+                Tone::Muted,
+            )
+            .into_element();
+        };
+        let c = currency(st);
+        let m = move |v: i64| Money::from_minor(v, c);
+        let pair = |k: String, v: String, strong: bool| {
+            view()
+                .flex_row()
+                .items_center()
+                .child(view().flex_1().child(label_line(
+                    move || k.clone(),
+                    ty::SM,
+                    FontWeight::NORMAL,
+                    Tone::Muted,
+                )))
+                .child(figure(
+                    move || v.clone(),
+                    ty::SM,
+                    if strong {
+                        FontWeight::BOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    },
+                    || Tone::Ink,
+                ))
+        };
+        let mut head = view().gap(px(6.0)).child(pair(
+            st.tn("sales.col.date"),
+            date_time(st, s.created_at),
+            false,
+        ));
+        head = head.child(pair(st.tn("print.label.cashier"), s.cashier.clone(), false));
+        if !s.register.is_empty() {
+            head = head.child(pair(
+                st.tn("print.label.register"),
+                s.register.clone(),
+                false,
+            ));
+        }
+        if let Some((name, _)) = &s.customer {
+            head = head.child(pair(st.tn("sales.col.customer"), name.clone(), false));
+        }
+        let mut lines = view()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(Tone::Border.color());
+        for (i, l) in s.lines.iter().enumerate() {
+            let (name, q, amount) = (
+                l.name.clone(),
+                format!(
+                    "{} {} × {}",
+                    st.fmt().quantity(Quantity::from_milli(l.qty_milli), 3),
+                    l.unit,
+                    money(st, l.unit_price_minor)
+                ),
+                l.amount_minor,
+            );
+            lines = lines.child(
+                view()
+                    .test_id(&format!("sale-line-{i}"))
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .border_b_1()
+                    .border_color(Tone::Border.color())
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(label_line(
+                                move || name.clone(),
+                                ty::SM,
+                                FontWeight::SEMIBOLD,
+                                Tone::Ink,
+                            ))
+                            .child(label_line(
+                                move || q.clone(),
+                                ty::XS,
+                                FontWeight::NORMAL,
+                                Tone::Muted,
+                            )),
+                    )
+                    .child(figure(
+                        move || money(st, amount),
+                        ty::SM,
+                        FontWeight::BOLD,
+                        || Tone::Ink,
+                    )),
+            );
+        }
+        let mut sums = view().gap(px(6.0));
+        if s.discount_minor > 0 {
+            sums = sums.child(pair(
+                st.tn("print.discount"),
+                m(-s.discount_minor).to_plain_string(),
+                false,
+            ));
+        }
+        sums = sums
+            .child(pair(st.tn("print.net"), money(st, s.net_minor), false))
+            .child(pair(
+                st.tn("pos.tax"),
+                money(st, s.total_minor - s.net_minor - s.stamp_minor),
+                false,
+            ))
+            .child(pair(st.tn("print.total"), money(st, s.total_minor), true));
+        for (method, amount) in &s.payments {
+            sums = sums.child(pair(method_text(st, method), money(st, *amount), false));
+        }
+        if s.change_minor > 0 {
+            sums = sums.child(pair(
+                st.tn("print.change"),
+                money(st, s.change_minor),
+                false,
+            ));
+        }
+        if s.owed_minor > 0 {
+            sums = sums.child(pair(st.tn("print.owed"), money(st, s.owed_minor), true));
+        }
+        view()
+            .gap(px(16.0))
+            .child(head)
+            .child(lines)
+            .child(sums)
+            .into_element()
+    });
+    let (n1, n2) = (number.clone(), number.clone());
+    let footer = view()
+        .child(
+            button(
+                Variant::Secondary,
+                Size::Md,
+                Some(Icon::Pencil),
+                st.t("sales.act.correct"),
+                {
+                    let close = close.clone();
+                    move || {
+                        close();
+                        st.intent.set(Some(Intent::Reopen(n1.clone())));
+                        st.route.set(Route::Sell);
+                    }
+                },
+            )
+            .test_id("sale-correct"),
+        )
+        .child(view().flex_1())
+        .child(
+            button(
+                Variant::Primary,
+                Size::Md,
+                Some(Icon::Printer),
+                st.t("action.print"),
+                {
+                    let close = close.clone();
+                    move || {
+                        close();
+                        printing.set(Some(n2.clone()));
+                        printing_open.set(true);
+                    }
+                },
+            )
+            .test_id("sale-detail-print"),
+        );
+    let title = number.clone();
+    dialog_frame(
+        st,
+        move || title.clone(),
+        st.t("sales.detail.help"),
+        view().child(body),
+        footer,
+        close,
+    )
 }
 
 // ----------------------------------------------------------------- returns

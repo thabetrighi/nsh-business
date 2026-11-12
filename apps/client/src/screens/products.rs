@@ -98,6 +98,172 @@ fn sort_of(s: Option<Sort>) -> (ProductSort, bool) {
     }
 }
 
+/// A product as a row of text (to copy or export).
+fn product_cells(st: AppState, p: &ProductRow) -> Vec<String> {
+    vec![
+        p.sku.clone(),
+        p.name.clone(),
+        p.category.clone().unwrap_or_default(),
+        p.barcodes.first().cloned().unwrap_or_default(),
+        st.fmt().quantity(Quantity::from_milli(p.on_hand_milli), 3),
+        Money::from_minor(
+            p.price_minor,
+            st.session
+                .get_untracked()
+                .map_or(Currency::DZD, |s| s.currency),
+        )
+        .to_plain_string(),
+    ]
+}
+
+/// The selected products, a header first.
+fn chosen_rows(
+    st: AppState,
+    rows: Memo<Vec<ProductRow>>,
+    selection: Selection,
+) -> Vec<Vec<String>> {
+    let chosen = selection.ids.get_untracked();
+    let mut out = vec![vec![
+        st.tn("products.col.sku"),
+        st.tn("products.col.name"),
+        st.tn("products.col.category"),
+        st.tn("products.col.barcode"),
+        st.tn("products.col.stock"),
+        st.tn("products.col.price"),
+    ]];
+    rows.with_untracked(|v| {
+        for p in v.iter().filter(|p| chosen.contains(&id_of(p))) {
+            out.push(product_cells(st, p));
+        }
+    });
+    out
+}
+
+/// Moves the selected products to a category.
+fn move_dialog(
+    st: AppState,
+    cats: Memo<Vec<Category>>,
+    rows: Memo<Vec<ProductRow>>,
+    selection: Selection,
+    close: impl Fn() + Clone + 'static,
+) -> View {
+    // usize::MAX: out of any category.
+    let chosen = signal(usize::MAX);
+    let busy = signal(false);
+    let apply = {
+        let close = close.clone();
+        move || {
+            if busy.get_untracked() {
+                return;
+            }
+            let Some(meta) = st
+                .session
+                .get_untracked()
+                .map(|s| s.meta("product.category"))
+            else {
+                return;
+            };
+            let cat = cats.with_untracked(|c| c.get(chosen.get_untracked()).map(|c| c.id.clone()));
+            let marked = selection.ids.get_untracked();
+            let ids: Vec<ProductId> = rows.with_untracked(|v| {
+                v.iter()
+                    .filter(|p| marked.contains(&id_of(p)))
+                    .filter_map(|p| p.product_id().ok())
+                    .collect()
+            });
+            busy.set(true);
+            let close = close.clone();
+            let task = spawn(async move {
+                let r = st
+                    .db()
+                    .call(move |s| {
+                        nb_store::usecases::products::set_products_category(
+                            s,
+                            meta,
+                            &ids,
+                            cat.as_deref(),
+                        )
+                    })
+                    .await;
+                busy.set(false);
+                match r {
+                    Ok(n) => {
+                        selection.clear();
+                        st.changed();
+                        show_toast(
+                            st,
+                            nb_i18n::tr_args(
+                                st.lang(),
+                                "products.moved",
+                                &[("count", &st.fmt().integer(i64::from(n)))],
+                            ),
+                        );
+                        close();
+                    }
+                    Err(e) => show_toast(
+                        st,
+                        super::forms::error_text(st, e.codes.first().map_or("internal", |c| c.1)),
+                    ),
+                }
+            });
+            drop(task); // runs to completion: tasks end with their owner, not their handle
+        }
+    };
+    let body = view().gap(px(12.0)).child(crate::ui::form::labelled(
+        st.t("products.col.category"),
+        dropdown(
+            move || {
+                let mut v = vec![(usize::MAX, st.tn("products.no_category"))];
+                cats.with(|c| {
+                    for (i, c) in c.iter().enumerate() {
+                        v.push((i, c.name.clone()));
+                    }
+                });
+                v
+            },
+            chosen,
+            Some(Icon::Tag),
+            st.t("products.col.category"),
+            "move-category",
+        )
+        .w_full(),
+        None,
+    ));
+    let footer = view()
+        .child(button(
+            Variant::Secondary,
+            Size::Md,
+            None,
+            st.t("form.cancel"),
+            close.clone(),
+        ))
+        .child(
+            button(
+                Variant::Primary,
+                Size::Md,
+                Some(Icon::Check),
+                st.t("pos.apply"),
+                apply,
+            )
+            .test_id("move-apply"),
+        );
+    let n = selection.count();
+    crate::ui::overlay::dialog_frame(
+        st,
+        st.t("action.change_category"),
+        move || {
+            nb_i18n::tr_args(
+                st.lang(),
+                "products.move.help",
+                &[("count", &st.fmt().integer(n as i64))],
+            )
+        },
+        body,
+        footer,
+        close,
+    )
+}
+
 /// Archives `ids`, then reloads the lists and confirms.
 fn archive(st: AppState, ids: Vec<ProductId>) {
     let Some(session) = st.session.get_untracked() else {
@@ -133,6 +299,8 @@ pub fn products(st: AppState, compact: bool) -> View {
     // The product whose label is being printed.
     let labeling: Signal<Option<ProductRow>> = signal(None);
     let labeling_open = signal(false);
+    // The selected products being moved to a category.
+    let moving_open = signal(false);
     let editor: Signal<Option<Target>> =
         signal((std::env::var("NB_OPEN").as_deref() == Ok("add_product")).then_some(Target::New));
     // Opened from the command palette's "Add a product".
@@ -176,6 +344,17 @@ pub fn products(st: AppState, compact: bool) -> View {
         },
     );
     let cat_list = computed(move || cats.get().unwrap_or_default());
+    // Sent from the categories: their products.
+    effect(move || {
+        let Some(Intent::ProductsIn(id)) = st.intent.get() else {
+            return;
+        };
+        let Some(at) = cat_list.with(|c: &Vec<Category>| c.iter().position(|c| c.id == id)) else {
+            return;
+        };
+        st.intent.set(None);
+        category.set(at);
+    });
     let page = resource(
         move || {
             st.session.get()?;
@@ -485,27 +664,45 @@ pub fn products(st: AppState, compact: bool) -> View {
                 Tone::Primary,
             ))
             .child(view().w(px(8.0)))
-            .child(button(
-                Variant::Secondary,
-                Size::Sm,
-                Some(Icon::Printer),
-                st.t("action.print_labels"),
-                || {},
-            ))
-            .child(button(
-                Variant::Secondary,
-                Size::Sm,
-                Some(Icon::Tag),
-                st.t("action.change_category"),
-                || {},
-            ))
-            .child(button(
-                Variant::Secondary,
-                Size::Sm,
-                Some(Icon::Download),
-                st.t("action.export"),
-                || {},
-            ))
+            .child(
+                button(
+                    Variant::Secondary,
+                    Size::Sm,
+                    Some(Icon::Copy),
+                    st.t("action.copy"),
+                    move || {
+                        set_clipboard(crate::ui::menu::tsv(&chosen_rows(st, rows, selection)));
+                        show_toast(st, st.tn("action.copied"));
+                    },
+                )
+                .test_id("products-bulk-copy"),
+            )
+            .child(
+                button(
+                    Variant::Secondary,
+                    Size::Sm,
+                    Some(Icon::Tag),
+                    st.t("action.change_category"),
+                    move || moving_open.set(true),
+                )
+                .test_id("products-bulk-category"),
+            )
+            .child(
+                button(
+                    Variant::Secondary,
+                    Size::Sm,
+                    Some(Icon::Download),
+                    st.t("action.export"),
+                    move || {
+                        crate::screens::reports::export(
+                            st,
+                            format!("{}.csv", st.tn("products.file")),
+                            chosen_rows(st, rows, selection),
+                        )
+                    },
+                )
+                .test_id("products-bulk-export"),
+            )
             .child(button(
                 Variant::Danger,
                 Size::Sm,
@@ -821,6 +1018,50 @@ pub fn products(st: AppState, compact: bool) -> View {
             move |i| rows.with(|r| r.get(i).map(id_of)),
             cell,
             "products-table",
+            Some(std::rc::Rc::new(move |i: usize| {
+                use crate::ui::menu::{Act, tsv};
+                let Some(p) = rows.with_untracked(|v| v.get(i).cloned()) else {
+                    return Vec::new();
+                };
+                let (p1, p2, p3) = (p.id.clone(), p.id.clone(), p.clone());
+                let gone = p.product_id().ok();
+                let price = Money::from_minor(p.price_minor, currency()).to_plain_string();
+                let mut acts = vec![
+                    Act::new(st.tn("action.edit"), move || {
+                        editor.set(Some(Target::Edit(p1.clone())))
+                    })
+                    .when(st.can("products.edit")),
+                    Act::new(st.tn("action.duplicate"), move || {
+                        editor.set(Some(Target::Copy(p2.clone())))
+                    })
+                    .when(st.can("products.edit")),
+                    Act::new(st.tn("products.print_label"), move || {
+                        labeling.set(Some(p3.clone()));
+                        labeling_open.set(true);
+                    }),
+                    Act::Line,
+                    Act::copy(st.tn("action.copy_name"), p.name.clone()),
+                    Act::copy(st.tn("action.copy_sku"), p.sku.clone()),
+                    Act::copy(st.tn("action.copy_price"), price.clone()),
+                ];
+                if let Some(b) = p.barcodes.first() {
+                    acts.push(Act::copy(st.tn("action.copy_barcode"), b.clone()));
+                }
+                acts.push(Act::copy(
+                    st.tn("action.copy_row"),
+                    tsv(&[product_cells(st, &p)]),
+                ));
+                acts.push(Act::Line);
+                acts.push(
+                    Act::new(st.tn("action.delete"), move || {
+                        if let Some(id) = gone {
+                            archive(st, vec![id]);
+                        }
+                    })
+                    .when(st.can("products.archive")),
+                );
+                acts
+            })),
         )
         .into_element()
     };
@@ -919,6 +1160,12 @@ pub fn products(st: AppState, compact: bool) -> View {
                 nb_domain::import::Kind::Products,
                 move || importing.set(false),
             )
+            .into_element()
+        }))
+        .child(modal(moving_open, compact, move || {
+            move_dialog(st, cat_list, rows, selection, move || {
+                moving_open.set(false)
+            })
             .into_element()
         }))
         .child(modal(labeling_open, compact, move || {

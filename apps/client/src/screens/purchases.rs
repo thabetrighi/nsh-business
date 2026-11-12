@@ -908,6 +908,19 @@ fn pay_dialog(st: AppState, sp: SupplierRow, close: impl Fn() + Clone + 'static)
 
 // --------------------------------------------------------------- purchases
 
+/// A purchase invoice as a row of text (to copy or export).
+fn purchase_cells(st: AppState, r: &PurchaseRow) -> Vec<String> {
+    let c = currency(st);
+    vec![
+        r.number.clone(),
+        r.supplier.clone(),
+        r.supplier_ref.clone(),
+        date_time(st, r.created_at),
+        nb_core::Money::from_minor(r.total_minor, c).to_plain_string(),
+        nb_core::Money::from_minor(r.open_minor, c).to_plain_string(),
+    ]
+}
+
 pub fn purchases_page(st: AppState, compact: bool) -> View {
     let text = signal(String::new());
     let paging = Paging::new(25);
@@ -970,11 +983,38 @@ pub fn purchases_page(st: AppState, compact: bool) -> View {
                 FontWeight::BOLD,
                 || Tone::Ink,
             ));
+            let acts = {
+                let r = r.clone();
+                move || {
+                    use crate::ui::menu::{Act, tsv};
+                    let c = currency(st);
+                    let open_it = r.clone();
+                    vec![
+                        Act::new(st.tn("sales.act.details"), move || {
+                            showing.set(Some(open_it.clone()))
+                        }),
+                        Act::Line,
+                        Act::copy(st.tn("sales.act.copy_number"), r.number.clone()),
+                        Act::copy(st.tn("purchases.act.copy_ref"), r.supplier_ref.clone()),
+                        Act::copy(
+                            st.tn("sales.act.copy_total"),
+                            nb_core::Money::from_minor(r.total_minor, c).to_plain_string(),
+                        ),
+                        Act::copy(st.tn("action.copy_row"), tsv(&[purchase_cells(st, &r)])),
+                    ]
+                }
+            };
+            tail = tail.child(crate::ui::menu::more_button(
+                st,
+                acts.clone(),
+                &format!("purchase-more-{i}"),
+            ));
             let row = r.clone();
-            v = v.child(
+            v = v.child(crate::ui::menu::with_menu(
                 row_view(format!("purchase-{i}"), Icon::Truck, title, detail, tail)
                     .on_press(move || showing.set(Some(row.clone()))),
-            );
+                acts,
+            ));
         }
         v.into_element()
     });
@@ -986,20 +1026,56 @@ pub fn purchases_page(st: AppState, compact: bool) -> View {
         )))
         .child(list)
         .child(pager(st, paging, move || page_data.get().total, compact));
-    let actions = view().child(when(
-        move || st.can("purchases.receive"),
-        move || {
+    let export_all = move || {
+        let q = text.get_untracked();
+        let task = spawn(async move {
+            let Ok(p) = st
+                .db()
+                .call(move |s| list_purchases(s, &q, None, 100_000, 0))
+                .await
+            else {
+                return;
+            };
+            let mut rows = vec![vec![
+                st.tn("sales.col.number"),
+                st.tn("purchases.col.supplier"),
+                st.tn("purchases.col.ref"),
+                st.tn("sales.col.date"),
+                st.tn("sales.col.total"),
+                st.tn("purchases.col.open"),
+            ]];
+            rows.extend(p.rows.iter().map(|r| purchase_cells(st, r)));
+            crate::screens::reports::export(st, format!("{}.csv", st.tn("purchases.file")), rows);
+        });
+        drop(task); // runs to completion: tasks end with their owner, not their handle
+    };
+    let actions = view()
+        .flex_row()
+        .gap(px(8.0))
+        .child(
             button(
-                Variant::Primary,
+                Variant::Secondary,
                 Size::Md,
-                Some(Icon::Plus),
-                st.t("purchases.new"),
-                move || creating.set(true),
+                Some(Icon::Download),
+                st.t("reports.export"),
+                export_all,
             )
-            .test_id("purchase-new")
-            .into_element()
-        },
-    ));
+            .test_id("purchases-export"),
+        )
+        .child(when(
+            move || st.can("purchases.receive"),
+            move || {
+                button(
+                    Variant::Primary,
+                    Size::Md,
+                    Some(Icon::Plus),
+                    st.t("purchases.new"),
+                    move || creating.set(true),
+                )
+                .test_id("purchase-new")
+                .into_element()
+            },
+        ));
     view()
         .child(page(
             st,
