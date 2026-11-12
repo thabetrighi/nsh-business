@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use nb_core::Currency;
-use nb_docs::templates::{Line, Sale, Shop, invoice, receipt};
+use nb_docs::templates::{Line, Options, Sale, Shop, invoice, receipt};
 use nb_docs::{Paper, escpos, pdf, preview};
 use nb_i18n::Lang;
 
@@ -44,6 +44,8 @@ fn sale(lines: usize) -> Sale {
         payments: vec![("cash".into(), 30_000 * n)],
         change_minor: 7_500 * n,
         owed_minor: 0,
+        balance: Some((120_000, 120_000)),
+        settled_minor: 0,
     }
 }
 
@@ -53,19 +55,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, doc) in [
         (
             "receipt-ar-80",
-            receipt(&shop(), &sale(4), Lang::Ar, Paper::Roll80),
+            receipt(
+                &shop(),
+                &sale(4),
+                Lang::Ar,
+                Paper::ROLL80,
+                &Options::default(),
+            ),
         ),
         (
             "receipt-fr-58",
-            receipt(&shop(), &sale(3), Lang::Fr, Paper::Roll58),
+            receipt(
+                &shop(),
+                &sale(3),
+                Lang::Fr,
+                Paper::ROLL58,
+                &Options::default(),
+            ),
         ),
         (
             "invoice-ar-a4",
-            invoice(&shop(), &sale(6), Lang::Ar, Paper::A4),
+            invoice(&shop(), &sale(6), Lang::Ar, Paper::A4, &Options::default()),
         ),
         (
             "invoice-fr-a4",
-            invoice(&shop(), &sale(6), Lang::Fr, Paper::A4),
+            invoice(&shop(), &sale(6), Lang::Fr, Paper::A4, &Options::default()),
         ),
     ] {
         std::fs::write(dir.join(format!("{name}.png")), preview(&doc)?.0)?;

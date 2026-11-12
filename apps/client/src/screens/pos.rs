@@ -17,8 +17,8 @@ use nb_store::usecases::documents::get_document;
 use nb_store::usecases::org::{Register, registers};
 use nb_store::usecases::products::list_products;
 use nb_store::usecases::returns::{
-    ExchangeInput, HeldCart, ReturnInput, ReturnLineInput, SaleDetail, exchange, held_carts,
-    hold_cart, return_sale, sale_for_return, take_held,
+    EditInput, ExchangeInput, HeldCart, ReturnInput, ReturnLineInput, SaleDetail, edit_sale,
+    exchange, held_carts, hold_cart, return_sale, sale_for_return, sale_to_edit, take_held,
 };
 use nb_store::usecases::sales::{
     PaymentInput, SaleInput, SaleLineInput, ShiftRow, close_shift, complete_sale, current_shift,
@@ -192,6 +192,23 @@ struct Till {
     /// Goods brought back to pay this cart (M8.8): the return, the sale it
     /// comes from, and the value it should come to.
     exchange: Signal<Option<Exchange>>,
+    /// The sales made, at hand (F1), to reprint or reopen one.
+    sales_open: Signal<bool>,
+    /// A sale reopened to be corrected: paying makes the correction.
+    correcting: Signal<Option<Correcting>>,
+    /// The sale whose print dialog shows (after a sale, or from the list).
+    printing: Signal<Option<String>>,
+    printing_open: Signal<bool>,
+}
+
+/// A sale reopened in the cart: its number, what is left of it, and
+/// whether it was sold on account (its value then comes off the account
+/// instead of paying the new sale).
+#[derive(Debug, Clone, PartialEq)]
+struct Correcting {
+    number: String,
+    value_minor: i64,
+    on_account: bool,
 }
 
 /// Goods brought back toward the cart: returned when the cart is paid, in
@@ -256,6 +273,7 @@ impl Till {
         self.document.set(None);
         self.customer.set(None);
         self.exchange.set(None);
+        self.correcting.set(None);
         self.selected.set(None);
     }
     /// The cart's figures as the domain prices them.
@@ -364,7 +382,16 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         customer: signal(None),
         customer_open: signal(false),
         search: element_ref(),
+        sales_open: signal(false),
+        correcting: signal(None),
+        printing: signal(None),
+        printing_open: signal(false),
     };
+    effect(move || {
+        if !t.printing_open.get() {
+            t.printing.set(None);
+        }
+    });
     effect(move || {
         if !t.editing_open.get() {
             t.editing.set(None);
@@ -381,6 +408,8 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             && !t.returning.get_untracked()
             && !t.discount_open.get_untracked()
             && !t.customer_open.get_untracked()
+            && !t.sales_open.get_untracked()
+            && !t.printing_open.get_untracked()
     };
 
     // A quote or order sent to the till (from the sales documents): its
@@ -447,6 +476,11 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
 
     // Shortcuts at the counter (while this page is shown).
     on_key("f2", move |_| t.search.focus());
+    on_key("f1", move |_| {
+        if selling() && no_dialog() {
+            t.sales_open.set(true);
+        }
+    });
     on_key("f4", move |_| {
         if selling() && no_dialog() {
             t.free_open.set(true);
@@ -563,6 +597,17 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
                 .test_id("pos-held")
                 .into_element()
             }))
+            // The sales made: reprint or correct one (F1).
+            // An icon: the bar stays on one line beside the till's badge.
+            .child(
+                icon_button(
+                    || Icon::Receipt,
+                    st.t("pos.sales"),
+                    Variant::Secondary,
+                    move || t.sales_open.set(true),
+                )
+                .test_id("pos-sales"),
+            )
             // A cashier may ask a supervisor for a return.
             .child(when(
                 move || st.can("sales.return") || st.can("sales.sell"),
@@ -689,6 +734,19 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         }))
         .child(modal(t.returning, compact, move || {
             return_dialog(st, t, move || t.returning.set(false)).into_element()
+        }))
+        .child(modal(t.sales_open, compact, move || {
+            sales_dialog(st, t, move || t.sales_open.set(false)).into_element()
+        }))
+        .child(modal(t.printing_open, compact, move || {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(number) = t.printing.get_untracked() {
+                return crate::screens::printing::print_dialog(st, number, move || {
+                    t.printing_open.set(false)
+                })
+                .into_element();
+            }
+            view().into_element()
         }))
         .child(modal(closing, compact, move || {
             match state.get_untracked() {
@@ -990,6 +1048,7 @@ fn shortcut_bar(st: AppState) -> View {
         ("F7", "pos.key.hold"),
         ("F3", "pos.key.held"),
         ("F12", "pos.key.return"),
+        ("F1", "pos.key.sales"),
         ("F8", "pos.key.clear"),
         ("F9", "pos.key.pay"),
     ] {
@@ -1264,6 +1323,7 @@ fn cart_panel(st: AppState, t: Till, in_sheet: bool) -> View {
         ))
         .child(customer_chip(st, t, in_sheet))
         .child(exchange_chip(st, t))
+        .child(correcting_chip(st, t))
         .child(dynamic(move || match t.document.get() {
             Some((_, number)) => view()
                 .flex_row()
@@ -1861,7 +1921,10 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
     // One operation for this payment screen: a second tap returns the sale
     // already made.
     let swap = t.exchange.get_untracked();
-    let meta = session.meta(if swap.is_some() {
+    let correcting = t.correcting.get_untracked();
+    let meta = session.meta(if correcting.is_some() {
+        "sale.edit"
+    } else if swap.is_some() {
         "sale.exchange"
     } else {
         "sale.complete"
@@ -1870,13 +1933,24 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
     let items = t.cart.get_untracked();
     let sale_discount = t.discount.get_untracked();
     // Goods brought back pay part of it (or all, and some comes back).
-    let brought = swap.as_ref().map_or(0, |x| x.value_minor);
+    let brought = swap.as_ref().map_or(0, |x| x.value_minor)
+        + correcting
+            .as_ref()
+            .filter(|c| !c.on_account)
+            .map_or(0, |c| c.value_minor);
     let due = cart_of(&items, sale_discount, c)
         .totals()
         .map_or(0, |x| x.total.minor())
         - brought;
     let customer = t.customer.get_untracked();
     let has_customer = customer.is_some();
+    // What the customer owes before this sale (a corrected sale on account
+    // comes off it first).
+    let owed = customer.as_ref().map_or(0, |c| c.balance_minor)
+        - correcting
+            .as_ref()
+            .filter(|c| c.on_account)
+            .map_or(0, |c| c.value_minor);
     let way = signal(Way::Cash);
     let given = signal(Money::from_minor(due.max(0), c).to_plain_string());
     let error = signal(String::new());
@@ -1903,10 +1977,17 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
     });
     let branch_id = session.branch().to_string();
     let given_minor = move || parse_price(&given.get(), c).ok().map(|m| m.minor());
-    let change = computed(move || match (way.get(), given_minor()) {
-        (Way::Cash, Some(g)) if g > due => g - due,
-        _ => 0,
+    // Bon par bon: with a customer, cash beyond the sale pays older debt
+    // first; without one, it is all change.
+    let bon = computed(move || {
+        let g = match (way.get(), given_minor()) {
+            (Way::Cash, Some(g)) => g,
+            (Way::Credit, _) => 0,
+            _ => due.max(0),
+        };
+        nb_domain::sale::bon_par_bon(due, g, if has_customer { owed } else { 0 })
     });
+    let change = computed(move || bon.get().change);
     let short = computed(move || match (way.get(), given_minor()) {
         (Way::Cash, Some(g)) if g < due => due - g,
         _ => 0,
@@ -1967,8 +2048,14 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                 document_id: t.document.get_untracked().map(|d| d.0),
                 customer_id: t.customer.get_untracked().map(|c| c.id),
                 approval: approval.get_untracked(),
+                settle_minor: if way.get_untracked() == Way::Cash && has_customer {
+                    bon.get_untracked().settle
+                } else {
+                    0
+                },
                 ..Default::default()
             };
+            let correcting = t.correcting.get_untracked().map(|c| c.number);
             busy.set(true);
             let close = close.clone();
             let ask_at = (branch_id.clone(), register.clone());
@@ -1977,13 +2064,27 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                 back.approval = approval_back.get_untracked();
                 back
             });
+            let approval_back_for_edit = approval_back.get_untracked();
             let db = st.db();
             let task = spawn(async move {
                 let r = db
-                    .call(move |s| match swap {
-                        Some(back) => exchange(s, meta, ExchangeInput { back, sale: input })
-                            .map(|x| (x.sale, Some(x.back.number))),
-                        None => complete_sale(s, meta, input).map(|r| (r, None)),
+                    .call(move |s| match (correcting, swap) {
+                        (Some(original), _) => edit_sale(
+                            s,
+                            meta,
+                            EditInput {
+                                original,
+                                sale: input,
+                                reason: String::new(),
+                                approval_back: approval_back_for_edit,
+                            },
+                        )
+                        .map(|x| (x.sale, None)),
+                        (None, Some(back)) => {
+                            exchange(s, meta, ExchangeInput { back, sale: input })
+                                .map(|x| (x.sale, Some(x.back.number)))
+                        }
+                        (None, None) => complete_sale(s, meta, input).map(|r| (r, None)),
                     })
                     .await;
                 busy.set(false);
@@ -2017,12 +2118,17 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                         show_toast(st, text);
                         #[cfg(not(target_arch = "wasm32"))]
                         if st.biz.auto_print.get_untracked() {
-                            // The drawer opens when cash came in.
-                            crate::screens::printing::print_receipt(
-                                st,
-                                r.number.clone(),
-                                r.cash_minor > 0,
-                            );
+                            if st.biz.preview_first.get_untracked() {
+                                t.printing.set(Some(r.number.clone()));
+                                t.printing_open.set(true);
+                            } else {
+                                // The drawer opens when cash came in.
+                                crate::screens::printing::print_receipt(
+                                    st,
+                                    r.number.clone(),
+                                    r.cash_minor > 0,
+                                );
+                            }
                         }
                         t.search.focus();
                     }
@@ -2043,7 +2149,7 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
         }
     };
     let retry = save.clone();
-    let swap_open = swap.is_some();
+    let swap_open = swap.is_some() || t.correcting.with_untracked(Option::is_some);
     // While a supervisor is asked, the keys are theirs.
     on_key("f9", {
         let save = save.clone();
@@ -2064,6 +2170,10 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
     let quick = {
         let mut v = view().flex_row().flex_wrap().gap(px(8.0));
         let mut amounts = vec![due.max(0)];
+        // Bon par bon: the sale and the older debt at once.
+        if has_customer && owed > 0 {
+            amounts.push(due.max(0) + owed);
+        }
         for step in [10_000, 50_000, 100_000, 200_000, 500_000] {
             let up = (due + step - 1) / step * step;
             if up > due && !amounts.contains(&up) {
@@ -2079,6 +2189,8 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
                     move || {
                         if i == 0 {
                             st.tn("pos.exact")
+                        } else if has_customer && owed > 0 && i == 1 {
+                            tr_args(st.lang(), "pos.pay_all", &[("amount", &money(st, a))])
                         } else {
                             money(st, a)
                         }
@@ -2231,52 +2343,119 @@ fn pay_dialog(st: AppState, reg: Register, t: Till, close: impl Fn() + Clone + '
         ))
         .child(match customer {
             Some(cu) => {
-                let after = cu.balance_minor;
                 let limit = cu.credit_limit_minor;
                 let name = cu.name.clone();
-                view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(icon(Icon::User, 16.0, || Tone::Muted))
-                    .child(label_line(
-                        move || name.clone(),
-                        ty::SM,
-                        FontWeight::SEMIBOLD,
-                        Tone::Ink,
-                    ))
-                    .child(view().flex_1())
-                    .child(label_line(
-                        st.t("pos.customer.owes"),
-                        ty::XS,
-                        FontWeight::NORMAL,
-                        Tone::Muted,
-                    ))
-                    .child(figure(
-                        move || {
-                            let more = match way.get() {
-                                Way::Credit => due.max(0),
-                                Way::Cash => short.get(),
-                                _ => 0,
-                            };
-                            money(st, after + more)
-                        },
-                        ty::SM,
-                        FontWeight::BOLD,
-                        move || {
-                            let more = match way.get() {
-                                Way::Credit => due.max(0),
-                                Way::Cash => short.get(),
-                                _ => 0,
-                            };
-                            if after + more > limit {
-                                Tone::Danger
+                let line = move |key: &'static str,
+                                 value: Box<dyn Fn() -> i64>,
+                                 strong: bool,
+                                 id: &'static str| {
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(view().flex_1().child(label_line(
+                            st.t(key),
+                            ty::SM,
+                            if strong {
+                                FontWeight::BOLD
                             } else {
-                                Tone::Ink
-                            }
-                        },
+                                FontWeight::NORMAL
+                            },
+                            if strong { Tone::Ink } else { Tone::Muted },
+                        )))
+                        .child(
+                            figure(
+                                move || money(st, value()),
+                                if strong { ty::MD } else { ty::SM },
+                                if strong {
+                                    FontWeight::BOLD
+                                } else {
+                                    FontWeight::SEMIBOLD
+                                },
+                                || Tone::Ink,
+                            )
+                            .test_id(id),
+                        )
+                };
+                let paid = move || match way.get() {
+                    Way::Cash => given_minor().unwrap_or(0),
+                    Way::Credit => 0,
+                    _ => due.max(0),
+                };
+                view()
+                    .gap(px(6.0))
+                    .p(px(12.0))
+                    .rounded(px(radius::md()))
+                    .border_1()
+                    .border_color(Tone::Border.color())
+                    .test_id("pay-balance")
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(icon(Icon::User, 16.0, || Tone::Muted))
+                            .child(label_line(
+                                move || name.clone(),
+                                ty::SM,
+                                FontWeight::SEMIBOLD,
+                                Tone::Ink,
+                            )),
+                    )
+                    .child(line(
+                        "print.balance.before",
+                        Box::new(move || owed),
+                        false,
+                        "pay-owed",
                     ))
+                    .child(line(
+                        "print.balance.this",
+                        Box::new(move || due.max(0)),
+                        false,
+                        "pay-this",
+                    ))
+                    .child(line(
+                        "print.balance.sum",
+                        Box::new(move || owed + due.max(0)),
+                        false,
+                        "pay-sum",
+                    ))
+                    .child(line(
+                        "print.balance.paid",
+                        Box::new(paid),
+                        false,
+                        "pay-paid",
+                    ))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .pt(px(6.0))
+                            .border_t_1()
+                            .border_color(Tone::Border.color())
+                            .child(view().flex_1().child(label_line(
+                                st.t("print.balance.after"),
+                                ty::SM,
+                                FontWeight::BOLD,
+                                Tone::Ink,
+                            )))
+                            .child(
+                                figure(
+                                    move || money(st, bon.get().after),
+                                    ty::LG,
+                                    FontWeight::BOLD,
+                                    move || {
+                                        if bon.get().after > limit {
+                                            Tone::Danger
+                                        } else {
+                                            Tone::Ink
+                                        }
+                                    },
+                                )
+                                .test_id("pay-after"),
+                            ),
+                    )
                     .into_element()
             }
             None => view().into_element(),
@@ -3512,7 +3691,7 @@ fn customer_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) ->
                         s,
                         &CustomerQuery {
                             search: q,
-                            limit: 8,
+                            limit: 20,
                             ..Default::default()
                         },
                     )
@@ -3521,6 +3700,35 @@ fn customer_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) ->
             }
         },
     );
+    // The highlighted customer: ↑ ↓ move it, Enter takes it.
+    let cursor = signal(0usize);
+    effect(move || {
+        text.with(|_| ());
+        cursor.set(0);
+    });
+    let rows_now = move || {
+        found
+            .with(|p: Option<&nb_store::usecases::customers::CustomerPage>| {
+                p.map(|p| p.rows.clone())
+            })
+            .unwrap_or_default()
+    };
+    on_key("down", move |_| {
+        let n = rows_now().len();
+        if n > 0 {
+            cursor.update(|c| *c = (*c + 1).min(n - 1));
+        }
+    });
+    on_key("up", move |_| cursor.update(|c| *c = c.saturating_sub(1)));
+    on_key("enter", {
+        let close = close.clone();
+        move |_| {
+            if let Some(c) = rows_now().get(cursor.get_untracked()).cloned() {
+                t.customer.set(Some(c));
+                close();
+            }
+        }
+    });
     let list = {
         let close = close.clone();
         dynamic(move || {
@@ -3541,11 +3749,21 @@ fn customer_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) ->
             let mut v = view().gap(px(6.0));
             for (i, c) in rows.into_iter().enumerate() {
                 let close = close.clone();
-                let detail = [c.code.clone(), c.phone.clone(), c.city.clone()]
+                let mut parts: Vec<String> = [c.code.clone(), c.phone.clone(), c.city.clone()]
                     .into_iter()
                     .filter(|x| !x.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" · ");
+                    .collect();
+                if c.credit_limit_minor > 0 {
+                    parts.push(tr_args(
+                        st.lang(),
+                        "pos.customer.limit",
+                        &[
+                            ("limit", &money(st, c.credit_limit_minor)),
+                            ("left", &money(st, c.credit_left_minor())),
+                        ],
+                    ));
+                }
+                let detail = parts.join(" · ");
                 let (name, balance, blocked, over) = (
                     c.name.clone(),
                     c.balance_minor,
@@ -3557,12 +3775,26 @@ fn customer_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) ->
                     tail = tail.child(badge(Status::Danger, None, st.t("customers.blocked")));
                 }
                 if balance != 0 {
-                    tail = tail.child(figure(
-                        move || money(st, balance),
-                        ty::SM,
-                        FontWeight::SEMIBOLD,
-                        move || if over { Tone::Danger } else { Tone::Ink },
-                    ));
+                    tail = tail.child(
+                        view()
+                            .items_end()
+                            .child(figure(
+                                move || money(st, balance.abs()),
+                                ty::SM,
+                                FontWeight::BOLD,
+                                move || if over { Tone::Danger } else { Tone::Ink },
+                            ))
+                            .child(label_line(
+                                st.t(if balance > 0 {
+                                    "pos.customer.owes_short"
+                                } else {
+                                    "pos.customer.credit_short"
+                                }),
+                                ty::XS,
+                                FontWeight::NORMAL,
+                                Tone::Muted,
+                            )),
+                    );
                 }
                 v = v.child(
                     view()
@@ -3575,6 +3807,20 @@ fn customer_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) ->
                         .border_1()
                         .border_color(Tone::Border.color())
                         .cursor_pointer()
+                        .bg(move || {
+                            if cursor.get() == i {
+                                Tone::Hover.color()
+                            } else {
+                                Tone::Surface.color()
+                            }
+                        })
+                        .border_color(move || {
+                            if cursor.get() == i {
+                                Tone::Primary.color()
+                            } else {
+                                Tone::Border.color()
+                            }
+                        })
                         .hover(|s| s.bg(Tone::Hover.color()))
                         .on_press(move || {
                             t.customer.set(Some(c.clone()));
@@ -3632,6 +3878,297 @@ fn customer_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) ->
         st,
         st.t("pos.customer.title"),
         st.t("pos.customer.help"),
+        body,
+        footer,
+        close,
+    )
+}
+
+/// The sale being corrected, above the cart: what it was worth, and a way
+/// out.
+fn correcting_chip(st: AppState, t: Till) -> AnyElement {
+    dynamic(move || {
+        let Some(x) = t.correcting.get() else {
+            return view().into_element();
+        };
+        let (number, value, on_account) = (x.number.clone(), x.value_minor, x.on_account);
+        view()
+            .test_id("pos-correcting")
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(16.0))
+            .py(px(8.0))
+            .border_t_1()
+            .border_color(Tone::Border.color())
+            .bg(Tone::WarningSoft.color())
+            .child(icon(Icon::Pencil, 18.0, || Tone::Warning))
+            .child(
+                view()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(label_line(
+                        move || tr_args(st.lang(), "pos.correcting", &[("number", &number)]),
+                        ty::SM,
+                        FontWeight::SEMIBOLD,
+                        Tone::Ink,
+                    ))
+                    .child(label_line(
+                        st.t(if on_account {
+                            "pos.correcting.account"
+                        } else {
+                            "pos.correcting.paid"
+                        }),
+                        ty::XS,
+                        FontWeight::NORMAL,
+                        Tone::Muted,
+                    )),
+            )
+            .child(figure(
+                move || format!("−{}", money(st, value)),
+                ty::SM,
+                FontWeight::BOLD,
+                || Tone::Success,
+            ))
+            .child(
+                icon_button(
+                    || Icon::Close,
+                    st.t("pos.correcting.cancel"),
+                    Variant::Ghost,
+                    move || t.clear(),
+                )
+                .test_id("pos-correcting-cancel"),
+            )
+            .into_element()
+    })
+    .into_element()
+}
+
+/// Reopens sale `number` in the cart to correct it: its lines at the
+/// prices sold, its customer; paying makes the correction.
+fn reopen(st: AppState, t: Till, number: String) {
+    let db = st.db();
+    let task = spawn(async move {
+        let loaded = db
+            .call(move |s| {
+                let sale = sale_to_edit(s, &number)?;
+                let mut items = Vec::with_capacity(sale.lines.len());
+                for l in &sale.lines {
+                    let product = match l.product_id.as_deref() {
+                        Some(p) => Some(s.read(|r| {
+                            nb_store::repo::catalog::get(r.conn(), nb_store::repo::parse_id(p)?)
+                        })?),
+                        None => None,
+                    };
+                    items.push(Item {
+                        product,
+                        name: l.name.clone(),
+                        unit: l.unit.clone(),
+                        qty_milli: l.qty_milli,
+                        price_minor: l.unit_price_minor,
+                        tax_bps: l.tax_bps,
+                        discount_bps: l.discount_bps,
+                    });
+                }
+                let customer = match sale.customer_id.as_deref() {
+                    Some(c) => Some(nb_store::usecases::customers::get_customer(s, c)?),
+                    None => None,
+                };
+                Ok((sale, items, customer))
+            })
+            .await;
+        match loaded {
+            Ok((sale, _, _)) if sale.edited_into.is_some() => show_toast(
+                st,
+                tr_args(
+                    st.lang(),
+                    "pos.correct.already",
+                    &[("number", sale.edited_into.as_deref().unwrap_or_default())],
+                ),
+            ),
+            Ok((sale, _, _)) if sale.lines.is_empty() => {
+                show_toast(st, st.tn("pos.correct.nothing_left"));
+            }
+            Ok((sale, items, customer)) => {
+                let n = items.len();
+                t.clear();
+                t.cart.set(items);
+                t.customer.set(customer);
+                t.correcting.set(Some(Correcting {
+                    on_account: sale.payments.iter().any(|p| p.0 == "credit" && p.1 > 0),
+                    number: sale.number.clone(),
+                    value_minor: sale.value_minor,
+                }));
+                t.selected.set(n.checked_sub(1));
+                t.sales_open.set(false);
+                t.search.focus();
+            }
+            Err(e) => show_toast(st, first_error(st, &e)),
+        }
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
+}
+
+/// The sales made, newest first, found by number, customer or phone: each
+/// with its customer, what was paid and what was left on account, and the
+/// time; reprint it, or reopen it to correct it.
+fn sales_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> View {
+    use nb_store::usecases::sales::{SalesPage, SalesQuery, list_sales};
+    let text = signal(String::new());
+    let found = resource(
+        move || Some((text.get(), st.data_rev.get())),
+        move |(q, _), _| {
+            let db = st.db();
+            async move {
+                db.call(move |s| {
+                    list_sales(
+                        s,
+                        &SalesQuery {
+                            search: q,
+                            limit: 30,
+                            offset: 0,
+                        },
+                    )
+                })
+                .await
+            }
+        },
+    );
+    let list = dynamic(move || {
+        let rows = found
+            .with(|p: Option<&SalesPage>| p.map(|p| p.rows.clone()))
+            .unwrap_or_default();
+        if rows.is_empty() {
+            return label(st.t("sales.empty"), ty::SM, FontWeight::NORMAL, Tone::Muted)
+                .into_element();
+        }
+        let mut v = view().gap(px(6.0));
+        for (i, r) in rows.into_iter().enumerate() {
+            let number = r.number.clone();
+            let when = crate::screens::common::date_time(st, r.created_at);
+            let who = r
+                .customer_name
+                .clone()
+                .unwrap_or_else(|| st.tn("pos.counter_customer"));
+            let detail = format!("{when} · {who}");
+            let (total, paid, credit) = (r.total_minor, r.paid_minor, r.credit_minor);
+            let mut tail = view().flex_row().flex_wrap().items_center().gap(px(8.0));
+            if let Some(n) = r.edited_into.clone() {
+                tail = tail.child(badge(Status::Warning, Some(Icon::Pencil), move || {
+                    tr_args(st.lang(), "pos.sale.corrected", &[("number", &n)])
+                }));
+            }
+            if credit > 0 {
+                tail = tail.child(badge(Status::Danger, None, move || {
+                    tr_args(
+                        st.lang(),
+                        "pos.sale.on_account",
+                        &[("amount", &money(st, credit))],
+                    )
+                }));
+            }
+            tail = tail
+                .child(
+                    view()
+                        .items_end()
+                        .child(figure(
+                            move || money(st, total),
+                            ty::SM,
+                            FontWeight::BOLD,
+                            || Tone::Ink,
+                        ))
+                        .child(label_line(
+                            move || {
+                                tr_args(st.lang(), "pos.sale.paid", &[("amount", &money(st, paid))])
+                            },
+                            ty::XS,
+                            FontWeight::NORMAL,
+                            Tone::Muted,
+                        )),
+                )
+                .child({
+                    let number = number.clone();
+                    icon_button(
+                        || Icon::Printer,
+                        st.t("action.print"),
+                        Variant::Ghost,
+                        move || {
+                            t.printing.set(Some(number.clone()));
+                            t.sales_open.set(false);
+                            t.printing_open.set(true);
+                        },
+                    )
+                    .test_id(&format!("pos-sale-print-{i}"))
+                });
+            let can_correct = r.edited_into.is_none();
+            if can_correct {
+                let number = number.clone();
+                tail = tail.child(
+                    button(
+                        Variant::Secondary,
+                        Size::Sm,
+                        Some(Icon::Pencil),
+                        st.t("pos.sale.correct"),
+                        move || {
+                            reopen(st, t, number.clone());
+                        },
+                    )
+                    .test_id(&format!("pos-sale-correct-{i}")),
+                );
+            }
+            v = v.child(
+                view()
+                    .test_id(&format!("pos-sale-{i}"))
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(10.0))
+                    .p(px(10.0))
+                    .rounded(px(radius::md()))
+                    .border_1()
+                    .border_color(Tone::Border.color())
+                    .child(icon(Icon::Receipt, 18.0, || Tone::Faint))
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .child(label_line(
+                                move || number.clone(),
+                                ty::SM,
+                                FontWeight::SEMIBOLD,
+                                Tone::Ink,
+                            ))
+                            .child(label_line(
+                                move || detail.clone(),
+                                ty::XS,
+                                FontWeight::NORMAL,
+                                Tone::Muted,
+                            )),
+                    )
+                    .child(tail),
+            );
+        }
+        v.into_element()
+    });
+    let body = view()
+        .gap(px(12.0))
+        .child(crate::ui::form::search_field(
+            text,
+            st.t("pos.sales.search"),
+            "pos-sales-search",
+        ))
+        .child(list);
+    let footer = view().child(button(
+        Variant::Secondary,
+        Size::Md,
+        None,
+        st.t("action.close"),
+        close.clone(),
+    ));
+    dialog_frame(
+        st,
+        st.t("pos.sales"),
+        st.t("pos.sales.help"),
         body,
         footer,
         close,

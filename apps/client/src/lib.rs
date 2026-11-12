@@ -12,6 +12,7 @@ use nsh_core::prelude::*;
 mod command_palette;
 pub mod db;
 mod nav;
+pub mod printers;
 mod screens;
 mod shell;
 mod state;
@@ -69,6 +70,11 @@ pub fn App() -> impl IntoElement {
     }
     if env("NB_OPEN").as_deref() == Some("palette") {
         st.palette.set(true);
+    }
+    // NB_OPEN=printing: settings › printing (screenshots).
+    if env("NB_OPEN").as_deref() == Some("printing") {
+        st.route.set(nav::Route::Settings);
+        st.settings_tab.set(5);
     }
     st.persist();
     st.connect();

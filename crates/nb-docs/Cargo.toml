@@ -13,6 +13,10 @@ nb-i18n.workspace = true
 cosmic-text = "0.19"
 krilla = "0.8"
 png = "0.18"
+zune-jpeg = "0.5"
+
+[dev-dependencies]
+png = "0.18"
 
 [lints]
 workspace = true

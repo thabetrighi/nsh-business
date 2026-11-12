@@ -4,7 +4,8 @@
 
 use std::collections::HashMap;
 
-use krilla::geom::{PathBuilder, Point};
+use krilla::geom::{PathBuilder, Point, Rect, Transform};
+use krilla::image::Image;
 use krilla::page::PageSettings;
 use krilla::paint::{Fill, Stroke};
 use krilla::text::{Font, GlyphId, KrillaGlyph};
@@ -19,7 +20,9 @@ const MARGIN: f32 = 36.0;
 pub fn pdf(doc: &Doc) -> Result<Vec<u8>, DocError> {
     with_fonts(|fs| {
         let (w, sheet_h) = doc.paper.sheet();
-        let margin = if doc.paper.is_roll() { 8.0 } else { MARGIN };
+        let margin = if doc.paper.is_thermal() { 6.0 } else { MARGIN };
+        // A roll or a label is one page: its own length, or the label's.
+        let single = doc.paper.is_thermal();
         let l = layout(fs, doc, w, margin, 1.0);
         let mut fonts: HashMap<cosmic_text::fontdb::ID, Font> = HashMap::new();
         for g in &l.glyphs {
@@ -38,10 +41,12 @@ pub fn pdf(doc: &Doc) -> Result<Vec<u8>, DocError> {
         // (height − margins), moving content up on each next page.
         let (page_h, usable) = if doc.paper.is_roll() {
             (l.height.max(1.0), l.height.max(1.0))
+        } else if single {
+            (sheet_h, sheet_h)
         } else {
             (sheet_h, sheet_h - 2.0 * margin)
         };
-        let pages = if doc.paper.is_roll() {
+        let pages = if single {
             1
         } else {
             (((l.height - 2.0 * margin) / usable).ceil() as usize).max(1)
@@ -50,15 +55,15 @@ pub fn pdf(doc: &Doc) -> Result<Vec<u8>, DocError> {
         for p in 0..pages {
             let top = p as f32 * usable;
             let bottom = top + usable;
-            let shift = if doc.paper.is_roll() { 0.0 } else { top };
+            let shift = if single { 0.0 } else { top };
             let size = krilla::geom::Size::from_wh(w, page_h)
                 .ok_or_else(|| DocError("page size".into()))?;
             let mut page = pdf.start_page_with(PageSettings::new(size));
             let mut s = page.surface();
             s.set_fill(Some(Fill::default()));
             for g in &l.glyphs {
-                let in_page = doc.paper.is_roll()
-                    || (g.baseline - margin >= top && g.baseline - margin < bottom);
+                let in_page =
+                    single || (g.baseline - margin >= top && g.baseline - margin < bottom);
                 if !in_page {
                     continue;
                 }
@@ -89,7 +94,7 @@ pub fn pdf(doc: &Doc) -> Result<Vec<u8>, DocError> {
                 ..Default::default()
             }));
             for &(ry, from, to) in &l.rules {
-                if !doc.paper.is_roll() && !(ry - margin >= top && ry - margin < bottom) {
+                if !single && !(ry - margin >= top && ry - margin < bottom) {
                     continue;
                 }
                 let mut pb = PathBuilder::new();
@@ -97,6 +102,35 @@ pub fn pdf(doc: &Doc) -> Result<Vec<u8>, DocError> {
                 pb.line_to(to, ry - shift);
                 if let Some(path) = pb.finish() {
                     s.draw_path(&path);
+                }
+            }
+            s.set_stroke(None);
+            s.set_fill(Some(Fill::default()));
+            for &(rx, ry, rw, rh) in &l.rects {
+                if !single && !(ry - margin >= top && ry - margin < bottom) {
+                    continue;
+                }
+                let mut pb = PathBuilder::new();
+                if let Some(r) = Rect::from_xywh(rx, ry - shift, rw, rh) {
+                    pb.push_rect(r);
+                }
+                if let Some(path) = pb.finish() {
+                    s.draw_path(&path);
+                }
+            }
+            for &(ix, iy, iw, ih, index) in &l.images {
+                if !single && !(iy - margin >= top && iy - margin < bottom) {
+                    continue;
+                }
+                let Some(crate::Block::Image { gray, w, h, .. }) = doc.blocks.get(index) else {
+                    continue;
+                };
+                let rgba: Vec<u8> = gray.iter().flat_map(|&g| [g, g, g, 255]).collect();
+                let image = Image::from_rgba8(rgba, *w, *h);
+                if let Some(size) = krilla::geom::Size::from_wh(iw, ih) {
+                    s.push_transform(&Transform::from_translate(ix, iy - shift));
+                    s.draw_image(image, size);
+                    s.pop();
                 }
             }
             s.finish();

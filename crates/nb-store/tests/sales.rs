@@ -792,3 +792,271 @@ fn a_sale_as_printed() -> R {
     assert!(matches!(print_sale(&s, "FV-nope"), Err(Error::NotFound(_))));
     Ok(())
 }
+
+fn customer(s: &mut Store, setup: &Setup, name: &str) -> Result<String, Error> {
+    Ok(nb_store::usecases::customers::save_customer(
+        s,
+        meta(setup, "customer"),
+        nb_store::usecases::customers::CustomerInput {
+            kind: "person".into(),
+            name: name.into(),
+            credit_limit_minor: 1_000_000,
+            status: "active".into(),
+            ..Default::default()
+        },
+    )?
+    .id)
+}
+
+fn owes(s: &Store, id: &str) -> Result<i64, Error> {
+    Ok(nb_store::usecases::customers::get_customer(s, id)?.balance_minor)
+}
+
+/// "Bon par bon": the customer pays this sale and older debt at once; the
+/// receipt shows the balance before, what was paid, the balance after.
+#[test]
+fn a_sale_pays_old_debt_too() -> R {
+    use nb_store::usecases::printing::print_sale;
+    let (mut s, setup) = store();
+    let reg = register(&s);
+    let oil = stocked(&mut s, &setup, "Huile", "10", 2_500, 3_570)?;
+    open_shift(&mut s, meta(&setup, "shift.open"), &reg, 0)?;
+    let c = customer(&mut s, &setup, "Abou El Kacem")?;
+    // An earlier sale left 2 570.00 owing.
+    let mut first = sale(&setup, &reg, vec![(oil, "1")], vec![("cash", 1_000)]);
+    first.customer_id = Some(c.clone());
+    let r = complete_sale(&mut s, meta(&setup, "sale"), first)?;
+    assert_eq!(r.balance, Some((0, 2_570)));
+    assert_eq!(owes(&s, &c)?, 2_570);
+    // Today: 35.70 due; 70.00 handed over, 25.70 of it on the old debt.
+    let mut today = sale(&setup, &reg, vec![(oil, "1")], vec![("cash", 7_000)]);
+    today.customer_id = Some(c.clone());
+    today.settle_minor = 2_570;
+    let r = complete_sale(&mut s, meta(&setup, "sale"), today.clone())?;
+    assert_eq!(
+        (
+            r.cash_minor,
+            r.change_minor,
+            r.credit_minor,
+            r.settled_minor
+        ),
+        (3_570, 860, 0, 2_570)
+    );
+    assert_eq!(r.balance, Some((2_570, 0)));
+    assert_eq!(owes(&s, &c)?, 0);
+    assert_eq!(count(&s, "SELECT COUNT(*) FROM receipts"), 1);
+    // The till holds the sales and the debt paid.
+    let shift = current_shift(&s, &reg)?.map(|x| x.id).unwrap_or_default();
+    assert_eq!(
+        shift_summary(&s, &shift)?.expected_minor,
+        1_000 + 3_570 + 2_570
+    );
+    let p = print_sale(&s, &r.number)?;
+    assert_eq!(p.balance, Some((2_570, 0)));
+    assert_eq!(p.settled_minor, 2_570);
+    assert_eq!(p.payments, vec![("cash".to_owned(), 7_000)]);
+    // Not more than owed; not while leaving the sale itself unpaid.
+    today.settle_minor = 100;
+    assert_eq!(
+        err(complete_sale(&mut s, meta(&setup, "sale"), today.clone())),
+        ["sale.settle_more_than_owed"]
+    );
+    let mut short = sale(&setup, &reg, vec![(oil, "1")], vec![("cash", 1_000)]);
+    short.customer_id = Some(c.clone());
+    complete_sale(&mut s, meta(&setup, "sale"), short.clone())?; // owes 2 570.00 again
+    short.settle_minor = 500;
+    assert_eq!(
+        err(complete_sale(&mut s, meta(&setup, "sale"), short)),
+        ["sale.settle_needs_full_payment"]
+    );
+    healthy(&s)
+}
+
+/// A receipt corrected at the till: what was sold comes back, the right
+/// sale is made, the difference is paid or given back — and for a sale on
+/// account, the debt moves by the difference only.
+#[test]
+fn a_receipt_is_corrected_at_the_till() -> R {
+    let (mut s, setup) = store();
+    let reg = register(&s);
+    let milk = stocked(&mut s, &setup, "Lait", "10", 800, 1_190)?;
+    let oil = stocked(&mut s, &setup, "Huile", "10", 2_500, 3_570)?;
+    open_shift(&mut s, meta(&setup, "shift.open"), &reg, 10_000)?;
+
+    // Cash: 3 milk (35.70); the customer wanted 4 (47.60) and pays 11.90.
+    let r = complete_sale(
+        &mut s,
+        meta(&setup, "sale"),
+        sale(&setup, &reg, vec![(milk, "3")], vec![("cash", 5_000)]),
+    )?;
+    let open = sale_to_edit(&s, &r.number)?;
+    assert_eq!(open.value_minor, 3_570);
+    assert_eq!(open.lines.len(), 1);
+    assert_eq!(
+        (open.lines[0].qty_milli, open.lines[0].unit_price_minor),
+        (3_000, 1_190)
+    );
+    let fixed = edit_sale(
+        &mut s,
+        meta(&setup, "sale.edit"),
+        EditInput {
+            original: r.number.clone(),
+            sale: sale(&setup, &reg, vec![(milk, "4")], vec![("cash", 1_190)]),
+            reason: String::new(),
+            approval_back: None,
+        },
+    )?;
+    assert_eq!(
+        (
+            fixed.carried_minor,
+            fixed.sale.total_minor,
+            fixed.sale.change_minor
+        ),
+        (3_570, 4_760, 0)
+    );
+    assert_eq!(available(&s, milk, setup.warehouse)?.to_string(), "6");
+    assert_eq!(
+        sale_to_edit(&s, &r.number)?.edited_into,
+        Some(fixed.sale.number.clone())
+    );
+    assert_eq!(
+        err(edit_sale(
+            &mut s,
+            meta(&setup, "sale.edit"),
+            EditInput {
+                original: r.number.clone(),
+                sale: sale(&setup, &reg, vec![(milk, "1")], vec![]),
+                reason: String::new(),
+                approval_back: None,
+            },
+        )),
+        ["sale.edited"]
+    );
+    // One fewer: 11.90 back from the drawer.
+    let less = edit_sale(
+        &mut s,
+        meta(&setup, "sale.edit"),
+        EditInput {
+            original: fixed.sale.number.clone(),
+            sale: sale(&setup, &reg, vec![(milk, "3")], vec![]),
+            reason: "une de trop".into(),
+            approval_back: None,
+        },
+    )?;
+    assert_eq!(less.sale.change_minor, 1_190);
+    assert_eq!(available(&s, milk, setup.warehouse)?.to_string(), "7");
+    let shift = current_shift(&s, &reg)?.map(|x| x.id).unwrap_or_default();
+    assert_eq!(shift_summary(&s, &shift)?.expected_minor, 10_000 + 3_570);
+
+    // On account: 35.70 with 10.00 paid, 25.70 owed; corrected to 2 milk
+    // (23.80) with nothing more paid: the debt becomes 13.80.
+    let c = customer(&mut s, &setup, "Abou El Kacem")?;
+    let mut on_account = sale(&setup, &reg, vec![(oil, "1")], vec![("cash", 1_000)]);
+    on_account.customer_id = Some(c.clone());
+    let r = complete_sale(&mut s, meta(&setup, "sale"), on_account)?;
+    assert_eq!(owes(&s, &c)?, 2_570);
+    let mut instead = sale(&setup, &reg, vec![(milk, "2")], vec![]);
+    instead.customer_id = Some(c.clone());
+    edit_sale(
+        &mut s,
+        meta(&setup, "sale.edit"),
+        EditInput {
+            original: r.number.clone(),
+            sale: instead.clone(),
+            reason: String::new(),
+            approval_back: None,
+        },
+    )?;
+    assert_eq!(owes(&s, &c)?, 2_380 - 1_000);
+    assert_eq!(available(&s, oil, setup.warehouse)?.to_string(), "10");
+    // A corrected receipt keeps its customer.
+    let mut other = sale(&setup, &reg, vec![(oil, "1")], vec![("cash", 1_000)]);
+    other.customer_id = Some(c.clone());
+    let r = complete_sale(&mut s, meta(&setup, "sale"), other)?;
+    instead.customer_id = None;
+    assert_eq!(
+        err(edit_sale(
+            &mut s,
+            meta(&setup, "sale.edit"),
+            EditInput {
+                original: r.number,
+                sale: instead,
+                reason: String::new(),
+                approval_back: None,
+            },
+        )),
+        ["sale.edit_customer"]
+    );
+    // The till's list finds sales by customer, and shows corrections.
+    let found = list_sales(
+        &s,
+        &SalesQuery {
+            search: "abou".into(),
+            limit: 10,
+            offset: 0,
+        },
+    )?;
+    assert_eq!(found.rows.len(), 3);
+    assert!(
+        found
+            .rows
+            .iter()
+            .all(|r| r.customer_name.as_deref() == Some("Abou El Kacem"))
+    );
+    let all = list_sales(
+        &s,
+        &SalesQuery {
+            limit: 50,
+            ..Default::default()
+        },
+    )?;
+    let first = all.rows.iter().find(|r| r.number == fixed.sale.number);
+    assert!(first.is_some_and(|r| r.replaces.is_some()));
+    assert!(
+        all.rows
+            .iter()
+            .any(|r| r.edited_into.as_deref() == Some(fixed.sale.number.as_str()))
+    );
+    assert!(
+        all.rows
+            .iter()
+            .any(|r| r.replaces.is_some() && r.edited_into.is_some()),
+        "corrected twice"
+    );
+    let partly = all.rows.iter().find(|r| r.credit_minor > 0);
+    assert!(partly.is_some_and(|r| r.paid_minor + r.credit_minor == r.total_minor));
+    healthy(&s)
+}
+
+#[test]
+fn document_settings_and_logo_are_kept() -> R {
+    use nb_store::usecases::printing::{DocSettings, document_settings, save_document_settings};
+    let (mut s, setup) = store();
+    assert_eq!(document_settings(&s)?, DocSettings::default());
+    let mine = DocSettings {
+        notice: "  Toute réclamation sous 24 h  ".into(),
+        balance: false,
+        ..DocSettings::default()
+    };
+    let png = vec![0x89, b'P', b'N', b'G', 0, 1, 2];
+    let saved =
+        save_document_settings(&mut s, meta(&setup, "docs"), mine, Some(Some(png.clone())))?;
+    assert_eq!(saved.notice, "Toute réclamation sous 24 h");
+    assert_eq!(document_settings(&s)?, saved);
+    assert_eq!(saved.logo.as_deref(), Some(&png[..]));
+    // Kept when not given; removed on request.
+    let again = save_document_settings(&mut s, meta(&setup, "docs"), saved.clone(), None)?;
+    assert_eq!(again.logo, saved.logo);
+    let gone = save_document_settings(&mut s, meta(&setup, "docs"), saved, Some(None))?;
+    assert_eq!(gone.logo, None);
+    assert_eq!(
+        err(save_document_settings(
+            &mut s,
+            meta(&setup, "docs"),
+            DocSettings::default(),
+            Some(Some(b"GIF89a".to_vec()))
+        )),
+        ["documents.logo"]
+    );
+    Ok(())
+}

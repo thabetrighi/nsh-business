@@ -637,3 +637,230 @@ pub fn take_held(store: &mut Store, meta: OpMeta, id: &str) -> Result<HeldCart> 
         Ok(held)
     })
 }
+
+// ------------------------------------------------------------- corrections
+
+/// A line of a sale as the till reopens it: what is left of it, at the
+/// price it was sold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditLine {
+    pub position: u32,
+    pub product_id: Option<String>,
+    pub name: String,
+    pub unit: String,
+    /// What is left of the line (sold less returned).
+    pub qty_milli: i64,
+    pub unit_price_minor: i64,
+    /// The line's own discount, in basis points of its price.
+    pub discount_bps: i64,
+    pub tax_bps: i64,
+}
+
+/// A sale reopened at the till to be corrected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaleToEdit {
+    pub id: String,
+    pub number: String,
+    pub created_at: i64,
+    pub customer_id: Option<String>,
+    /// What is left of it to take back (its total less what came back).
+    pub value_minor: i64,
+    pub lines: Vec<EditLine>,
+    /// Paid at the time: (method, amount kept).
+    pub payments: Vec<(String, i64)>,
+    /// Already corrected: the corrected sale's number.
+    pub edited_into: Option<String>,
+}
+
+/// A sale by number or id, as the till reopens it.
+pub fn sale_to_edit(store: &Store, number: &str) -> Result<SaleToEdit> {
+    store.read(|r| {
+        let c = r.conn();
+        let d = sale_detail(c, number)?;
+        let edited_into: Option<String> = c
+            .query_row(
+                "SELECT s.number FROM sale_edits e JOIN sales s ON s.id = e.sale_id WHERE e.original_id = ?1",
+                [&d.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut s = c.prepare(
+            "SELECT position, unit_price_minor, line_discount_minor, qty_milli, tax_bps
+             FROM sale_lines WHERE sale_id = ?1 ORDER BY position",
+        )?;
+        let extra: Vec<(u32, i64, i64, i64, i64)> = s
+            .query_map([&d.id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        let lines = d
+            .lines
+            .iter()
+            .filter(|l| l.returnable_milli() > 0)
+            .map(|l| {
+                let (_, price, disc, qty, tax) = extra
+                    .iter()
+                    .find(|e| e.0 == l.position)
+                    .copied()
+                    .unwrap_or((l.position, l.unit_price_minor, 0, l.qty_milli, 0));
+                // price × qty (milli) is the line before its discount.
+                let before = i128::from(price) * i128::from(qty) / 1000;
+                let bps = if before > 0 {
+                    i64::try_from(i128::from(disc) * 10_000 / before).unwrap_or(0)
+                } else {
+                    0
+                };
+                EditLine {
+                    position: l.position,
+                    product_id: l.product_id.clone(),
+                    name: l.name.clone(),
+                    unit: l.unit.clone(),
+                    qty_milli: l.returnable_milli(),
+                    unit_price_minor: price,
+                    discount_bps: bps,
+                    tax_bps: tax,
+                }
+            })
+            .collect();
+        let mut s = c.prepare(
+            "SELECT method, SUM(amount_minor) FROM payments WHERE sale_id = ?1
+             GROUP BY method ORDER BY MIN(rowid)",
+        )?;
+        let payments = s
+            .query_map([&d.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(SaleToEdit {
+            value_minor: d.total_minor - d.returned_minor,
+            id: d.id,
+            number: d.number,
+            created_at: d.created_at,
+            customer_id: d.customer_id,
+            lines,
+            payments,
+            edited_into,
+        })
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditInput {
+    /// The sale corrected (id or number).
+    pub original: String,
+    /// The sale as it should have been; what it costs beyond what the
+    /// original was worth is paid as usual.
+    pub sale: crate::usecases::sales::SaleInput,
+    pub reason: String,
+    /// A supervisor's approval for taking the original back.
+    #[serde(default)]
+    pub approval_back: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditResult {
+    pub back: ReturnResult,
+    pub sale: crate::usecases::sales::SaleResult,
+    /// What the original was worth, now counted towards the new sale.
+    pub carried_minor: i64,
+}
+
+/// Corrects a receipt at the till: what is left of the original comes back
+/// and the corrected sale is made, in one operation. Nothing written is
+/// changed: the original stays, reversed by its return.
+///
+/// - Sold with nothing on account: its value pays the new sale as an
+///   exchange does (the customer pays the difference or gets it back).
+/// - Sold partly or wholly on account: its value comes off the customer's
+///   account and the new sale goes on as usual, so the debt moves by the
+///   difference only.
+pub fn edit_sale(store: &mut Store, meta: OpMeta, input: EditInput) -> Result<EditResult> {
+    let offset = store.read(|r| Ok(r.utc_offset_min))?;
+    store.write(meta, |w| {
+        let original = sale_detail(w.tx(), &input.original)?;
+        let done: Option<String> = w
+            .tx()
+            .query_row(
+                "SELECT id FROM sale_edits WHERE original_id = ?1",
+                [&original.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if done.is_some() {
+            return Err(RuleError::on("sale", "sale.edited").into());
+        }
+        let new_customer = input.sale.customer_id.as_deref().filter(|c| !c.is_empty());
+        if let Some(c) = original.customer_id.as_deref()
+            && new_customer != Some(c)
+        {
+            return Err(RuleError::on("customer", "sale.edit_customer").into());
+        }
+        let on_account: i64 = w.tx().query_row(
+            "SELECT credit_minor FROM sales WHERE id = ?1",
+            [&original.id],
+            |r| r.get(0),
+        )?;
+        let lines: Vec<ReturnLineInput> = original
+            .lines
+            .iter()
+            .filter(|l| l.returnable_milli() > 0)
+            .map(|l| ReturnLineInput {
+                position: l.position,
+                qty: Quantity::from_milli(l.returnable_milli()).to_string(),
+                restock: true,
+            })
+            .collect();
+        let reason = if input.reason.trim().is_empty() {
+            format!("edit {}", original.number)
+        } else {
+            input.reason.trim().to_owned()
+        };
+        let back_input = ReturnInput {
+            sale: original.id.clone(),
+            register_id: input.sale.register_id.clone(),
+            lines,
+            refund: "credit".into(),
+            reason: reason.clone(),
+            approval: input.approval_back.clone(),
+        };
+        let (back, sale) = if on_account > 0 {
+            let back = return_in(w, &back_input, offset, false)?;
+            let sale = crate::usecases::sales::sale_in(w, &input.sale, offset, 0)?;
+            (back, sale)
+        } else {
+            let back = return_in(w, &back_input, offset, true)?;
+            let sale = crate::usecases::sales::sale_in(w, &input.sale, offset, back.total_minor)?;
+            let shift: String = w.tx().query_row(
+                "SELECT shift_id FROM sales WHERE id = ?1",
+                [&sale.id],
+                |r| r.get(0),
+            )?;
+            if crate::usecases::sales::shift_of(w.tx(), &shift)?.expected_minor < 0 {
+                return Err(RuleError::on("refund", "shift.not_enough_cash").into());
+            }
+            (back, sale)
+        };
+        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        w.tx().execute(
+            "INSERT INTO sale_edits (id, org_id, original_id, return_id, sale_id, reason, operation_id, created_at, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                id,
+                w.org()?.to_string(),
+                original.id,
+                back.id,
+                sale.id,
+                reason,
+                w.meta().id.to_string(),
+                w.now(),
+                w.actor_text()
+            ],
+        )?;
+        let out = EditResult {
+            carried_minor: back.total_minor,
+            back,
+            sale,
+        };
+        w.event("sale.edited", "sale_edit", &id, &out)?;
+        w.audit("edit", "sale", &original.id, &input)?;
+        Ok(out)
+    })
+}

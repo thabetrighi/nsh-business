@@ -93,6 +93,10 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0025_scale_prefix_20",
         include_str!("../migrations/0025_scale_prefix_20.sql"),
     ),
+    (
+        "0026_documents_balances_edits",
+        include_str!("../migrations/0026_documents_balances_edits.sql"),
+    ),
 ];
 
 pub fn latest() -> u32 {

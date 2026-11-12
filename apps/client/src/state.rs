@@ -139,12 +139,7 @@ pub fn persisted_index(key: &'static str, default: usize) -> Signal<usize> {
     s
 }
 
-/// A text setting saved on the device.
-pub fn persisted_text(key: &'static str) -> Signal<String> {
-    let s = signal(stored(key, |v| Some(v.to_owned())).unwrap_or_default());
-    effect(move || save(key, &s.get()));
-    s
-}
+const K_PRINTERS: &str = "nb.printers";
 
 /// An on/off setting saved on the device.
 pub fn persisted_flag(key: &'static str, default: bool) -> Signal<bool> {
@@ -162,38 +157,44 @@ pub struct BizPrefs {
     pub show_cents: Signal<bool>,
     pub prices_incl_tax: Signal<bool>,
     pub stamp_duty: Signal<bool>,
-    pub tax_on_receipt: Signal<bool>,
-    pub receipt_width: Signal<usize>,
-    pub printer: Signal<usize>,
-    /// The network printer's address (`host` or `host:port`, 9100 by default).
-    pub printer_addr: Signal<String>,
-    /// Invoices: 0 = A4, 1 = A5.
-    pub invoice_paper: Signal<usize>,
+    /// This device's printers (settings › printing).
+    pub printers: Signal<Vec<crate::printers::Printer>>,
+    /// Print the receipt after each sale.
     pub auto_print: Signal<bool>,
-    pub copies: Signal<usize>,
+    /// Show what will print before printing it.
+    pub preview_first: Signal<bool>,
     pub scale: Signal<usize>,
     pub scanner: Signal<bool>,
-    pub drawer: Signal<bool>,
 }
 
 impl BizPrefs {
     fn load() -> Self {
+        // The first version kept one network printer: it carries over.
+        let mut printers =
+            stored(K_PRINTERS, |v| Some(crate::printers::parse(v))).unwrap_or_default();
+        if printers.is_empty()
+            && let Some(old) = crate::printers::from_old(
+                &stored("nb.print.addr", |v| Some(v.to_owned())).unwrap_or_default(),
+                stored("nb.print.width", |v| v.parse().ok()).unwrap_or(1),
+                stored("nb.print.copies", |v| v.parse().ok()).unwrap_or(0),
+                stored("nb.device.drawer", |v| v.parse().ok()).unwrap_or(false),
+            )
+        {
+            printers.push(old);
+        }
+        let printers = signal(printers);
+        effect(move || save(K_PRINTERS, &crate::printers::to_json(&printers.get())));
         Self {
             start_page: persisted_index("nb.app.start", 0),
             confirm_delete: persisted_flag("nb.app.confirm_delete", true),
             show_cents: persisted_flag("nb.fmt.cents", true),
             prices_incl_tax: persisted_flag("nb.tax.included", true),
             stamp_duty: persisted_flag("nb.tax.stamp", true),
-            tax_on_receipt: persisted_flag("nb.tax.on_receipt", true),
-            receipt_width: persisted_index("nb.print.width", 1),
-            printer: persisted_index("nb.print.printer", 0),
-            printer_addr: persisted_text("nb.print.addr"),
-            invoice_paper: persisted_index("nb.print.invoice", 0),
+            printers,
             auto_print: persisted_flag("nb.print.auto", false),
-            copies: persisted_index("nb.print.copies", 0),
+            preview_first: persisted_flag("nb.print.preview", false),
             scale: persisted_index("nb.device.scale", 0),
             scanner: persisted_flag("nb.device.scanner", true),
-            drawer: persisted_flag("nb.device.drawer", false),
         }
     }
 }

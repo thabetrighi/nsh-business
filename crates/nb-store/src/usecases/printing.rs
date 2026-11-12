@@ -40,6 +40,10 @@ pub struct PrintSale {
     pub change_minor: i64,
     /// Left on the customer's account.
     pub owed_minor: i64,
+    /// The customer's balance before and after the sale.
+    pub balance: Option<(i64, i64)>,
+    /// Paid on older debt with the sale (counted in `payments`).
+    pub settled_minor: i64,
 }
 
 /// The shop's name and legal identity.
@@ -153,6 +157,25 @@ pub fn print_sale(store: &Store, number: &str) -> Result<PrintSale> {
         {
             cash.1 += change;
         }
+        // Older debt paid with it was handed over too.
+        let balance: Option<(i64, i64, i64, Option<String>)> = c
+            .query_row(
+                "SELECT b.before_minor, b.after_minor, b.settled_minor, r.method
+                 FROM sale_balances b LEFT JOIN receipts r ON r.id = b.receipt_id
+                 WHERE b.sale_id = ?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let settled = balance.as_ref().map_or(0, |b| b.2);
+        if let Some((_, _, settled, Some(method))) = &balance
+            && *settled > 0
+        {
+            match payments.iter_mut().find(|p| &p.0 == method) {
+                Some(p) => p.1 += settled,
+                None => payments.push((method.clone(), *settled)),
+            }
+        }
         let customer = match customer {
             Some(cid) => c
                 .query_row(
@@ -188,6 +211,159 @@ pub fn print_sale(store: &Store, number: &str) -> Result<PrintSale> {
             payments,
             change_minor: change,
             owed_minor: owed,
+            balance: balance.map(|b| (b.0, b.1)),
+            settled_minor: settled,
+        })
+    })
+}
+
+/// What the shop's documents show (settings › printing), and its logo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocSettings {
+    pub tagline: String,
+    /// The line at the bottom of receipts (empty: a thank-you).
+    pub footer: String,
+    /// A notice under it (returns policy…).
+    pub notice: String,
+    pub legal_ids: bool,
+    pub vat: bool,
+    pub cashier: bool,
+    pub table: bool,
+    pub count: bool,
+    pub balance: bool,
+    pub barcode: bool,
+    /// A grey PNG, at most 576 dots wide (made by the app from the image
+    /// chosen).
+    #[serde(skip)]
+    pub logo: Option<Vec<u8>>,
+}
+
+impl Default for DocSettings {
+    fn default() -> Self {
+        Self {
+            tagline: String::new(),
+            footer: String::new(),
+            notice: String::new(),
+            legal_ids: true,
+            vat: true,
+            cashier: true,
+            table: true,
+            count: true,
+            balance: true,
+            barcode: true,
+            logo: None,
+        }
+    }
+}
+
+/// The largest logo kept.
+pub const LOGO_MAX_BYTES: usize = 512 * 1024;
+
+pub fn document_settings(store: &Store) -> Result<DocSettings> {
+    store.read(|r| {
+        let (org, _) = the_org(r.conn())?;
+        Ok(r.conn()
+            .query_row(
+                "SELECT tagline, footer, notice, legal_ids, vat, cashier, table_lines, item_count, balance, barcode, logo
+                 FROM document_settings WHERE org_id = ?1",
+                [org.to_string()],
+                |r| {
+                    Ok(DocSettings {
+                        tagline: r.get(0)?,
+                        footer: r.get(1)?,
+                        notice: r.get(2)?,
+                        legal_ids: r.get(3)?,
+                        vat: r.get(4)?,
+                        cashier: r.get(5)?,
+                        table: r.get(6)?,
+                        count: r.get(7)?,
+                        balance: r.get(8)?,
+                        barcode: r.get(9)?,
+                        logo: r.get(10)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    })
+}
+
+/// Saves what documents show; `logo` replaces the logo (`Some(None)`
+/// removes it, `None` keeps it).
+pub fn save_document_settings(
+    store: &mut Store,
+    meta: crate::OpMeta,
+    s: DocSettings,
+    logo: Option<Option<Vec<u8>>>,
+) -> Result<DocSettings> {
+    let mut errors = Vec::new();
+    for (field, text, max) in [
+        ("tagline", &s.tagline, 120),
+        ("footer", &s.footer, 200),
+        ("notice", &s.notice, 300),
+    ] {
+        if text.chars().count() > max {
+            errors.push(nb_domain::RuleError::on(field, "documents.text_long"));
+        }
+    }
+    if let Some(Some(bytes)) = &logo
+        && (bytes.len() > LOGO_MAX_BYTES || !bytes.starts_with(&[0x89, b'P', b'N', b'G']))
+    {
+        errors.push(nb_domain::RuleError::on("logo", "documents.logo"));
+    }
+    if !errors.is_empty() {
+        return Err(errors.into());
+    }
+    store.write(meta, |w| {
+        let id = w.org()?;
+        w.require(
+            nb_domain::access::Permission::SettingsEdit,
+            &nb_domain::access::Target::org(),
+        )?;
+        let trimmed = DocSettings {
+            tagline: s.tagline.trim().into(),
+            footer: s.footer.trim().into(),
+            notice: s.notice.trim().into(),
+            ..s.clone()
+        };
+        w.tx().execute(
+            "INSERT INTO document_settings (org_id, tagline, footer, notice, legal_ids, vat, cashier, table_lines,
+                    item_count, balance, barcode, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT (org_id) DO UPDATE SET tagline = ?2, footer = ?3, notice = ?4, legal_ids = ?5, vat = ?6,
+                cashier = ?7, table_lines = ?8, item_count = ?9, balance = ?10, barcode = ?11, updated_at = ?12,
+                version = version + 1",
+            params![
+                id.to_string(),
+                trimmed.tagline,
+                trimmed.footer,
+                trimmed.notice,
+                trimmed.legal_ids,
+                trimmed.vat,
+                trimmed.cashier,
+                trimmed.table,
+                trimmed.count,
+                trimmed.balance,
+                trimmed.barcode,
+                w.now()
+            ],
+        )?;
+        if let Some(logo) = &logo {
+            w.tx().execute(
+                "UPDATE document_settings SET logo = ?2 WHERE org_id = ?1",
+                params![id.to_string(), logo],
+            )?;
+        }
+        let logo_now: Option<Vec<u8>> = w.tx().query_row(
+            "SELECT logo FROM document_settings WHERE org_id = ?1",
+            [id.to_string()],
+            |r| r.get(0),
+        )?;
+        w.event("org.documents_updated", "organization", &id.to_string(), &trimmed)?;
+        w.audit("update_documents", "organization", &id.to_string(), &trimmed)?;
+        Ok(DocSettings {
+            logo: logo_now,
+            ..trimmed
         })
     })
 }

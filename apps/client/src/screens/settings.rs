@@ -209,7 +209,11 @@ fn tab_key(code: &str, suffix: &str) -> String {
 
 /// A card of setting rows, separated by hairlines.
 /// A card of setting rows; titled when the tab has several cards.
-fn group_card(st: AppState, head: Option<(Icon, &'static str)>, rows: Vec<View>) -> View {
+pub(crate) fn group_card(
+    st: AppState,
+    head: Option<(Icon, &'static str)>,
+    rows: Vec<View>,
+) -> View {
     let mut c = card();
     if let Some((which, title)) = head {
         c = c.child(card_header_icon(Some(which), st.t(title), None, view()));
@@ -223,7 +227,13 @@ fn group_card(st: AppState, head: Option<(Icon, &'static str)>, rows: Vec<View>)
     c
 }
 
-fn row(st: AppState, name: &'static str, help: &'static str, control: View, compact: bool) -> View {
+pub(crate) fn row(
+    st: AppState,
+    name: &'static str,
+    help: &'static str,
+    control: View,
+    compact: bool,
+) -> View {
     setting_row(st.t(name), st.t(help), control, compact)
 }
 
@@ -922,120 +932,25 @@ fn taxes(st: AppState, compact: bool) -> View {
                     switch(b.stamp_duty, st.t("tax.stamp")),
                     compact,
                 ),
-                row(
-                    st,
-                    "tax.on_receipt",
-                    "tax.on_receipt.help",
-                    switch(b.tax_on_receipt, st.t("tax.on_receipt")),
-                    compact,
-                ),
             ],
         ))
 }
 
 fn printing(st: AppState, compact: bool) -> View {
-    let b = st.biz;
-    let test = move || {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let addr = b.printer_addr.get_untracked().trim().to_owned();
-            if b.printer.get_untracked() == 0 || addr.is_empty() {
-                show_toast(st, st.tn("print.no_address"));
-                return;
-            }
-            let roll = if b.receipt_width.get_untracked() == 0 {
-                nb_docs::Paper::Roll58
-            } else {
-                nb_docs::Paper::Roll80
-            };
-            crate::screens::printing::test_print(st, addr, roll);
-        }
-        #[cfg(target_arch = "wasm32")]
-        show_toast(st, st.tn("print.unavailable"));
-    };
-    view().gap(px(20.0)).child(group_card(
-        st,
-        None,
-        vec![
-            row(
-                st,
-                "print.printer",
-                "print.printer.help",
-                view()
-                    .w_full()
-                    .gap(px(8.0))
-                    .child(
-                        dropdown(
-                            move || {
-                                vec![(0usize, st.tn("print.none")), (1, st.tn("print.network"))]
-                            },
-                            b.printer,
-                            Some(Icon::Printer),
-                            st.t("print.printer"),
-                            "printer-select",
-                        )
-                        .w_full(),
-                    )
-                    .child(when(
-                        move || b.printer.get() > 0,
-                        move || {
-                            field(
-                                st.t("print.addr"),
-                                b.printer_addr,
-                                || "192.168.1.50:9100".to_owned(),
-                                String::new,
-                                KeyboardType::Default,
-                                "printer-addr",
-                            )
-                        },
-                    )),
-                compact,
-            ),
-            row(
-                st,
-                "print.width",
-                "print.width.help",
-                segmented(plain_choices(&["58 mm", "80 mm"]), b.receipt_width),
-                compact,
-            ),
-            row(
-                st,
-                "print.copies",
-                "print.copies.help",
-                segmented(plain_choices(&["1", "2"]), b.copies),
-                compact,
-            ),
-            row(
-                st,
-                "print.auto",
-                "print.auto.help",
-                switch(b.auto_print, st.t("print.auto")),
-                compact,
-            ),
-            row(
-                st,
-                "print.invoice_paper",
-                "print.invoice_paper.help",
-                segmented(plain_choices(&["A4", "A5"]), b.invoice_paper),
-                compact,
-            ),
-            view()
-                .px(px(20.0))
-                .py(px(14.0))
-                .flex_row()
-                .justify_end()
-                .child(
-                    button(
-                        Variant::Secondary,
-                        Size::Md,
-                        Some(Icon::Printer),
-                        st.t("action.test_print"),
-                        test,
-                    )
-                    .test_id("printer-test"),
-                ),
-        ],
-    ))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::screens::settings_printing::printing_settings(st, compact)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = compact;
+        view().child(label(
+            st.t("print.unavailable"),
+            ty::SM,
+            FontWeight::NORMAL,
+            Tone::Muted,
+        ))
+    }
 }
 
 fn devices(st: AppState, compact: bool) -> View {
@@ -1071,13 +986,6 @@ fn devices(st: AppState, compact: bool) -> View {
                     "device.scanner",
                     "device.scanner.help",
                     switch(b.scanner, st.t("device.scanner")),
-                    compact,
-                ),
-                row(
-                    st,
-                    "device.drawer",
-                    "device.drawer.help",
-                    switch(b.drawer, st.t("device.drawer")),
                     compact,
                 ),
             ],

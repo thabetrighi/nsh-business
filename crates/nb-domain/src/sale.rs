@@ -262,6 +262,98 @@ pub fn settle(
     })
 }
 
+/// What the till shows a customer paying in cash ("bon par bon"): of the
+/// cash `given` for a sale of `due`, what goes to their older debt
+/// (`owed`), the change, and what they owe after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BonParBon {
+    /// Paid on the older debt.
+    pub settle: i64,
+    pub change: i64,
+    /// Left on the account from this sale (cash short of it).
+    pub on_account: i64,
+    /// What the customer owes after the sale.
+    pub after: i64,
+}
+
+/// Cash beyond the sale pays the older debt first, then comes back as
+/// change; cash short of the sale goes on the account. In minor units.
+pub fn bon_par_bon(due: i64, given: i64, owed: i64) -> BonParBon {
+    let due = due.max(0);
+    let given = given.max(0);
+    if given >= due {
+        let settle = (given - due).min(owed.max(0));
+        BonParBon {
+            settle,
+            change: given - due - settle,
+            on_account: 0,
+            after: owed - settle,
+        }
+    } else {
+        BonParBon {
+            settle: 0,
+            change: 0,
+            on_account: due - given,
+            after: owed + due - given,
+        }
+    }
+}
+
+/// "Bon par bon": of what the customer hands over at a sale, `settle`
+/// pays their older debt (`owed`) instead of the sale. It comes out of one
+/// method — cash first, then card, then transfer — and what is left must
+/// still pay the whole sale (`due`): paying old debt while leaving new debt
+/// would only move it. Returns what is left for the sale, and the method
+/// the debt is paid with.
+pub fn take_settlement(
+    due: Money,
+    given: &[(Method, Money)],
+    settle: Money,
+    owed: Money,
+) -> Result<(Vec<(Method, Money)>, Method), RuleError> {
+    if settle.is_negative() {
+        return Err(RuleError::on("settle", "ledger.negative"));
+    }
+    if settle.minor() > owed.minor().max(0) {
+        return Err(RuleError::on("settle", "sale.settle_more_than_owed"));
+    }
+    let total = |m: Method| {
+        given
+            .iter()
+            .filter(|(g, _)| *g == m)
+            .map(|(_, a)| a.minor())
+            .sum::<i64>()
+    };
+    let method = [Method::Cash, Method::Card, Method::Transfer]
+        .into_iter()
+        .find(|m| total(*m) >= settle.minor())
+        .ok_or(RuleError::on("settle", "sale.settle_one_method"))?;
+    let mut left = settle.minor();
+    let mut out = Vec::with_capacity(given.len());
+    for (m, a) in given {
+        if *m == method && left > 0 {
+            let take = a.minor().min(left);
+            left -= take;
+            out.push((*m, Money::from_minor(a.minor() - take, a.currency())));
+        } else {
+            out.push((*m, *a));
+        }
+    }
+    let paid: i64 = out
+        .iter()
+        .filter(|(m, _)| *m != Method::Credit)
+        .map(|(_, a)| a.minor())
+        .sum();
+    if paid < due.minor()
+        || out
+            .iter()
+            .any(|(m, a)| *m == Method::Credit && !a.is_zero())
+    {
+        return Err(RuleError::on("settle", "sale.settle_needs_full_payment"));
+    }
+    Ok((out, method))
+}
+
 /// In an exchange, the part of what came back that pays the new sale;
 /// the rest is given back, or the customer pays what the new sale needs
 /// beyond it.
@@ -341,6 +433,95 @@ fn unit_cost(unit: i64, qty_milli: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cash_beyond_the_sale_pays_old_debt_then_comes_back() {
+        // The screenshot: 297 500 due, 1 224 943.58 owed, all of it handed over.
+        assert_eq!(
+            bon_par_bon(29_750_000, 152_244_358, 122_494_358),
+            BonParBon {
+                settle: 122_494_358,
+                change: 0,
+                on_account: 0,
+                after: 0
+            }
+        );
+        assert_eq!(
+            bon_par_bon(1_000, 5_000, 3_000),
+            BonParBon {
+                settle: 3_000,
+                change: 1_000,
+                on_account: 0,
+                after: 0
+            }
+        );
+        assert_eq!(
+            bon_par_bon(1_000, 600, 3_000),
+            BonParBon {
+                settle: 0,
+                change: 0,
+                on_account: 400,
+                after: 3_400
+            }
+        );
+        // Nothing owed, or an advance: all extra cash is change.
+        assert_eq!(bon_par_bon(1_000, 1_500, -200).change, 500);
+    }
+
+    #[test]
+    fn bon_par_bon_pays_old_debt_from_one_method() {
+        let d = |v: i64| Money::from_minor(v, Currency::DZD);
+        // The screenshot: 297 500.00 due, 1 224 943.58 owed, all handed over.
+        let given = [(Method::Cash, d(152_244_358))];
+        let (left, m) = take_settlement(d(29_750_000), &given, d(122_494_358), d(122_494_358))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(m, Method::Cash);
+        assert_eq!(left, [(Method::Cash, d(29_750_000))]);
+        let ok = |due, given: &[(Method, Money)], settle, owed| {
+            take_settlement(d(due), given, d(settle), d(owed)).map_err(|e| e.code)
+        };
+        assert_eq!(
+            ok(1_000, &[(Method::Cash, d(5_000))], 5_000, 4_000).err(),
+            Some("sale.settle_more_than_owed")
+        );
+        assert_eq!(
+            ok(1_000, &[(Method::Cash, d(1_500))], 1_000, 4_000).err(),
+            Some("sale.settle_needs_full_payment")
+        );
+        assert_eq!(
+            ok(
+                1_000,
+                &[(Method::Cash, d(500)), (Method::Card, d(500))],
+                800,
+                4_000
+            )
+            .err(),
+            Some("sale.settle_one_method")
+        );
+        assert_eq!(
+            ok(
+                1_000,
+                &[(Method::Cash, d(1_000)), (Method::Credit, d(1_000))],
+                1_000,
+                4_000
+            )
+            .err(),
+            Some("sale.settle_needs_full_payment")
+        );
+        // Card pays the debt when cash is short of it.
+        let (left, m) = take_settlement(
+            d(1_000),
+            &[(Method::Cash, d(1_000)), (Method::Card, d(3_000))],
+            d(3_000),
+            d(3_000),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!((m, left[1].1), (Method::Card, d(0)));
+        // Change still comes out of cash.
+        let (left, _) = take_settlement(d(1_000), &[(Method::Cash, d(5_000))], d(2_000), d(2_000))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(left, [(Method::Cash, d(3_000))]);
+    }
     use super::*;
     use nb_core::Currency;
 

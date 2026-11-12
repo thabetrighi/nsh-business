@@ -130,6 +130,9 @@ fn archive(st: AppState, ids: Vec<ProductId>) {
 
 pub fn products(st: AppState, compact: bool) -> View {
     // NB_OPEN=add_product (development): open the form at start, for screenshots.
+    // The product whose label is being printed.
+    let labeling: Signal<Option<ProductRow>> = signal(None);
+    let labeling_open = signal(false);
     let editor: Signal<Option<Target>> =
         signal((std::env::var("NB_OPEN").as_deref() == Ok("add_product")).then_some(Target::New));
     // Opened from the command palette's "Add a product".
@@ -789,7 +792,12 @@ pub fn products(st: AppState, compact: bool) -> View {
                                 editor.set(Some(Target::Copy(p.id)));
                             }
                         }),
-                        Action::new(Icon::Printer, st.tn("products.print_label"), || {}),
+                        Action::new(Icon::Printer, st.tn("products.print_label"), move || {
+                            if let Some(p) = p.get_untracked() {
+                                labeling.set(Some(p));
+                                labeling_open.set(true);
+                            }
+                        }),
                         Action::new(Icon::Trash, st.tn("action.delete"), move || {
                             if let Some(id) = p.get_untracked().and_then(|p| p.product_id().ok()) {
                                 archive(st, vec![id]);
@@ -912,6 +920,22 @@ pub fn products(st: AppState, compact: bool) -> View {
                 move || importing.set(false),
             )
             .into_element()
+        }))
+        .child(modal(labeling_open, compact, move || {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(p) = labeling.get_untracked() {
+                let item = crate::screens::printing::LabelItem {
+                    name: p.name.clone(),
+                    price_minor: p.price_minor,
+                    unit: p.units.first().map(|u| u.code.clone()).unwrap_or_default(),
+                    barcode: p.barcodes.first().cloned(),
+                };
+                return crate::screens::printing::label_dialog(st, item, move || {
+                    labeling_open.set(false)
+                })
+                .into_element();
+            }
+            view().into_element()
         }));
     // The editor takes the page while open; the list (and its filters)
     // waits underneath, as it was.

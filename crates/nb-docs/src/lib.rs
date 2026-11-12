@@ -14,61 +14,90 @@
 //! points (dots and points), never money.
 #![allow(clippy::float_arithmetic)] // page geometry only; money is text here
 
+pub mod barcode;
 mod escpos;
+pub mod label;
 mod layout;
+pub mod logo;
 mod pdf;
 mod preview;
 pub mod templates;
 
-pub use escpos::{EscPos, OPEN_DRAWER, decode as decode_escpos, escpos};
+pub use escpos::{EscPos, OPEN_DRAWER, decode as decode_escpos, escpos, escpos_with};
 pub use pdf::pdf;
 pub use preview::preview;
 
 /// The paper a document is laid out for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Paper {
-    /// Thermal roll, 58 mm (384 dots at 203 dpi).
-    Roll58,
-    /// Thermal roll, 80 mm (576 dots at 203 dpi).
-    Roll80,
+    /// A thermal roll, by its printable width in dots (203 dpi: 8 dots a
+    /// millimetre); its length follows the content.
+    Roll {
+        dots: u32,
+    },
+    /// A label of a fixed size in millimetres (thermal, 203 dpi).
+    Label {
+        w_mm: u16,
+        h_mm: u16,
+    },
     A4,
     A5,
 }
 
 impl Paper {
-    pub fn code(self) -> &'static str {
-        match self {
-            Paper::Roll58 => "58mm",
-            Paper::Roll80 => "80mm",
-            Paper::A4 => "a4",
-            Paper::A5 => "a5",
-        }
+    /// 58 mm paper, 48 mm printed (384 dots).
+    pub const ROLL58: Paper = Paper::Roll { dots: 384 };
+    /// 80 mm paper, 72 mm printed (576 dots).
+    pub const ROLL80: Paper = Paper::Roll { dots: 576 };
+
+    /// A roll printing `mm` millimetres across (whole bytes of dots).
+    pub fn roll_mm(mm: u16) -> Self {
+        let dots = (u32::from(mm.clamp(20, 120)) * 8) / 8 * 8;
+        Paper::Roll { dots }
     }
 
-    pub fn parse(code: &str) -> Option<Self> {
-        [Paper::Roll58, Paper::Roll80, Paper::A4, Paper::A5]
-            .into_iter()
-            .find(|p| p.code() == code)
+    /// What a roll prints on paper `paper_mm` wide: the usual printable
+    /// width of thermal heads (58 → 48, 80 → 72), else 5 mm off each side.
+    pub fn printable_mm(paper_mm: u16) -> u16 {
+        match paper_mm {
+            58 => 48,
+            80 => 72,
+            w => w.saturating_sub(10).max(20),
+        }
     }
 
     pub fn is_roll(self) -> bool {
-        matches!(self, Paper::Roll58 | Paper::Roll80)
+        matches!(self, Paper::Roll { .. })
     }
 
-    /// Printable dots across a roll.
+    /// Drawn in thermal dots (a roll or a label), not on a sheet.
+    pub fn is_thermal(self) -> bool {
+        matches!(self, Paper::Roll { .. } | Paper::Label { .. })
+    }
+
+    /// Narrow enough to need the small type (58 mm and below).
+    pub fn is_narrow(self) -> bool {
+        matches!(self, Paper::Roll { dots } if dots <= 400)
+    }
+
+    /// Printable dots across a roll or a label.
     pub fn dots(self) -> u32 {
         match self {
-            Paper::Roll58 => 384,
-            Paper::A4 | Paper::A5 | Paper::Roll80 => 576,
+            Paper::Roll { dots } => dots,
+            Paper::Label { w_mm, .. } => u32::from(w_mm) * 8,
+            Paper::A4 | Paper::A5 => 576,
         }
     }
 
-    /// The sheet in points (1/72 inch), portrait.
+    /// The sheet in points (1/72 inch), portrait; a roll's height is 0
+    /// (it follows the content).
     pub fn sheet(self) -> (f32, f32) {
         match self {
             Paper::A4 => (595.28, 841.89),
             Paper::A5 => (419.53, 595.28),
-            // A roll's width in points at 203 dpi; its height follows the content.
+            Paper::Label { w_mm, h_mm } => {
+                (f32::from(w_mm) * 72.0 / 25.4, f32::from(h_mm) * 72.0 / 25.4)
+            }
             r => (r.dots() as f32 * 72.0 / 203.0, 0.0),
         }
     }
@@ -128,6 +157,24 @@ pub enum Block {
     },
     /// A dashed line across.
     Rule,
+    /// A solid line across (table borders).
+    Line,
+    /// A barcode, centred: its modules (`true` = bar) drawn `width` points
+    /// wide and `height` high, with its text under it.
+    Bars {
+        modules: Vec<bool>,
+        width: f32,
+        height: f32,
+        caption: Option<String>,
+    },
+    /// A picture (a logo), centred, `width` points wide: grey levels row
+    /// by row (0 black, 255 white).
+    Image {
+        gray: Vec<u8>,
+        w: u32,
+        h: u32,
+        width: f32,
+    },
     /// Empty space, in points.
     Gap(f32),
 }
@@ -177,7 +224,12 @@ impl Doc {
                     let v: Vec<&str> = cells.iter().map(|c| c.text.as_str()).collect();
                     out.push_str(&v.join(" | "));
                 }
-                Block::Rule => out.push_str("---"),
+                Block::Rule | Block::Line => out.push_str("---"),
+                Block::Bars { caption, .. } => match caption {
+                    Some(c) => out.push_str(&format!("[{c}]")),
+                    None => out.push_str("[bars]"),
+                },
+                Block::Image { .. } => out.push_str("[image]"),
                 Block::Gap(_) => continue,
             }
             out.push('\n');

@@ -452,6 +452,10 @@ pub struct SaleInput {
     /// The approved quote or order this sale invoices.
     #[serde(default)]
     pub document_id: Option<String>,
+    /// Of what is handed over, how much pays the customer's older debt
+    /// ("bon par bon"); the sale itself must then be paid in full.
+    #[serde(default)]
+    pub settle_minor: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,6 +471,12 @@ pub struct SaleResult {
     pub credit_minor: i64,
     pub change_minor: i64,
     pub cost_minor: i64,
+    /// Paid on the customer's older debt with this sale.
+    #[serde(default)]
+    pub settled_minor: i64,
+    /// The customer's balance before and after (with a customer).
+    #[serde(default)]
+    pub balance: Option<(i64, i64)>,
 }
 
 /// The lines' products and quantities, as typed.
@@ -666,6 +676,24 @@ pub(crate) fn sale_in(
             w.require_approved(Permission::SalesBelowMinPrice, &at_till, approval)?;
         }
         let customer = input.customer_id.as_deref().filter(|c| !c.is_empty());
+        let owed_before = match customer {
+            Some(c) => Some(crate::usecases::customers::load(w.tx(), c)?.balance_minor),
+            None => None,
+        };
+        // Bon par bon: part of what is handed over pays older debt.
+        let settle_minor = money_field("settle", input.settle_minor)?;
+        let (given, settle_method) = if settle_minor > 0 {
+            let owed = owed_before.ok_or(RuleError::on("settle", "sale.credit_needs_customer"))?;
+            let (left, m) = nb_domain::sale::take_settlement(
+                totals.total,
+                &given,
+                Money::from_minor(settle_minor, currency),
+                Money::from_minor(owed, currency),
+            )?;
+            (left, Some(m))
+        } else {
+            (given, None)
+        };
         let paid = settle(totals.total, &given, customer.is_some())?;
         // The customer must exist; credit past its limit needs a supervisor.
         if let Some(c) = customer {
@@ -800,6 +828,36 @@ pub(crate) fn sale_in(
             Some(&till_account),
             customer,
         )?;
+        // The older debt paid with it: a receipt in the same operation.
+        let mut receipt_id = None;
+        if let (Some(m), Some(c)) = (settle_method, customer) {
+            let r = crate::usecases::debts::collect_in(
+                w,
+                &crate::usecases::debts::ReceiptInput {
+                    customer_id: c.to_owned(),
+                    amount_minor: settle_minor,
+                    method: m.code().to_owned(),
+                    register_id: Some(input.register_id.clone()),
+                    note: number.clone(),
+                    ..Default::default()
+                },
+                currency,
+                offset,
+            )?;
+            receipt_id = Some(r.id);
+        }
+        let balance = match (customer, owed_before) {
+            (Some(c), Some(before)) => {
+                let after = crate::usecases::customers::load(w.tx(), c)?.balance_minor;
+                w.tx().execute(
+                    "INSERT INTO sale_balances (sale_id, customer_id, before_minor, after_minor, settled_minor, receipt_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![id, c, before, after, settle_minor, receipt_id],
+                )?;
+                Some((before, after))
+            }
+            _ => None,
+        };
         let out = SaleResult {
             id: id.clone(),
             number,
@@ -812,6 +870,8 @@ pub(crate) fn sale_in(
             credit_minor: paid.credit.minor(),
             change_minor: paid.change.minor(),
             cost_minor: cost.minor(),
+            settled_minor: settle_minor,
+            balance,
         };
         w.event("sale.completed", "sale", &id, &out)?;
         w.audit("complete", "sale", &id, input)?;
@@ -833,11 +893,25 @@ pub struct SaleRow {
     /// The quote or order it invoices.
     pub document: Option<String>,
     pub customer_id: Option<String>,
+    #[serde(default)]
+    pub customer_name: Option<String>,
+    /// Paid at the till (cash kept, card, transfer).
+    #[serde(default)]
+    pub paid_minor: i64,
+    /// Left on the customer's account.
+    #[serde(default)]
+    pub credit_minor: i64,
+    /// Corrected: the number of the sale that replaced it.
+    #[serde(default)]
+    pub edited_into: Option<String>,
+    /// A correction: the number of the sale it replaced.
+    #[serde(default)]
+    pub replaces: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SalesQuery {
-    /// In the number (or the document's).
+    /// In the number, the document's, the customer's name or phone.
     #[serde(default)]
     pub search: String,
     pub limit: u32,
@@ -857,8 +931,10 @@ pub fn list_sales(store: &Store, q: &SalesQuery) -> Result<SalesPage> {
         let (org, _) = the_org(r.conn())?;
         let search = q.search.trim().to_uppercase();
         let filter = " FROM sales s LEFT JOIN sales_documents d ON d.id = s.document_id
+             LEFT JOIN customers c ON c.id = s.customer_id
              WHERE s.org_id = ?1 AND (?2 = '' OR upper(s.number) LIKE '%' || ?2 || '%'
-                   OR upper(d.number) LIKE '%' || ?2 || '%')";
+                   OR upper(d.number) LIKE '%' || ?2 || '%' OR upper(c.name) LIKE '%' || ?2 || '%'
+                   OR c.phone LIKE '%' || ?2 || '%')";
         let (total, sum): (u32, i64) = r.conn().query_row(
             &format!("SELECT COUNT(*), COALESCE(SUM(s.total_minor), 0){filter}"),
             params![org.to_string(), search],
@@ -869,7 +945,9 @@ pub fn list_sales(store: &Store, q: &SalesQuery) -> Result<SalesPage> {
                     (SELECT COUNT(*) FROM sale_lines l WHERE l.sale_id = s.id),
                     s.cash_minor, s.card_minor, s.transfer_minor, s.credit_minor,
                     (SELECT COALESCE(SUM(x.total_minor), 0) FROM sale_returns x WHERE x.sale_id = s.id),
-                    d.number, s.customer_id
+                    d.number, s.customer_id, c.name,
+                    (SELECT n.number FROM sale_edits e JOIN sales n ON n.id = e.sale_id WHERE e.original_id = s.id),
+                    (SELECT o.number FROM sale_edits e JOIN sales o ON o.id = e.original_id WHERE e.sale_id = s.id)
              {filter} ORDER BY s.created_at DESC, s.number DESC LIMIT ?3 OFFSET ?4"
         ))?;
         let rows = st.query_map(
@@ -891,6 +969,11 @@ pub fn list_sales(store: &Store, q: &SalesQuery) -> Result<SalesPage> {
                     returned_minor: r.get(9)?,
                     document: r.get(10)?,
                     customer_id: r.get(11)?,
+                    customer_name: r.get(12)?,
+                    paid_minor: r.get::<_, i64>(5)? + r.get::<_, i64>(6)? + r.get::<_, i64>(7)?,
+                    credit_minor: r.get(8)?,
+                    edited_into: r.get(13)?,
+                    replaces: r.get(14)?,
                 })
             },
         )?;

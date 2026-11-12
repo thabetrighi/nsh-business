@@ -4,7 +4,7 @@
 use crate::escpos::{DOTS_PER_PT, raster};
 use crate::{Doc, DocError};
 
-fn png_of(width: usize, height: usize, gray: &[u8]) -> Result<Vec<u8>, DocError> {
+pub(crate) fn png_of(width: usize, height: usize, gray: &[u8]) -> Result<Vec<u8>, DocError> {
     let mut out = Vec::new();
     {
         let w = u32::try_from(width).map_err(|_| DocError("width".into()))?;
@@ -21,7 +21,9 @@ fn png_of(width: usize, height: usize, gray: &[u8]) -> Result<Vec<u8>, DocError>
 
 /// The document as a PNG (white page, black ink), and its size in pixels.
 pub fn preview(doc: &Doc) -> Result<(Vec<u8>, u32, u32), DocError> {
-    let rows = if doc.paper.is_roll() {
+    let rows = if matches!(doc.paper, crate::Paper::Label { .. }) {
+        crate::label::label_rows(doc)?
+    } else if doc.paper.is_roll() {
         raster(doc, doc.paper.dots(), 8.0, DOTS_PER_PT)
     } else {
         // A sheet at 96 dpi, with the PDF's margins.

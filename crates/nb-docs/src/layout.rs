@@ -52,8 +52,12 @@ pub(crate) struct Layout {
     pub height: f32,
     pub buffers: Vec<(Buffer, f32, f32)>,
     pub glyphs: Vec<PlacedGlyph>,
-    /// (y, x from, x to).
+    /// Dashed: (y, x from, x to).
     pub rules: Vec<(f32, f32, f32)>,
+    /// Filled rectangles (bars, solid lines): (x, y, w, h).
+    pub rects: Vec<(f32, f32, f32, f32)>,
+    /// Pictures: (x, y, w, h, block index in the document).
+    pub images: Vec<(f32, f32, f32, f32, usize)>,
 }
 
 fn align_for(place: Place, rtl: bool) -> Align {
@@ -125,8 +129,10 @@ pub(crate) fn layout(
         buffers: Vec::new(),
         glyphs: Vec::new(),
         rules: Vec::new(),
+        rects: Vec::new(),
+        images: Vec::new(),
     };
-    for b in &doc.blocks {
+    for (index, b) in doc.blocks.iter().enumerate() {
         match b {
             Block::Text {
                 text,
@@ -203,6 +209,59 @@ pub(crate) fn layout(
                 y += 3.0 * scale;
                 out.rules.push((y, margin, width - margin));
                 y += 4.0 * scale;
+            }
+            Block::Line => {
+                y += 2.0 * scale;
+                out.rects
+                    .push((margin, y, width - 2.0 * margin, (0.8 * scale).max(1.0)));
+                y += 3.0 * scale;
+            }
+            Block::Bars {
+                modules,
+                width: w,
+                height,
+                caption,
+            } => {
+                // Whole dots per module, so every bar prints the same.
+                let n = modules.len().max(1) as f32;
+                let module = ((w * scale / n).floor()).max(1.0).min(inner / n);
+                let total = module * n;
+                let x0 = margin + ((inner - total) / 2.0).max(0.0);
+                y += 2.0 * scale;
+                let mut i = 0;
+                while i < modules.len() {
+                    if modules[i] {
+                        let start = i;
+                        while i < modules.len() && modules[i] {
+                            i += 1;
+                        }
+                        out.rects.push((
+                            x0 + start as f32 * module,
+                            y,
+                            (i - start) as f32 * module,
+                            height * scale,
+                        ));
+                    } else {
+                        i += 1;
+                    }
+                }
+                y += height * scale;
+                if let Some(c) = caption {
+                    let buf = shape(fs, c, 7.0 * scale, false, inner, Align::Center);
+                    y += out.place(buf, margin, y, c);
+                }
+            }
+            Block::Image {
+                w: iw,
+                h: ih,
+                width: target,
+                ..
+            } => {
+                let w = (target * scale).min(inner);
+                let h = w * (*ih).max(1) as f32 / (*iw).max(1) as f32;
+                out.images
+                    .push((margin + (inner - w) / 2.0, y, w, h, index));
+                y += h + 2.0 * scale;
             }
             Block::Gap(g) => y += g * scale,
         }

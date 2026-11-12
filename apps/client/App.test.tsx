@@ -972,10 +972,10 @@ test("a sale's receipt and invoice are previewed, and the printer is set", async
   await app.waitFor("id:pay-confirm");
   await app.press("id:pay-confirm");
   await seen(/^Vente FV-01-\d\d-A\d+ enregistrée/);
-  await app.press("text:Ventes");
-  await app.press("id:nav-sales");
-  await app.waitFor("id:sale-print-0");
-  await app.press("id:sale-print-0");
+  // The sales at hand at the till (F1): reprint the last one.
+  await app.press("id:pos-sales");
+  await app.waitFor("id:pos-sale-print-0");
+  await app.press("id:pos-sale-print-0");
   // No printer yet: a PDF only.
   await seen(/^Imprimer la vente FV-01-/);
   await app.waitFor("text:Aucune imprimante de tickets : vous pouvez enregistrer un PDF.");
@@ -986,15 +986,80 @@ test("a sale's receipt and invoice are previewed, and the printer is set", async
   await app.waitFor("id:print-sheet");
   await app.waitFor("id:print-preview");
   await app.press("id:dialog-close");
-  // A network printer, its address.
+  // A network printer, added and tested.
   await app.press("id:nav-settings");
   await app.press("id:settings-printing");
-  await app.waitFor("id:printer-select");
-  expect(app.texts()).not.toContain("Adresse de l'imprimante");
-  await app.press("id:printer-select");
-  await app.press("text:Imprimante réseau (ESC/POS)");
-  await app.waitFor("id:printer-addr");
+  await app.waitFor("text:Aucune imprimante");
+  await app.waitFor("id:doc-sample");
+  await app.press("id:printer-add");
+  await app.waitFor("id:printer-name");
+  await app.type("id:printer-name", "Caisse");
   await app.type("id:printer-addr", "127.0.0.1:1");
-  await app.press("id:printer-test");
+  await app.press("id:printer-save");
+  await app.waitFor("id:printer-row-0");
+  await app.waitFor("text:Réseau 127.0.0.1:1 · Rouleau 80 mm");
+  await app.press("id:printer-test-0");
   await app.waitFor("text:Impression impossible. Vérifiez que l'imprimante est allumée et son adresse.");
+  // A label printer on a 40 × 30 mm roll of labels.
+  await app.press("id:printer-add");
+  await app.type("id:printer-name", "Zebra");
+  await app.press("text:USB / partagée");
+  await app.type("id:printer-path", "/tmp/nb-no-such-printer");
+  await app.press("text:Rouleau d'étiquettes");
+  await app.waitFor("id:printer-label-w");
+  await app.press("id:printer-save");
+  await app.waitFor("text:Port /tmp/nb-no-such-printer · Étiquettes 40 × 30 mm");
+  // What receipts show: the notice, saved for the shop.
+  await app.type("id:doc-notice", "Toute réclamation sous 24 heures");
+  await app.press("id:doc-save");
+  await app.waitFor("text:Réglages des documents enregistrés.");
+});
+
+test("bon par bon: the old debt is paid with a sale, and a receipt is corrected at the till", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  // A first sale leaves something owing.
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-customer");
+  await app.type("id:cust-search", "Boulangerie");
+  await app.waitFor("id:cust-pick-0");
+  await app.press("id:cust-pick-0");
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-balance");
+  await app.clear("id:pay-given");
+  await app.type("id:pay-given", "100");
+  await app.press("id:pay-confirm");
+  await seen(/^Vente FV-01-\d\d-A\d+ enregistrée/);
+  // The next one: the customer pays it and all they owe.
+  await app.press("id:pos-item-0");
+  await app.press("id:pos-customer");
+  await app.type("id:cust-search", "Boulangerie");
+  await app.waitFor("id:cust-pick-0");
+  await app.press("id:cust-pick-0");
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-balance");
+  await app.waitFor("text:Ancien solde");
+  await app.press("id:pay-quick-1");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "0,00 DA"));
+  await app.press("id:pay-confirm");
+  await seen(/^Vente FV-01-\d\d-A\d+ enregistrée/);
+  // The sales at hand: the last one reopened, one more item, paid.
+  await app.press("id:pos-sales");
+  await app.waitFor("id:pos-sale-correct-0");
+  await app.press("id:pos-sale-correct-0");
+  await app.waitFor("id:pos-correcting");
+  await seen(/^Correction du bon FV-01-/);
+  await app.press("id:pos-item-1");
+  await app.press("id:pos-pay");
+  await app.waitFor("id:pay-confirm");
+  await app.press("id:pay-confirm");
+  await seen(/^Vente FV-01-\d\d-A\d+ enregistrée/);
+  await app.press("id:pos-sales");
+  await seen(/^Corrigée → FV-01-/);
 });

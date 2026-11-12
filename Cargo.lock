@@ -2014,6 +2014,7 @@ dependencies = [
  "nb-core",
  "nb-i18n",
  "png 0.18.1",
+ "zune-jpeg",
 ]
 
 [[package]]
