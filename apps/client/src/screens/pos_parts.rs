@@ -585,7 +585,7 @@ pub(super) fn product_row(
 /// with no gaps, and a card that never changes size).
 pub(super) fn card_size(tile: usize, tiles: bool) -> (f32, f32) {
     let (w, h) = match tile {
-        4 => (112.0, 84.0),
+        4 => (112.0, 92.0),
         0 => (132.0, 96.0),
         2 => (210.0, 132.0),
         3 => (260.0, 164.0),

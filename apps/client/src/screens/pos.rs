@@ -1200,12 +1200,13 @@ fn product_card(st: AppState, t: Till, i: usize, p: ProductRow, compact: bool) -
         .hover(|s| s.border_color(Tone::Primary.color()))
         .on_press(move || t.add(p.clone(), 1_000))
         // The name keeps clear of the badge's corner.
-        .child(view().pe(px(26.0)).min_w(px(0.0)).child(label(
-            move || name.clone(),
-            name_size,
-            FontWeight::SEMIBOLD,
-            Tone::Ink,
-        )))
+        // Two lines at most: the price always shows.
+        .child(
+            view().pe(px(26.0)).min_w(px(0.0)).child(
+                crate::ui::kit::caption(name.clone(), name_size, FontWeight::SEMIBOLD, Tone::Ink)
+                    .number_of_lines(if tile == 4 { 2 } else { 3 }),
+            ),
+        )
         .child(if pr.sku.get_untracked() {
             view().child(label_line(
                 move || sku.clone(),
