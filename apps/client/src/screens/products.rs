@@ -315,6 +315,8 @@ pub fn products(st: AppState, compact: bool) -> View {
     // usize::MAX: every category.
     let category = signal(usize::MAX);
     let sort = signal(None::<Sort>);
+    // The favourites only.
+    let favs_only = signal(false);
     let selection = Selection::new();
     let paging = Paging::new(25);
     // Other filters or another order start again from the first page.
@@ -323,6 +325,7 @@ pub fn products(st: AppState, compact: bool) -> View {
         filter.with(|_| ());
         category.with(|_| ());
         sort.with(|_| ());
+        favs_only.with(|_| ());
         paging.reset();
     });
 
@@ -377,6 +380,7 @@ pub fn products(st: AppState, compact: bool) -> View {
                     offset: paging.offset(),
                     // Counted apart (below): a page turn reads one page.
                     with_counts: false,
+                    favorites: favs_only.get(),
                 },
                 st.data_rev.get(),
             ))
@@ -636,6 +640,46 @@ pub fn products(st: AppState, compact: bool) -> View {
                 st.t("products.col.category"),
                 "category-filter",
             )))
+            .child(
+                view()
+                    .test_id("products-favorites")
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(control::md()))
+                    .px(px(12.0))
+                    .rounded(px(radius::md()))
+                    .border_1()
+                    .border_color(move || {
+                        if favs_only.get() {
+                            Tone::Warning.color()
+                        } else {
+                            Tone::BorderStrong.color()
+                        }
+                    })
+                    .bg(move || {
+                        if favs_only.get() {
+                            Tone::WarningSoft.color()
+                        } else {
+                            Tone::Surface.color()
+                        }
+                    })
+                    .cursor_pointer()
+                    .on_press(move || favs_only.update(|v| *v = !*v))
+                    .child(icon(Icon::Star, 16.0, move || {
+                        if favs_only.get() {
+                            Tone::Warning
+                        } else {
+                            Tone::Muted
+                        }
+                    }))
+                    .child(label_line(
+                        st.t("products.favorites"),
+                        ty::SM,
+                        FontWeight::MEDIUM,
+                        Tone::Body,
+                    )),
+            )
             .child(spacer())
             .child(if compact {
                 view()
@@ -896,6 +940,19 @@ pub fn products(st: AppState, compact: bool) -> View {
                     labeling.set(Some(p3.clone()));
                     labeling_open.set(true);
                 }),
+                {
+                    let (id, fav) = (p.id.clone(), p.favorite);
+                    Act::with(
+                        Icon::Star,
+                        st.tn(if fav {
+                            "products.unfavorite"
+                        } else {
+                            "products.favorite"
+                        }),
+                        move || crate::screens::pos::toggle_favorite(st, id.clone(), !fav),
+                    )
+                    .when(st.can("products.edit"))
+                },
                 Act::Line,
                 Act::copy(st.tn("action.copy_name"), p.name.clone()),
                 Act::copy(st.tn("action.copy_sku"), p.sku.clone()),

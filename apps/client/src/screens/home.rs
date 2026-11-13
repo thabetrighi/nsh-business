@@ -7,7 +7,16 @@
 use std::rc::Rc;
 
 use nb_core::Money;
-use nb_store::usecases::reports::{Dashboard, Period, dashboard};
+use nb_i18n::tr_args;
+use nb_store::usecases::debts::{Ageing, ageing};
+use nb_store::usecases::reports::{
+    Alerts, Dashboard, PartyRow, Period, alerts, dashboard, payables,
+};
+
+use crate::screens::home_layout::{Card, Home, Item, WIDTHS};
+use crate::ui::icon::icon;
+use crate::ui::kit::icon_button;
+use crate::ui::menu::{Act, menu_on};
 use nsh_core::element::View;
 use nsh_core::prelude::*;
 
@@ -58,6 +67,40 @@ pub fn home(st: AppState, compact: bool) -> View {
         },
     );
     let board = computed(move || data.with(|d: Option<&Dashboard>| d.cloned()));
+    let arranging = signal(false);
+    // Read only for the cards shown.
+    let shown = move |c: Card| {
+        Home::parse(&st.biz.home.get())
+            .items
+            .iter()
+            .any(|i| i.card == c && !i.hidden)
+    };
+    let alerts_data = resource(
+        move || (shown(Card::Alerts) && st.session.get().is_some()).then(|| st.data_rev.get()),
+        move |_, _| {
+            let db = st.db();
+            async move { db.call(|s| alerts(s)).await }
+        },
+    );
+    let ageing_data = resource(
+        move || (shown(Card::Debts) && st.session.get().is_some()).then(|| st.data_rev.get()),
+        move |_, _| {
+            let db = st.db();
+            async move { db.call(|s| ageing(s)).await }
+        },
+    );
+    let payables_data = resource(
+        move || (shown(Card::Payables) && st.session.get().is_some()).then(|| st.data_rev.get()),
+        move |_, _| {
+            let db = st.db();
+            async move { db.call(|s| payables(s)).await }
+        },
+    );
+    let extra = Extra {
+        alerts: computed(move || alerts_data.with(|a: Option<&Alerts>| a.cloned())),
+        ageing: computed(move || ageing_data.with(|a: Option<&Ageing>| a.cloned())),
+        payables: computed(move || payables_data.with(|a: Option<&Vec<PartyRow>>| a.cloned())),
+    };
     let periods = move || {
         segmented(
             [Period::Week, Period::Month, Period::Year]
@@ -67,10 +110,26 @@ pub fn home(st: AppState, compact: bool) -> View {
             period,
         )
     };
+    let arrange = move || {
+        button(
+            Variant::Secondary,
+            Size::Md,
+            Some(Icon::LayoutDashboard),
+            move || {
+                st.tn(if arranging.get() {
+                    "home.arrange.done"
+                } else {
+                    "home.arrange"
+                })
+            },
+            move || arranging.update(|v| *v = !*v),
+        )
+        .test_id("home-arrange")
+    };
     let actions = if compact {
-        view()
+        view().child(arrange())
     } else {
-        view().child(periods()).child(when(
+        view().child(periods()).child(arrange()).child(when(
             move || st.can("reports.view"),
             move || {
                 button(
@@ -104,46 +163,515 @@ pub fn home(st: AppState, compact: bool) -> View {
             return view().into_element();
         };
         let p = period.get_untracked();
-        view()
-            .gap(px(gap))
-            .child(kpis(st, &d, compact))
-            .child(
-                row(compact, gap)
-                    .child(column(compact, 2.0).child(sales_card(st, &d, p, compact)))
-                    .child(column(compact, 1.0).child(payments_card(st, &d))),
-            )
-            .child(
-                row(compact, gap)
-                    .child(column(compact, 2.0).child(invoices_card(st, &d, compact)))
-                    .child(
-                        column(compact, 1.0)
-                            .gap(px(gap))
-                            .child(categories_card(st, &d))
-                            .child(low_stock_card(st, &d)),
-                    ),
-            )
-            .into_element()
+        let editing = arranging.get();
+        let h = Home::parse(&st.biz.home.get());
+        let mut v = view().gap(px(gap));
+        if editing {
+            v = v.child(edit_bar(st));
+        }
+        if compact {
+            // One under the other on a phone.
+            for (at, item) in h.rows(editing).into_iter().flatten() {
+                v = v.child(frame(
+                    st,
+                    at,
+                    &item,
+                    editing,
+                    card_of(st, item.card, &d, p, compact, &extra),
+                ));
+            }
+            return v.into_element();
+        }
+        for row in h.rows(editing) {
+            let mut r = view().flex_row().items_start().gap(px(gap));
+            for (at, item) in row {
+                r = r.child(
+                    view()
+                        .flex_grow(f32::from(item.width))
+                        .basis(px(0.0))
+                        .min_w(px(0.0))
+                        .child(frame(
+                            st,
+                            at,
+                            &item,
+                            editing,
+                            card_of(st, item.card, &d, p, compact, &extra),
+                        )),
+                );
+            }
+            v = v.child(r);
+        }
+        v.into_element()
     }))
 }
 
-/// A column of a dashboard row: shares the width on desktop, full width on phones.
-fn column(compact: bool, grow: f32) -> View {
-    if compact {
+/// What some cards read besides the dashboard (each only when shown).
+#[derive(Clone, Copy)]
+struct Extra {
+    alerts: Memo<Option<Alerts>>,
+    ageing: Memo<Option<Ageing>>,
+    payables: Memo<Option<Vec<PartyRow>>>,
+}
+
+/// A card's content.
+fn card_of(st: AppState, c: Card, d: &Dashboard, p: Period, compact: bool, x: &Extra) -> View {
+    match c {
+        Card::Revenue => kpi_tiles(st, d, compact).0,
+        Card::Orders => kpi_tiles(st, d, compact).1,
+        Card::Basket => kpi_tiles(st, d, compact).2,
+        Card::Credit => kpi_tiles(st, d, compact).3,
+        Card::Sales => sales_card(st, d, p, compact),
+        Card::Payments => payments_card(st, d),
+        Card::Invoices => invoices_card(st, d, compact),
+        Card::Categories => categories_card(st, d),
+        Card::LowStock => low_stock_card(st, d),
+        Card::Alerts => alerts_card(st, x.alerts),
+        Card::Quick => quick_card(st),
+        Card::Debts => debts_card(st, x.ageing),
+        Card::Payables => payables_card(st, x.payables),
+    }
+}
+
+/// A card while the dashboard is arranged: dimmed when hidden, its menu
+/// (earlier, later, width, hide, remove) over it.
+fn frame(st: AppState, at: usize, item: &Item, editing: bool, content: View) -> View {
+    if !editing {
+        return content;
+    }
+    let change = move |f: Rc<dyn Fn(&mut Home)>| {
+        move || {
+            let mut h = Home::parse(&st.biz.home.get_untracked());
+            f(&mut h);
+            st.biz.home.set(h.to_json());
+        }
+    };
+    let widths = WIDTHS
+        .iter()
+        .map(|w| {
+            let w = *w;
+            Act::new(
+                st.tn(&format!("home.width.{w}")),
+                change(Rc::new(move |h: &mut Home| h.set_width(at, w))),
+            )
+            .checked(item.width == w)
+        })
+        .collect();
+    let acts = vec![
+        Act::with(
+            Icon::ArrowUp,
+            st.tn("home.earlier"),
+            change(Rc::new(move |h: &mut Home| h.shift(at, true))),
+        ),
+        Act::with(
+            Icon::ArrowDown,
+            st.tn("home.later"),
+            change(Rc::new(move |h: &mut Home| h.shift(at, false))),
+        ),
+        Act::sub(Icon::Columns, st.tn("home.width"), widths),
+        Act::with(
+            if item.hidden { Icon::Eye } else { Icon::EyeOff },
+            st.tn(if item.hidden {
+                "pos.panel.show"
+            } else {
+                "pos.panel.hide"
+            }),
+            change(Rc::new(move |h: &mut Home| h.toggle(at))),
+        ),
+        Act::with(
+            Icon::Trash,
+            st.tn("pos.panel.remove"),
+            change(Rc::new(move |h: &mut Home| h.remove(at))),
+        )
+        .danger(),
+    ];
+    let name = st.tn(&format!("home.card.{}", item.card.code()));
+    view()
+        .test_id(&format!("home-card-{}", item.card.code()))
+        .rounded(px(14.0))
+        .border_2()
+        .border_color(Tone::Primary.color())
+        .overflow_hidden()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(10.0))
+                .py(px(4.0))
+                .bg(Tone::PrimarySoft.color())
+                .child(icon(Icon::Grip, 14.0, || Tone::Primary))
+                .child(view().flex_1().child(label_line(
+                    move || name.clone(),
+                    ty::SM,
+                    FontWeight::BOLD,
+                    Tone::Primary,
+                )))
+                .child(menu_on(
+                    icon_button(
+                        || Icon::Settings,
+                        st.t("pos.panel.options"),
+                        Variant::Ghost,
+                        || {},
+                    )
+                    .test_id(&format!("home-opts-{}", item.card.code())),
+                    acts,
+                )),
+        )
+        .child(
+            view()
+                .p(px(6.0))
+                .opacity(if item.hidden { 0.4 } else { 1.0 })
+                .child(content),
+        )
+}
+
+/// Arranging the dashboard: add a card, back to the default, done.
+fn edit_bar(st: AppState) -> View {
+    let h = Home::parse(&st.biz.home.get_untracked());
+    let adds: Vec<Act> = h
+        .missing()
+        .into_iter()
+        .map(|c| {
+            Act::new(st.tn(&format!("home.card.{}", c.code())), move || {
+                let mut h = Home::parse(&st.biz.home.get_untracked());
+                h.add(c);
+                st.biz.home.set(h.to_json());
+            })
+        })
+        .collect();
+    view()
+        .test_id("home-edit-bar")
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap(px(10.0))
+        .p(px(12.0))
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(Tone::Primary.color())
+        .bg(Tone::PrimarySoft.color())
+        .child(icon(Icon::LayoutDashboard, 18.0, || Tone::Primary))
+        .child(view().flex_1().child(label(
+            st.t("home.arrange.hint"),
+            ty::SM,
+            FontWeight::MEDIUM,
+            Tone::Body,
+        )))
+        .child(menu_on(
+            button(
+                Variant::Secondary,
+                Size::Md,
+                Some(Icon::Plus),
+                st.t("home.add"),
+                || {},
+            )
+            .test_id("home-add"),
+            adds,
+        ))
+        .child(
+            button(
+                Variant::Secondary,
+                Size::Md,
+                Some(Icon::Undo),
+                st.t("home.reset"),
+                move || st.biz.home.set(Home::default().to_json()),
+            )
+            .test_id("home-reset"),
+        )
+}
+
+/// What wants attention (the bell's list, as a card).
+fn alerts_card(st: AppState, a: Memo<Option<Alerts>>) -> View {
+    let body = dynamic(move || {
+        let Some(a) = a.get() else {
+            return view().into_element();
+        };
+        let n = |v: u32| st.fmt().integer(i64::from(v));
+        let mut items: Vec<(Icon, Status, String, Route)> = Vec::new();
+        if a.out_of_stock > 0 {
+            items.push((
+                Icon::XCircle,
+                Status::Danger,
+                tr_args(st.lang(), "alerts.out", &[("count", &n(a.out_of_stock))]),
+                Route::Products,
+            ));
+        }
+        if a.low_stock > 0 {
+            items.push((
+                Icon::Alert,
+                Status::Warning,
+                tr_args(st.lang(), "alerts.low", &[("count", &n(a.low_stock))]),
+                Route::Inventory,
+            ));
+        }
+        if a.customers_overdue > 0 {
+            items.push((
+                Icon::Coins,
+                Status::Warning,
+                tr_args(
+                    st.lang(),
+                    "alerts.overdue",
+                    &[("count", &n(a.customers_overdue))],
+                ),
+                Route::Debts,
+            ));
+        }
+        if a.suppliers_owed > 0 {
+            items.push((
+                Icon::Truck,
+                Status::Info,
+                tr_args(
+                    st.lang(),
+                    "alerts.payables",
+                    &[("count", &n(a.suppliers_owed))],
+                ),
+                Route::PartyReports,
+            ));
+        }
+        let mut v = view().gap(px(4.0)).px(px(12.0)).pb(px(12.0));
+        if items.is_empty() {
+            v = v.child(label(
+                st.t("alerts.none"),
+                ty::SM,
+                FontWeight::NORMAL,
+                Tone::Muted,
+            ));
+        }
+        for (ic, status, text, r) in items {
+            v = v.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .p(px(8.0))
+                    .rounded(px(10.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(Tone::Hover.color()))
+                    .on_press(move || st.route.set(r))
+                    .child(badge(status, Some(ic), String::new))
+                    .child(view().flex_1().child(label_line(
+                        move || text.clone(),
+                        ty::SM,
+                        FontWeight::MEDIUM,
+                        Tone::Ink,
+                    ))),
+            );
+        }
+        v.into_element()
+    });
+    card()
+        .child(card_header_icon(
+            Some(Icon::Bell),
+            st.t("action.notifications"),
+            None,
+            view(),
+        ))
+        .child(body)
+}
+
+/// Ways to start.
+fn quick_card(st: AppState) -> View {
+    let go = |ic: Icon, key: &'static str, id: &'static str, run: Rc<dyn Fn()>| {
         view()
-    } else {
-        view().flex_grow(grow).basis(px(0.0)).min_w(px(0.0))
+            .test_id(id)
+            .flex_grow(1.0)
+            .basis(px(120.0))
+            .items_center()
+            .gap(px(6.0))
+            .p(px(12.0))
+            .rounded(px(12.0))
+            .bg(Tone::Subtle.color())
+            .cursor_pointer()
+            .hover(|s| s.bg(Tone::Hover.color()))
+            .on_press(move || run())
+            .child(icon(ic, 22.0, || Tone::Primary))
+            .child(label_line(
+                st.t(key),
+                ty::SM,
+                FontWeight::SEMIBOLD,
+                Tone::Ink,
+            ))
+    };
+    let mut grid = view()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(10.0))
+        .px(px(12.0))
+        .pb(px(12.0));
+    if st.shows(Route::Sell) {
+        grid = grid.child(go(
+            Icon::Cart,
+            "home.quick.sell",
+            "quick-sell",
+            Rc::new(move || st.route.set(Route::Sell)),
+        ));
     }
+    if st.can("products.edit") {
+        grid = grid.child(go(
+            Icon::PackagePlus,
+            "home.quick.product",
+            "quick-product",
+            Rc::new(move || {
+                st.intent.set(Some(crate::state::Intent::AddProduct));
+                st.route.set(Route::Products);
+            }),
+        ));
+    }
+    if st.shows(Route::Purchases) {
+        grid = grid.child(go(
+            Icon::Truck,
+            "home.quick.purchase",
+            "quick-purchase",
+            Rc::new(move || st.route.set(Route::Purchases)),
+        ));
+    }
+    if st.shows(Route::Customers) {
+        grid = grid.child(go(
+            Icon::Users,
+            "home.quick.customers",
+            "quick-customers",
+            Rc::new(move || st.route.set(Route::Customers)),
+        ));
+    }
+    if st.shows(Route::Expenses) {
+        grid = grid.child(go(
+            Icon::Banknote,
+            "home.quick.expense",
+            "quick-expense",
+            Rc::new(move || st.route.set(Route::Expenses)),
+        ));
+    }
+    if st.shows(Route::Reports) {
+        grid = grid.child(go(
+            Icon::ChartLine,
+            "home.quick.reports",
+            "quick-reports",
+            Rc::new(move || st.route.set(Route::Reports)),
+        ));
+    }
+    card()
+        .child(card_header_icon(
+            Some(Icon::Zap),
+            st.t("home.card.quick"),
+            None,
+            view(),
+        ))
+        .child(grid)
 }
 
-fn row(compact: bool, gap: f32) -> View {
-    if compact {
-        view().gap(px(gap))
-    } else {
-        view().flex_row().items_start().gap(px(gap))
+/// A list of names and amounts (the customers who owe most, the
+/// suppliers owed most).
+fn ranking(st: AppState, rows: Vec<(String, String, i64)>, empty: &'static str, go: Route) -> View {
+    let mut v = view().px(px(12.0)).pb(px(12.0));
+    if rows.is_empty() {
+        return v.child(label(st.t(empty), ty::SM, FontWeight::NORMAL, Tone::Muted));
     }
+    for (name, note, m) in rows.into_iter().take(6) {
+        let n = name.clone();
+        v = v.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(10.0))
+                .py(px(8.0))
+                .border_b_1()
+                .border_color(Tone::Border.color())
+                .cursor_pointer()
+                .on_press(move || st.route.set(go))
+                .child(avatar(move || n.clone(), 28.0, Status::Accent))
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(label_line(
+                            move || name.clone(),
+                            ty::SM,
+                            FontWeight::SEMIBOLD,
+                            Tone::Ink,
+                        ))
+                        .child(label_line(
+                            move || note.clone(),
+                            ty::XS,
+                            FontWeight::NORMAL,
+                            Tone::Muted,
+                        )),
+                )
+                .child(figure(
+                    move || st.fmt().money(money(st, m)),
+                    ty::SM,
+                    FontWeight::BOLD,
+                    || Tone::Ink,
+                )),
+        );
+    }
+    v
 }
 
-fn kpis(st: AppState, d: &Dashboard, compact: bool) -> View {
+fn debts_card(st: AppState, a: Memo<Option<Ageing>>) -> View {
+    let body = dynamic(move || {
+        let Some(a) = a.get() else {
+            return view().into_element();
+        };
+        let mut rows: Vec<_> = a.rows.into_iter().filter(|r| r.balance_minor > 0).collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.balance_minor));
+        let list = rows
+            .into_iter()
+            .map(|r| {
+                let late = if r.overdue_minor > 0 {
+                    tr_args(
+                        st.lang(),
+                        "home.overdue",
+                        &[("amount", &st.fmt().money(money(st, r.overdue_minor)))],
+                    )
+                } else {
+                    r.phone.clone()
+                };
+                (r.name, late, r.balance_minor)
+            })
+            .collect();
+        ranking(st, list, "home.debts.none", Route::Debts).into_element()
+    });
+    card()
+        .child(card_header_icon(
+            Some(Icon::Coins),
+            st.t("home.card.debts"),
+            None,
+            view(),
+        ))
+        .child(body)
+}
+
+fn payables_card(st: AppState, a: Memo<Option<Vec<PartyRow>>>) -> View {
+    let body = dynamic(move || {
+        let Some(mut rows) = a.get() else {
+            return view().into_element();
+        };
+        rows.retain(|r| r.total_minor > 0);
+        rows.sort_by_key(|r| std::cmp::Reverse(r.total_minor));
+        let list = rows
+            .into_iter()
+            .map(|r| {
+                let note = tr_args(
+                    st.lang(),
+                    "home.invoices_open",
+                    &[("count", &st.fmt().integer(r.count))],
+                );
+                (r.name, note, r.total_minor)
+            })
+            .collect();
+        ranking(st, list, "home.payables.none", Route::PartyReports).into_element()
+    });
+    card()
+        .child(card_header_icon(
+            Some(Icon::Truck),
+            st.t("home.card.payables"),
+            None,
+            view(),
+        ))
+        .child(body)
+}
+
+fn kpi_tiles(st: AppState, d: &Dashboard, compact: bool) -> (View, View, View, View) {
     let rtl = st.rtl();
     let total: i64 = d.current.iter().sum();
     let total_prev: i64 = d.previous.iter().sum();
@@ -165,7 +693,7 @@ fn kpis(st: AppState, d: &Dashboard, compact: bool) -> View {
     let d_basket = change_bps(basket, basket_prev);
     let spark_w = if compact { 110.0 } else { 160.0 };
     let trend = |bps: i64, prev: i64| (prev > 0).then(|| delta(bps, pct(bps)));
-    let tiles = [
+    let [a, b, c, e] = [
         kpi(
             st.t("kpi.revenue"),
             move || st.fmt().money_whole(money(st, total)),
@@ -210,18 +738,7 @@ fn kpis(st: AppState, d: &Dashboard, compact: bool) -> View {
             compact,
         ),
     ];
-    let mut grid = view()
-        .flex_row()
-        .flex_wrap()
-        .gap(px(if compact { 12.0 } else { 20.0 }));
-    for t in tiles {
-        grid = grid.child(if compact {
-            t.min_w(px(150.0)).basis(relative(0.45))
-        } else {
-            t
-        });
-    }
-    grid
+    (a, b, c, e)
 }
 
 /// A bucket's label: its day, or its month for the year.

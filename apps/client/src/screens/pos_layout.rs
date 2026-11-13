@@ -36,10 +36,19 @@ pub enum Widget {
     /// A strip: the cart as a badge (open it, clear it), its total, the
     /// customer, the carts on hold, paying at once.
     CartBar,
+    /// The carts on hold as badges (each with its total; take it back with
+    /// a press, drop it with its ×), and a button to hold this one.
+    HeldBar,
+    /// The products marked as favourites, to sell with a press.
+    Favorites,
+    /// The last sale: its number, total, the change given, its receipt.
+    LastSale,
+    /// The time, the date, the till.
+    Clock,
 }
 
 impl Widget {
-    pub const ALL: [Widget; 12] = [
+    pub const ALL: [Widget; 16] = [
         Widget::Search,
         Widget::Categories,
         Widget::Products,
@@ -52,6 +61,10 @@ impl Widget {
         Widget::Keypad,
         Widget::Session,
         Widget::CartBar,
+        Widget::HeldBar,
+        Widget::Favorites,
+        Widget::LastSale,
+        Widget::Clock,
     ];
 
     pub fn code(self) -> &'static str {
@@ -68,6 +81,10 @@ impl Widget {
             Widget::Keypad => "keypad",
             Widget::Session => "session",
             Widget::CartBar => "cart_bar",
+            Widget::HeldBar => "held_bar",
+            Widget::Favorites => "favorites",
+            Widget::LastSale => "last_sale",
+            Widget::Clock => "clock",
         }
     }
 
@@ -80,12 +97,31 @@ impl Widget {
     pub fn items(self) -> &'static [&'static str] {
         match self {
             Widget::Actions => &[
-                "discount", "customer", "hold", "held", "misc", "return", "clear", "sales",
-                "prebill", "keys",
+                "discount",
+                "customer",
+                "hold",
+                "held",
+                "misc",
+                "return",
+                "clear",
+                "sales",
+                "prebill",
+                "keys",
+                "close",
+                "fullscreen",
+                "layouts",
             ],
             Widget::Pay => &["direct", "dialog", "print"],
             Widget::CartBar => &["count", "customer", "held", "till", "total", "clear", "pay"],
             Widget::Session => &["info", "totals", "sales", "close"],
+            Widget::Cart => &[
+                "head", "customer", "actions", "num", "sku", "qty", "price", "discount", "total",
+                "sticky",
+            ],
+            Widget::BigTotal => &["label", "count", "customer"],
+            Widget::HeldBar => &["title", "lines", "total", "hold"],
+            Widget::LastSale => &["number", "total", "change", "print"],
+            Widget::Clock => &["time", "date", "till", "cashier"],
             _ => &[],
         }
     }
@@ -95,6 +131,8 @@ impl Widget {
         match self {
             Widget::Actions => &["discount", "customer", "hold", "held", "misc", "clear"],
             Widget::CartBar => &["count", "customer", "held", "total", "clear", "pay"],
+            Widget::BigTotal => &["label"],
+            Widget::Clock => &["time", "date"],
             other => other.items(),
         }
     }
@@ -103,21 +141,37 @@ impl Widget {
     pub fn has_buttons(self) -> bool {
         matches!(
             self,
-            Widget::Actions | Widget::Pay | Widget::CartBar | Widget::Session
+            Widget::Actions
+                | Widget::Pay
+                | Widget::CartBar
+                | Widget::Session
+                | Widget::HeldBar
+                | Widget::LastSale
         )
+    }
+
+    /// May be a strip across the screen, above or below the columns.
+    pub fn strip(self) -> bool {
+        !self.grows()
+    }
+
+    /// Takes a colour of its own (its background).
+    pub fn colored(self) -> bool {
+        !matches!(self, Widget::Search | Widget::Keypad)
     }
 
     /// Whether it scrolls its content (it takes the height it is given);
     /// the others are as tall as what they show unless sized.
     pub fn grows(self) -> bool {
-        matches!(self, Widget::Products | Widget::Cart)
+        matches!(self, Widget::Products | Widget::Cart | Widget::Favorites)
     }
 
     /// The styles it offers (products: cards, list, tiles; cart: lines or
     /// a table).
     pub fn styles(self) -> &'static [&'static str] {
         match self {
-            Widget::Products => &["cards", "list", "tiles"],
+            Widget::Products | Widget::Favorites => &["cards", "list", "tiles"],
+            Widget::Actions => &["tiles", "row", "list"],
             Widget::Cart => &["lines", "table"],
             Widget::Categories => &["chips", "column"],
             _ => &[],
@@ -144,7 +198,23 @@ pub struct Panel {
     /// What it shows (empty: its defaults), in its order.
     #[serde(default)]
     pub items: Vec<String>,
+    /// Its colour (`COLORS`; 0: its own).
+    #[serde(default)]
+    pub color: u8,
+    /// Where its content sits along it (`ALIGNS`).
+    #[serde(default)]
+    pub align: u8,
+    /// Kept in the layout but not shown.
+    #[serde(default)]
+    pub hidden: bool,
 }
+
+/// The colours a panel may take.
+pub const COLORS: [&str; 8] = [
+    "auto", "primary", "dark", "success", "warning", "danger", "soft", "plain",
+];
+/// Where a panel's content may sit.
+pub const ALIGNS: [&str; 3] = ["start", "center", "end"];
 
 /// The type sizes a panel may have.
 pub const TEXT_SIZES: [&str; 4] = ["normal", "small", "large", "larger"];
@@ -164,6 +234,38 @@ impl Panel {
             text: 0,
             labels: 0,
             items: Vec::new(),
+            color: 0,
+            align: 0,
+            hidden: false,
+        }
+    }
+
+    /// In this style (`Widget::styles`).
+    pub fn style_of(mut self, style: u8) -> Self {
+        self.style = style;
+        self
+    }
+
+    /// In this colour (`COLORS`).
+    pub fn tint(mut self, color: u8) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// Its content placed (`ALIGNS`).
+    pub fn placed(mut self, align: u8) -> Self {
+        self.align = align;
+        self
+    }
+
+    /// Moves `item` (shown) one place earlier.
+    pub fn move_item_up(&mut self, item: &str) {
+        let mut now = self.shown_items();
+        if let Some(at) = now.iter().position(|i| i == item)
+            && at > 0
+        {
+            now.swap(at, at - 1);
+            self.items = now;
         }
     }
 
@@ -216,9 +318,14 @@ impl Panel {
                 now.remove(at);
             }
         } else if self.widget.items().contains(&item) {
-            now.push(item.to_owned());
+            // Back at its place among those shown.
             let order = self.widget.items();
-            now.sort_by_key(|i| order.iter().position(|o| o == i));
+            let rank = |x: &str| order.iter().position(|o| *o == x).unwrap_or(usize::MAX);
+            let at = now
+                .iter()
+                .position(|i| rank(i) > rank(item))
+                .unwrap_or(now.len());
+            now.insert(at, item.to_owned());
         }
         self.items = now;
     }
@@ -259,9 +366,20 @@ pub struct Layout {
     /// The page's title above the till.
     #[serde(default = "yes")]
     pub head: bool,
-    /// A strip along the bottom, the whole width (the cart bar, buttons).
+    /// Strips across the whole width above the columns (a total, the
+    /// carts on hold, buttons), from the top.
     #[serde(default)]
+    pub top: Vec<Panel>,
+    /// Strips across the whole width below the columns.
+    #[serde(default)]
+    pub bottom: Vec<Panel>,
+    /// An older layout's one strip at the bottom (read, then moved to
+    /// `bottom`).
+    #[serde(default, skip_serializing)]
     pub footer: Option<Panel>,
+    /// The app's sidebar beside the till (off: the till takes the screen).
+    #[serde(default = "yes")]
+    pub sidebar: bool,
     /// The cart's lines in large type (touch screens, a customer display).
     #[serde(default)]
     pub big_lines: bool,
@@ -277,7 +395,16 @@ fn gap() -> u8 {
     14
 }
 
+/// Where a panel is: a column and its place, or a strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spot {
+    Col(usize, usize),
+    Top(usize),
+    Bottom(usize),
+}
+
 /// Limits that keep any layout usable.
+pub const MAX_STRIPS: usize = 4;
 pub const MAX_COLUMNS: usize = 4;
 pub const MAX_PANELS: usize = 8;
 pub const MAX_SHARE: u8 = 12;
@@ -293,42 +420,68 @@ impl Layout {
             gap: 14,
             head: true,
             big_lines: false,
+            top: Vec::new(),
+            bottom: Vec::new(),
             footer: None,
+            sidebar: true,
         }
     }
 
-    /// Every panel, the footer's too.
-    fn panels(&self) -> impl Iterator<Item = &Panel> {
-        self.columns
-            .iter()
-            .flat_map(|c| c.panels.iter())
-            .chain(self.footer.iter())
+    /// As it is used now (an older layout's footer becomes a strip).
+    pub fn normalized(mut self) -> Self {
+        if let Some(f) = self.footer.take()
+            && self.bottom.is_empty()
+        {
+            self.bottom.push(f);
+        }
+        self
     }
 
-    /// Whether it can be used: columns and panels in number, shares in
-    /// range, a cart and a way to pay somewhere, each widget once.
+    /// Every panel, the strips' too.
+    fn panels(&self) -> impl Iterator<Item = &Panel> {
+        self.top
+            .iter()
+            .chain(self.columns.iter().flat_map(|c| c.panels.iter()))
+            .chain(self.bottom.iter())
+    }
+
+    /// Whether `w` is on the screen (shown).
+    pub fn shows(&self, w: Widget) -> bool {
+        self.panels().any(|p| p.widget == w && !p.hidden)
+    }
+
+    /// Whether it can be used: columns, strips and panels in number,
+    /// shares in range, each widget once (but buttons), something shown.
+    /// Nothing else is required: the cart and payment may go too (the keys
+    /// still pay and the phone's sheet still shows the cart).
     pub fn check(&self) -> bool {
         let all: Vec<Widget> = self.panels().map(|p| p.widget).collect();
         let once = Widget::ALL
             .iter()
             .filter(|w| !w.repeatable())
             .all(|w| all.iter().filter(|x| *x == w).count() <= 1);
-        let footer_ok = self
-            .footer
-            .as_ref()
-            .is_none_or(|p| !p.widget.grows() && p.widget != Widget::Categories);
-        !self.columns.is_empty()
-            && self.columns.len() <= MAX_COLUMNS
+        let strips_ok = self.top.len() <= MAX_STRIPS
+            && self.bottom.len() <= MAX_STRIPS
+            && self
+                .top
+                .iter()
+                .chain(&self.bottom)
+                .all(|p| p.widget.strip());
+        self.columns.len() <= MAX_COLUMNS
+            && (!self.columns.is_empty() || !self.top.is_empty() || !self.bottom.is_empty())
             && self.columns.iter().all(|c| {
                 (1..=MAX_SHARE).contains(&c.width)
                     && !c.panels.is_empty()
                     && c.panels.len() <= MAX_PANELS
                     && c.panels.iter().all(|p| p.height <= MAX_SHARE)
             })
-            && self.panels().all(|p| p.text <= 3 && p.labels <= 2)
-            && footer_ok
-            && all.contains(&Widget::Cart)
-            && (all.contains(&Widget::Pay) || self.pays_in_footer())
+            && self.panels().all(|p| {
+                p.text <= 3
+                    && p.labels <= 2
+                    && usize::from(p.color) < COLORS.len()
+                    && usize::from(p.align) < ALIGNS.len()
+            })
+            && strips_ok
             && once
             && self.tile <= 2
             && self.gap <= 32
@@ -343,19 +496,78 @@ impl Layout {
             .collect()
     }
 
-    /// The footer's cart bar pays (so the pay panel may go).
-    pub fn pays_in_footer(&self) -> bool {
-        self.footer.as_ref().is_some_and(|f| {
-            f.widget == Widget::CartBar && f.shown_items().iter().any(|i| i == "pay")
-        })
+    /// The panel at `at`.
+    pub fn panel_mut(&mut self, at: Spot) -> Option<&mut Panel> {
+        match at {
+            Spot::Col(c, i) => self.columns.get_mut(c).and_then(|c| c.panels.get_mut(i)),
+            Spot::Top(i) => self.top.get_mut(i),
+            Spot::Bottom(i) => self.bottom.get_mut(i),
+        }
     }
 
-    /// The panel at `at` (`None` column: the footer).
-    pub fn panel_mut(&mut self, at: (Option<usize>, usize)) -> Option<&mut Panel> {
-        match at.0 {
-            Some(c) => self.columns.get_mut(c).and_then(|c| c.panels.get_mut(at.1)),
-            None => self.footer.as_mut(),
+    /// Adds a strip showing `w` (above the columns or below them).
+    pub fn add_strip(&mut self, top: bool, w: Widget) -> bool {
+        let list = if top { &self.top } else { &self.bottom };
+        if !w.strip() || list.len() >= MAX_STRIPS || !self.missing().contains(&w) {
+            return false;
         }
+        let p = Panel::new(w);
+        if top {
+            self.top.push(p);
+        } else {
+            self.bottom.push(p);
+        }
+        true
+    }
+
+    /// Moves a strip one place up or down, over the columns if needs be
+    /// (the last at the top goes first at the bottom, and back).
+    pub fn move_strip(&mut self, at: Spot, up: bool) -> bool {
+        match (at, up) {
+            (Spot::Top(i), true) if i > 0 => self.top.swap(i, i - 1),
+            (Spot::Top(i), false) if i + 1 < self.top.len() => self.top.swap(i, i + 1),
+            (Spot::Top(i), false) if i < self.top.len() && self.bottom.len() < MAX_STRIPS => {
+                let p = self.top.remove(i);
+                self.bottom.insert(0, p);
+            }
+            (Spot::Bottom(i), false) if i + 1 < self.bottom.len() => self.bottom.swap(i, i + 1),
+            (Spot::Bottom(i), true) if i > 0 => self.bottom.swap(i, i - 1),
+            (Spot::Bottom(0), true) if !self.bottom.is_empty() && self.top.len() < MAX_STRIPS => {
+                let p = self.bottom.remove(0);
+                self.top.push(p);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Removes a panel or a strip; the screen keeps something.
+    pub fn remove_at(&mut self, at: Spot) -> bool {
+        let before = self.clone();
+        let gone = match at {
+            Spot::Col(c, i) => {
+                if self.columns.get(c).is_none_or(|col| i >= col.panels.len()) {
+                    return false;
+                }
+                self.columns[c].panels.remove(i);
+                self.drop_empty();
+                true
+            }
+            Spot::Top(i) if i < self.top.len() => {
+                self.top.remove(i);
+                true
+            }
+            Spot::Bottom(i) if i < self.bottom.len() => {
+                self.bottom.remove(i);
+                true
+            }
+            _ => false,
+        };
+        if gone && !self.check() {
+            *self = before;
+            return false;
+        }
+        gone
     }
 
     /// Moves the panel at `from` (column, index) to `to` (column, index
@@ -408,17 +620,9 @@ impl Layout {
         self.columns.retain(|c| !c.panels.is_empty());
     }
 
-    /// Removes a panel (never the cart or payment: the till needs them).
+    /// Removes the panel at (column, index).
     pub fn remove(&mut self, at: (usize, usize)) -> bool {
-        let Some(p) = self.columns.get(at.0).and_then(|c| c.panels.get(at.1)) else {
-            return false;
-        };
-        if p.widget == Widget::Cart || (p.widget == Widget::Pay && !self.pays_in_footer()) {
-            return false;
-        }
-        self.columns[at.0].panels.remove(at.1);
-        self.drop_empty();
-        true
+        self.remove_at(Spot::Col(at.0, at.1))
     }
 
     /// Adds `w` at the bottom of column `c`.
@@ -466,22 +670,15 @@ fn col(width: u8, panels: Vec<Panel>) -> Column {
 pub fn builtin() -> Vec<Layout> {
     use Widget as W;
     let p = Panel::new;
-    let bar = |items: &[&str]| Some(Panel::new(W::CartBar).showing(items));
+    let bar = |items: &[&str]| Panel::new(W::CartBar).showing(items);
+    let big = |items: &[&str]| Panel::new(W::BigTotal).showing(items);
     vec![
         // A shop: products to pick, the cart beside them.
         Layout::of(
             "shop",
             vec![
                 col(8, vec![p(W::Search), p(W::Categories), p(W::Products)]),
-                col(
-                    4,
-                    vec![
-                        p(W::Cart),
-                        p(W::Totals),
-                        Panel::sized(W::BigTotal, 0, 0),
-                        p(W::Pay),
-                    ],
-                ),
+                col(4, vec![p(W::Cart), p(W::Totals), p(W::BigTotal), p(W::Pay)]),
             ],
         ),
         // A supermarket: scanning first, the cart as a table.
@@ -556,7 +753,7 @@ pub fn builtin() -> Vec<Layout> {
             tile: 2,
             stock: false,
             head: false,
-            footer: bar(&["count", "held", "total", "clear", "pay"]),
+            bottom: vec![bar(&["count", "held", "total", "clear", "pay"])],
             ..Layout::of(
                 "cafe",
                 vec![
@@ -564,7 +761,7 @@ pub fn builtin() -> Vec<Layout> {
                     col(
                         4,
                         vec![
-                            p(W::Cart),
+                            p(W::Cart).showing(&["head", "actions"]),
                             p(W::Actions)
                                 .look(0, 1)
                                 .showing(&["discount", "hold", "held", "misc", "clear"]),
@@ -574,13 +771,13 @@ pub fn builtin() -> Vec<Layout> {
             )
         },
         // Fast scanning: the cart's table across the screen, the buttons
-        // and the total below.
+        // below.
         Layout {
             stock: false,
             head: false,
-            footer: Some(Panel::new(W::Actions).look(0, 0).showing(&[
+            bottom: vec![Panel::new(W::Actions).style_of(1).showing(&[
                 "customer", "discount", "hold", "held", "return", "misc", "clear",
-            ])),
+            ])],
             ..Layout::of(
                 "scanner",
                 vec![
@@ -620,13 +817,14 @@ pub fn builtin() -> Vec<Layout> {
                 ],
             )
         },
-        // A kiosk or a large screen: everything larger.
+        // A kiosk or a large screen: everything larger, the whole screen.
         Layout {
             tile: 2,
             stock: false,
             head: false,
             big_lines: true,
-            footer: bar(&["count", "total", "clear", "pay"]),
+            sidebar: false,
+            bottom: vec![bar(&["count", "total", "clear", "pay"]).look(2, 0)],
             ..Layout::of(
                 "kiosk",
                 vec![
@@ -637,7 +835,13 @@ pub fn builtin() -> Vec<Layout> {
                             Panel::sized(W::Products, 8, 2).look(2, 0),
                         ],
                     ),
-                    col(4, vec![p(W::Cart).look(2, 0), p(W::BigTotal)]),
+                    col(
+                        4,
+                        vec![
+                            p(W::Cart).look(2, 0).showing(&["head", "actions"]),
+                            p(W::BigTotal),
+                        ],
+                    ),
                 ],
             )
         },
@@ -658,6 +862,148 @@ pub fn builtin() -> Vec<Layout> {
                 ),
             ],
         ),
+        // The total across the top, large, for the customer to read; the
+        // carts on hold along the bottom.
+        Layout {
+            head: false,
+            top: vec![
+                big(&["label", "count", "customer"])
+                    .look(3, 0)
+                    .tint(2)
+                    .placed(1),
+            ],
+            bottom: vec![p(W::HeldBar)],
+            ..Layout::of(
+                "total_top",
+                vec![
+                    col(8, vec![p(W::Search), p(W::Categories), p(W::Products)]),
+                    col(4, vec![p(W::Cart), p(W::Totals), p(W::Pay)]),
+                ],
+            )
+        },
+        // Express: the whole screen, scanning into a table with a fixed
+        // header, the total above, the buttons below.
+        Layout {
+            head: false,
+            sidebar: false,
+            stock: false,
+            top: vec![big(&["label", "count"]).look(2, 0).tint(1).placed(2)],
+            bottom: vec![Panel::new(W::Actions).style_of(1).look(0, 0).showing(&[
+                "customer", "discount", "hold", "held", "return", "misc", "clear", "close",
+            ])],
+            ..Layout::of(
+                "express",
+                vec![
+                    col(9, vec![p(W::Search), Panel::sized(W::Cart, 10, 1)]),
+                    col(
+                        3,
+                        vec![
+                            p(W::LastSale),
+                            p(W::Keypad).look(2, 0),
+                            p(W::Pay).look(2, 0),
+                        ],
+                    ),
+                ],
+            )
+        },
+        // A boutique: favourites first, the last sale at hand.
+        Layout {
+            tile: 2,
+            ..Layout::of(
+                "boutique",
+                vec![
+                    col(
+                        7,
+                        vec![
+                            p(W::Search),
+                            Panel::sized(W::Favorites, 5, 2),
+                            Panel::sized(W::Products, 5, 0),
+                        ],
+                    ),
+                    col(
+                        5,
+                        vec![
+                            p(W::Customer),
+                            p(W::Cart),
+                            p(W::Totals),
+                            p(W::LastSale),
+                            p(W::Pay),
+                        ],
+                    ),
+                ],
+            )
+        },
+        // A bakery: categories down the side, favourites as tiles, the cart
+        // bar along the bottom.
+        Layout {
+            tile: 2,
+            stock: false,
+            head: false,
+            top: vec![p(W::HeldBar).showing(&["lines", "total", "hold"])],
+            bottom: vec![bar(&["count", "customer", "total", "clear", "pay"])],
+            ..Layout::of(
+                "bakery",
+                vec![
+                    col(2, vec![Panel::sized(W::Categories, 8, 1)]),
+                    col(6, vec![Panel::sized(W::Favorites, 8, 2)]),
+                    col(4, vec![p(W::Cart).showing(&["head", "actions"])]),
+                ],
+            )
+        },
+        // Minimal: a scanner, the cart and the total; nothing else.
+        Layout {
+            head: false,
+            sku: true,
+            ..Layout::of(
+                "minimal",
+                vec![
+                    col(
+                        7,
+                        vec![
+                            p(W::Search),
+                            Panel::sized(W::Cart, 10, 1)
+                                .showing(&["num", "qty", "price", "total", "sticky"]),
+                        ],
+                    ),
+                    col(
+                        5,
+                        vec![big(&["label", "count"]).look(3, 0), p(W::Pay).look(2, 0)],
+                    ),
+                ],
+            )
+        },
+        // A counter with everything at hand: the time and the till above,
+        // the carts on hold and the buttons below.
+        Layout {
+            head: false,
+            sidebar: false,
+            tile: 1,
+            top: vec![
+                p(W::Clock)
+                    .showing(&["time", "date", "till", "cashier"])
+                    .tint(6),
+            ],
+            bottom: vec![
+                p(W::HeldBar),
+                Panel::new(W::Actions).style_of(1).look(0, 1).showing(&[
+                    "customer",
+                    "discount",
+                    "misc",
+                    "return",
+                    "sales",
+                    "prebill",
+                    "fullscreen",
+                    "close",
+                ]),
+            ],
+            ..Layout::of(
+                "counter",
+                vec![
+                    col(7, vec![p(W::Search), p(W::Categories), p(W::Products)]),
+                    col(5, vec![p(W::Cart), p(W::BigTotal), p(W::Pay)]),
+                ],
+            )
+        },
     ]
 }
 
@@ -685,8 +1031,8 @@ impl Kept {
         }
         self.own
             .iter()
+            .map(|l| l.clone().normalized())
             .find(|l| l.name == self.chosen && l.check())
-            .cloned()
             .unwrap_or(fallback)
     }
 
@@ -727,7 +1073,9 @@ mod tests {
     #[test]
     fn every_ready_made_layout_can_be_used() {
         let all = builtin();
-        assert!(all.len() >= 10);
+        assert!(all.len() >= 16);
+        let names: std::collections::HashSet<&str> = all.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names.len(), all.len());
         for l in &all {
             assert!(l.check(), "{}", l.name);
             let back: Layout = serde_json::from_str(&serde_json::to_string(l).unwrap_or_default())
@@ -754,24 +1102,44 @@ mod tests {
         one.toggle_item("direct");
         assert_eq!(one.shown_items(), ["direct"]);
         assert!((Panel::new(Widget::Cart).look(3, 0).scale() - 1.45).abs() < 1e-6);
-        // Buttons may be in several places; a cart bar that pays stands
-        // for the pay panel.
+        // Buttons may be in several places; anything may go, the cart too,
+        // so long as something shows.
         let mut l = builtin().remove(0);
         assert!(l.add(0, Widget::Actions) && l.add(1, Widget::Actions));
         assert!(l.check());
-        let pay = l.columns[1]
+        let cart = l.columns[1]
             .panels
             .iter()
-            .position(|p| p.widget == Widget::Pay);
-        assert!(!l.remove((1, pay.unwrap_or(0))));
-        l.footer = Some(Panel::new(Widget::CartBar));
-        assert!(l.remove((1, pay.unwrap_or(0))));
+            .position(|p| p.widget == Widget::Cart);
+        assert!(l.remove((1, cart.unwrap_or(0))));
+        assert!(l.check() && !l.shows(Widget::Cart));
+        // Strips above and below; one place up moves the first at the
+        // bottom to the top.
+        assert!(!l.add_strip(true, Widget::BigTotal));
+        assert!(l.add_strip(true, Widget::HeldBar));
+        assert!(l.add_strip(false, Widget::CartBar));
+        assert!(!l.add_strip(false, Widget::Products));
+        assert!(l.move_strip(Spot::Bottom(0), true));
+        assert_eq!(l.top.len(), 2);
+        assert_eq!(l.top[1].widget, Widget::CartBar);
+        assert!(l.remove_at(Spot::Top(0)));
         assert!(l.check());
+        // Items: order and place.
+        let mut a = Panel::new(Widget::Actions);
+        a.move_item_up("held");
+        assert_eq!(a.shown_items()[2], "held");
         // An old layout (before these options) still reads.
         let old =
             r#"{"name":"x","columns":[{"width":4,"panels":[{"widget":"cart"},{"widget":"pay"}]}]}"#;
         let back: Layout = serde_json::from_str(old).unwrap_or_else(|_| builtin().remove(1));
-        assert!(back.check() && back.footer.is_none() && back.columns[0].panels[0].text == 0);
+        assert!(back.check() && back.bottom.is_empty() && back.columns[0].panels[0].text == 0);
+        assert!(back.sidebar);
+        // One kept with a footer (before strips) has it at the bottom.
+        let footed = r#"{"name":"y","columns":[{"width":4,"panels":[{"widget":"cart"}]}],"footer":{"widget":"cart_bar"}}"#;
+        let back: Layout = serde_json::from_str(footed).unwrap_or_else(|_| builtin().remove(1));
+        let back = back.normalized();
+        assert_eq!(back.bottom.len(), 1);
+        assert!(back.footer.is_none());
     }
 
     #[test]
@@ -788,12 +1156,7 @@ mod tests {
         assert_eq!(l.columns.len(), 3);
         assert!(l.move_panel((2, 0), (0, 0)));
         assert_eq!(l.columns.len(), 2);
-        // The cart and payment stay; others go and come back.
-        let cart = l.columns[1]
-            .panels
-            .iter()
-            .position(|p| p.widget == Widget::Cart);
-        assert!(!l.remove((1, cart.unwrap_or(0))));
+        // Panels go and come back.
         assert!(l.remove((0, 0)));
         assert!(l.missing().contains(&Widget::Categories));
         assert!(l.add(0, Widget::Categories));
@@ -819,11 +1182,9 @@ mod tests {
         assert_eq!(k.current(), mine);
         let again = Kept::parse(&k.to_json());
         assert_eq!(again, k);
-        // One without a cart cannot be kept; a damaged one is not shown.
+        // One with nothing on it cannot be kept; a damaged one is not shown.
         let mut bad = mine.clone();
-        bad.columns
-            .iter_mut()
-            .for_each(|c| c.panels.retain(|p| p.widget != Widget::Cart));
+        bad.columns.clear();
         assert!(!k.keep(bad));
         let damaged = k.to_json().replace("\"cart\"", "\"nope\"");
         assert_eq!(Kept::parse(&damaged).current().name, "shop");

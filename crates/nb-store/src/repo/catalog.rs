@@ -63,6 +63,9 @@ pub struct ProductRow {
     pub tags: Vec<String>,
     /// `none`, `lot` or `serial`.
     pub tracking: String,
+    /// Marked as a favourite (offered first at the till).
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 /// What a product row carries besides its rules-checked fields.
@@ -150,6 +153,8 @@ pub struct ProductQuery {
     /// Count the products in each stock state too (for the filters). It
     /// reads every product's stock: a search or a page turn goes without.
     pub with_counts: bool,
+    /// The favourites only.
+    pub favorites: bool,
 }
 
 impl Default for ProductQuery {
@@ -162,6 +167,7 @@ impl Default for ProductQuery {
             desc: false,
             limit: 200,
             offset: 0,
+            favorites: false,
             with_counts: true,
         }
     }
@@ -192,7 +198,7 @@ pub fn fts_query(text: &str) -> Option<String> {
     }
 }
 
-const EXTRA_COLS: &str = "p.brand_id, br.name, p.tax_class_id, p.alt_name, p.description, p.cost_minor, p.plu, p.parent_id, p.variant_attrs, p.tracking";
+const EXTRA_COLS: &str = "p.brand_id, br.name, p.tax_class_id, p.alt_name, p.description, p.cost_minor, p.plu, p.parent_id, p.variant_attrs, p.tracking, p.favorite";
 
 const STOCK_EXPR: &str =
     "COALESCE((SELECT SUM(b.on_hand_milli) FROM stock_balances b WHERE b.product_id = p.id), 0)";
@@ -216,6 +222,9 @@ pub fn query(conn: &Connection, org: OrganizationId, q: &ProductQuery) -> Result
     if let Some(c) = &q.category_id {
         filters.push("p.category_id = ?".into());
         args.push(c.clone());
+    }
+    if q.favorites {
+        filters.push("p.favorite = 1".into());
     }
     let base_where = filters.join(" AND ");
     let state = state_expr();
@@ -342,6 +351,7 @@ fn row_basic(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProductRow> {
         variant_attrs: r.get(21)?,
         tags: Vec::new(),
         tracking: r.get(22)?,
+        favorite: r.get::<_, i64>(23)? != 0,
     })
 }
 

@@ -128,6 +128,27 @@ fn action(st: AppState, t: Till, code: &str, n: usize) -> Option<Button> {
             "keys",
             Rc::new(move || t.keys_open.set(true)),
         ),
+        "close" => b(
+            Icon::Lock,
+            "pos.close_till",
+            "",
+            "close",
+            Rc::new(move || t.closing.set(true)),
+        ),
+        "fullscreen" => b(
+            Icon::Maximize,
+            "pos.fullscreen",
+            "",
+            "fullscreen",
+            Rc::new(move || t.toggle_full()),
+        ),
+        "layouts" => b(
+            Icon::LayoutTemplate,
+            "pos.layouts",
+            "",
+            "layouts",
+            Rc::new(move || t.board.layouts_open.set(true)),
+        ),
         _ => return None,
     })
 }
@@ -159,71 +180,610 @@ fn count_badge(n: impl Fn() -> usize + 'static) -> View {
     ))
 }
 
-/// A large button of a panel, as its labels say.
-fn tile_button(st: AppState, t: Till, b: Button, labels: u8, code: &str) -> View {
-    let (with_icon, with_text) = shows(labels);
+/// A panel's colours: its background, its text, its quieter text.
+#[derive(Clone, Copy)]
+pub(super) struct Paint {
+    pub bg: Tone,
+    pub fg: Tone,
+    pub muted: Tone,
+}
+
+/// The colours of `COLORS[color]`, or `own` for 0.
+pub(super) fn paint(color: u8, own: Paint) -> Paint {
+    let on = |bg| Paint {
+        bg,
+        fg: Tone::OnPrimary,
+        muted: Tone::OnPrimary,
+    };
+    match color {
+        1 => on(Tone::Primary),
+        2 => Paint {
+            bg: Tone::Ink,
+            fg: Tone::Surface,
+            muted: Tone::Faint,
+        },
+        3 => on(Tone::Success),
+        4 => Paint {
+            bg: Tone::WarningSoft,
+            fg: Tone::Ink,
+            muted: Tone::Body,
+        },
+        5 => on(Tone::Danger),
+        6 => Paint {
+            bg: Tone::PrimarySoft,
+            fg: Tone::Ink,
+            muted: Tone::Muted,
+        },
+        7 => Paint {
+            bg: Tone::Surface,
+            fg: Tone::Ink,
+            muted: Tone::Muted,
+        },
+        _ => own,
+    }
+}
+
+/// The usual surface of a panel.
+pub(super) const PLAIN: Paint = Paint {
+    bg: Tone::Surface,
+    fg: Tone::Ink,
+    muted: Tone::Muted,
+};
+
+/// Content along a row placed as the panel says.
+fn justify(v: View, align: u8) -> View {
+    match align {
+        1 => v.justify_center(),
+        2 => v.justify_end(),
+        _ => v,
+    }
+}
+
+/// A button of a panel, as its labels, style (0 tiles, 1 a row of small
+/// buttons, 2 a list) and colour say.
+fn tile_button(st: AppState, t: Till, b: Button, p: &Panel, code: &str) -> View {
+    let (with_icon, with_text) = shows(p.labels);
+    let style = p.style;
+    let colors = paint(p.color, PLAIN);
     let run = b.run.clone();
     let key = b.key;
     let hint = b.hint;
     let mut v = view()
         .test_id(&b.id)
-        .flex_grow(1.0)
-        .basis(px(if with_text { 140.0 } else { 56.0 }))
-        .min_h(px(crate::ui::tokens::control::lg() + 18.0))
-        .p(px(8.0))
-        .gap(px(2.0))
-        .items_center()
-        .justify_center()
         .rounded(px(radius::md()))
         .border_1()
         .border_color(Tone::Border.color())
-        .bg(Tone::Surface.color())
+        .bg(colors.bg.color())
         .label(move || SharedString::from(st.tn(key)))
         .opacity(if b.allowed { 1.0 } else { 0.45 });
+    v = match style {
+        // A row of small buttons.
+        1 => v
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(crate::ui::tokens::control::md() + 4.0))
+            .px(px(if with_text { 12.0 } else { 0.0 }))
+            .min_w(px(crate::ui::tokens::control::md() + 4.0))
+            .justify_center(),
+        // A list, one per line.
+        2 => v
+            .w_full()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .h(px(crate::ui::tokens::control::md() + 8.0))
+            .px(px(12.0)),
+        _ => v
+            .flex_grow(1.0)
+            .basis(px(if with_text { 140.0 } else { 56.0 }))
+            .min_h(px(crate::ui::tokens::control::lg() + 18.0))
+            .p(px(8.0))
+            .gap(px(2.0))
+            .items_center()
+            .justify_center(),
+    };
     if b.allowed {
         v = v
             .cursor_pointer()
-            .hover(|s| s.bg(Tone::Subtle.color()))
+            .hover(|s| s.opacity(0.85))
             .on_press(move || run());
     }
+    let fg = colors.fg;
     let mut top = view().flex_row().items_center().gap(px(6.0));
+    if style == 2 {
+        top = top.flex_1();
+    }
     if with_icon {
-        top = top.child(icon(b.icon, if with_text { 18.0 } else { 22.0 }, || {
-            Tone::Ink
-        }));
+        top = top.child(icon(
+            b.icon,
+            if with_text || style == 1 { 18.0 } else { 22.0 },
+            move || fg,
+        ));
     }
     if with_text {
-        top = top.child(label_line(
-            st.t(key),
-            ty::SM,
-            FontWeight::SEMIBOLD,
-            Tone::Ink,
-        ));
+        top = top.child(label_line(st.t(key), ty::SM, FontWeight::SEMIBOLD, fg));
     }
     if code == "held" {
         top = top.child(count_badge(move || t.held.with(Vec::len)));
     }
     v = v.child(top);
-    if with_text && !hint.is_empty() {
+    if with_text && !hint.is_empty() && style != 1 {
+        let muted = colors.muted;
         v = v.child(label_line(
             move || hint.to_owned(),
             ty::XS,
             FontWeight::NORMAL,
-            Tone::Faint,
+            muted,
         ));
     }
     v
 }
 
-/// The cart's actions as large buttons: those the panel shows, in order.
+/// The cart's actions as buttons: those the panel shows, in order.
 pub(super) fn actions_panel(st: AppState, t: Till, p: &Panel, n: usize) -> View {
-    let mut v = view().p(px(10.0)).flex_row().flex_wrap().gap(px(8.0));
+    let mut v = view()
+        .p(px(if p.style == 1 { 8.0 } else { 10.0 }))
+        .gap(px(8.0));
+    v = if p.style == 2 {
+        v
+    } else {
+        justify(v.flex_row().flex_wrap(), p.align)
+    };
     for code in p.shown_items() {
         if let Some(b) = action(st, t, &code, n) {
-            v = v.child(tile_button(st, t, b, p.labels, &code));
+            v = v.child(tile_button(st, t, b, p, &code));
         }
     }
     v
+}
+
+/// The total, large: the word, the number of lines, the customer, as the
+/// panel says; its colour and alignment.
+pub(super) fn big_total(st: AppState, t: Till, p: &Panel) -> View {
+    let items = p.shown_items();
+    let has = |c: &str| items.iter().any(|i| i == c);
+    let colors = paint(
+        p.color,
+        Paint {
+            bg: Tone::Ink,
+            fg: Tone::Surface,
+            muted: Tone::Faint,
+        },
+    );
+    let total = computed(move || t.totals(currency(st)).map_or(0, |x| x.total.minor()));
+    let (fg, muted) = (colors.fg, colors.muted);
+    let mut words = view().gap(px(2.0));
+    if has("label") {
+        words = words.child(label_line(st.t("pos.total"), ty::LG, FontWeight::BOLD, fg));
+    }
+    if has("count") {
+        words = words.child(label_line(
+            move || {
+                let n = t.cart.with(Vec::len) as i64;
+                tr_args(
+                    st.lang(),
+                    "pos.cart.count",
+                    &[("count", &st.fmt().integer(n))],
+                )
+            },
+            ty::SM,
+            FontWeight::MEDIUM,
+            muted,
+        ));
+    }
+    if has("customer") {
+        words = words.child(label_line(
+            move || {
+                t.customer
+                    .get()
+                    .map(|c| c.name)
+                    .unwrap_or_else(|| st.tn("pos.counter_customer"))
+            },
+            ty::SM,
+            FontWeight::MEDIUM,
+            muted,
+        ));
+    }
+    let number = figure(
+        move || money(st, total.get()),
+        38.0,
+        FontWeight::BOLD,
+        move || fg,
+    );
+    let v = view()
+        .test_id("pos-total")
+        .px(px(18.0))
+        .py(px(14.0))
+        .gap(px(12.0))
+        .rounded(px(radius::lg()))
+        .bg(colors.bg.color());
+    match p.align {
+        // Centred: the words on one line beside the number.
+        1 => v
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .justify_center()
+            .gap(px(24.0))
+            .child(words.flex_row().items_center().gap(px(14.0)))
+            .child(number),
+        // The number first.
+        2 => v
+            .flex_row()
+            .items_center()
+            .child(number)
+            .child(view().flex_1())
+            .child(words.items_end()),
+        _ => v
+            .flex_row()
+            .items_center()
+            .child(words.flex_1())
+            .child(number),
+    }
+}
+
+/// The carts on hold as badges: each its label, lines and total; a press
+/// takes it back (this cart is held first), its × drops it. Hold this
+/// cart at the end.
+pub(super) fn held_bar(st: AppState, t: Till, p: &Panel) -> View {
+    let items = p.shown_items();
+    let has = |c: &str| items.iter().any(|i| i == c);
+    let (title, lines, total, hold_btn) = (has("title"), has("lines"), has("total"), has("hold"));
+    let colors = paint(p.color, PLAIN);
+    let (with_icon, with_text) = shows(p.labels);
+    let align = p.align;
+    let list = dynamic(move || {
+        let held = t.held.get();
+        let mut row = view().flex_row().flex_wrap().items_center().gap(px(8.0));
+        row = justify(row, align);
+        if held.is_empty() {
+            row = row.child(label_line(
+                st.t("pos.held.none"),
+                ty::SM,
+                FontWeight::NORMAL,
+                Tone::Muted,
+            ));
+        }
+        for (i, h) in held.into_iter().enumerate() {
+            let id = h.id.clone();
+            let drop_id = h.id.clone();
+            let name = h.label.clone();
+            let n = i64::from(h.lines);
+            let mut badge = view()
+                .test_id(&format!("held-badge-{i}"))
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .h(px(crate::ui::tokens::control::md() + 4.0))
+                .ps(px(12.0))
+                .pe(px(4.0))
+                .rounded_full()
+                .bg(Tone::PrimarySoft.color())
+                .border_1()
+                .border_color(Tone::Primary.color())
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.85))
+                .label(st.t("pos.held.take"))
+                .on_press(move || recall(st, t, id.clone(), || {}))
+                .child(icon(Icon::Clock, 15.0, || Tone::Primary))
+                .child(label_line(
+                    move || name.clone(),
+                    ty::SM,
+                    FontWeight::BOLD,
+                    Tone::Primary,
+                ));
+            if lines {
+                badge = badge.child(label_line(
+                    move || {
+                        tr_args(
+                            st.lang(),
+                            "pos.cart.count",
+                            &[("count", &st.fmt().integer(n))],
+                        )
+                    },
+                    ty::XS,
+                    FontWeight::MEDIUM,
+                    Tone::Muted,
+                ));
+            }
+            if total {
+                badge = badge.child(figure(
+                    move || money(st, h.total_minor),
+                    ty::SM,
+                    FontWeight::BOLD,
+                    || Tone::Ink,
+                ));
+            }
+            badge = badge.child(
+                view()
+                    .test_id(&format!("held-drop-{i}"))
+                    .w(px(24.0))
+                    .h(px(24.0))
+                    .rounded_full()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(Tone::Hover.color()))
+                    .label(st.t("pos.held.drop"))
+                    .on_press(move || drop_held(st, t, drop_id.clone()))
+                    .child(icon(Icon::Close, 13.0, || Tone::Muted)),
+            );
+            row = row.child(badge);
+        }
+        row.into_element()
+    });
+    let mut bar = view()
+        .test_id("pos-held-bar")
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .rounded(px(radius::lg()))
+        .bg(colors.bg.color())
+        .border_1()
+        .border_color(Tone::Border.color());
+    if title {
+        let fg = colors.fg;
+        bar = bar.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(icon(Icon::History, 16.0, move || fg))
+                .child(label_line(
+                    st.t("pos.key.held"),
+                    ty::SM,
+                    FontWeight::BOLD,
+                    fg,
+                )),
+        );
+    }
+    bar = bar.child(view().flex_1().min_w(px(0.0)).child(list));
+    if hold_btn {
+        let mut b = view()
+            .test_id("held-bar-hold")
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(crate::ui::tokens::control::md() + 4.0))
+            .px(px(12.0))
+            .rounded(px(radius::md()))
+            .bg(Tone::Primary.color())
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.9))
+            .label(st.t("pos.key.hold"))
+            .on_press(move || hold(st, t));
+        if with_icon {
+            b = b.child(icon(Icon::Pause, 16.0, || Tone::OnPrimary));
+        }
+        if with_text {
+            b = b.child(label_line(
+                st.t("pos.key.hold"),
+                ty::SM,
+                FontWeight::BOLD,
+                Tone::OnPrimary,
+            ));
+        }
+        bar = bar.child(b);
+    }
+    bar
+}
+
+/// Drops a cart on hold (taken and let go).
+fn drop_held(st: AppState, t: Till, id: String) {
+    let Some(session) = st.session.get_untracked() else {
+        return;
+    };
+    let meta = session.meta("cart.drop");
+    let db = st.db();
+    let task = spawn(async move {
+        match db.call(move |s| take_held(s, meta, &id)).await {
+            Ok(_) => {
+                t.held_rev.update(|n| *n += 1);
+                show_toast(st, st.tn("pos.held.dropped"));
+            }
+            Err(e) => show_toast(st, first_error(st, &e)),
+        }
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
+}
+
+/// The last sale made here: its number, total, the change given, its
+/// receipt again.
+pub(super) fn last_sale(st: AppState, t: Till, p: &Panel) -> View {
+    let items = p.shown_items();
+    let has = |c: &str| items.iter().any(|i| i == c);
+    let (number, total, change, print) = (has("number"), has("total"), has("change"), has("print"));
+    let colors = paint(p.color, PLAIN);
+    let (fg, muted) = (colors.fg, colors.muted);
+    let (with_icon, with_text) = shows(p.labels);
+    let body = dynamic(move || {
+        let Some(r) = t.last.get() else {
+            return label_line(st.t("pos.last.none"), ty::SM, FontWeight::NORMAL, muted)
+                .into_element();
+        };
+        let mut v = view().gap(px(6.0));
+        if number {
+            let n = r.number.clone();
+            v = v.child(label_line(move || n.clone(), ty::SM, FontWeight::BOLD, fg));
+        }
+        let line = |key: &'static str, m: i64, big: bool| {
+            view()
+                .flex_row()
+                .items_center()
+                .child(view().flex_1().child(label_line(
+                    st.t(key),
+                    ty::XS,
+                    FontWeight::MEDIUM,
+                    muted,
+                )))
+                .child(figure(
+                    move || money(st, m),
+                    if big { ty::LG } else { ty::SM },
+                    FontWeight::BOLD,
+                    move || fg,
+                ))
+        };
+        if total {
+            v = v.child(line("pos.total", r.total_minor, false));
+        }
+        if change {
+            v = v.child(line("pos.last.change", r.change_minor, true));
+        }
+        if print {
+            let n = r.number.clone();
+            let mut b = view()
+                .test_id("last-print")
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap(px(6.0))
+                .h(px(crate::ui::tokens::control::md()))
+                .rounded(px(radius::md()))
+                .border_1()
+                .border_color(Tone::Border.color())
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.85))
+                .label(st.t("pos.last.print"))
+                .on_press(move || {
+                    t.printing.set(Some(n.clone()));
+                    t.printing_open.set(true);
+                });
+            if with_icon {
+                b = b.child(icon(Icon::Printer, 16.0, move || fg));
+            }
+            if with_text {
+                b = b.child(label_line(
+                    st.t("pos.last.print"),
+                    ty::SM,
+                    FontWeight::SEMIBOLD,
+                    fg,
+                ));
+            }
+            v = v.child(b);
+        }
+        v.into_element()
+    });
+    view()
+        .test_id("pos-last-sale")
+        .gap(px(8.0))
+        .p(px(14.0))
+        .rounded(px(radius::lg()))
+        .bg(colors.bg.color())
+        .border_1()
+        .border_color(Tone::Border.color())
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(icon(Icon::Receipt, 16.0, move || muted))
+                .child(label_line(
+                    st.t("pos.last.title"),
+                    ty::XS,
+                    FontWeight::BOLD,
+                    muted,
+                )),
+        )
+        .child(body)
+}
+
+/// The time and the date, the till and who works it.
+pub(super) fn clock_panel(st: AppState, t: Till, p: &Panel) -> View {
+    let items = p.shown_items();
+    let has = |c: &str| items.iter().any(|i| i == c);
+    let colors = paint(p.color, PLAIN);
+    let (fg, muted) = (colors.fg, colors.muted);
+    // The minute, kept current.
+    let now = signal(crate::state::now_ms());
+    let tick = spawn(async move {
+        loop {
+            timer(std::time::Duration::from_secs(20)).await;
+            now.set(crate::state::now_ms());
+        }
+    });
+    drop(tick); // ends with the panel (its owner)
+    let mut row = view()
+        .test_id("pos-clock")
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap(px(18.0))
+        .px(px(16.0))
+        .py(px(10.0))
+        .rounded(px(radius::lg()))
+        .bg(colors.bg.color())
+        .border_1()
+        .border_color(Tone::Border.color());
+    row = justify(row, p.align);
+    if has("time") {
+        row = row.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(icon(Icon::Clock, 18.0, move || muted))
+                .child(figure(
+                    move || clock_of(st, now.get()),
+                    ty::XL,
+                    FontWeight::BOLD,
+                    move || fg,
+                )),
+        );
+    }
+    if has("date") {
+        row = row.child(label_line(
+            move || {
+                // The store's day (UTC+1, Algeria, as the clock).
+                let days = (now.get() / 60_000 + 60).div_euclid(24 * 60);
+                let d = nb_domain::installment::add_days(
+                    nb_domain::fiscal::Date {
+                        y: 1970,
+                        m: 1,
+                        d: 1,
+                    },
+                    days,
+                );
+                st.fmt().date(d.y, d.m, d.d)
+            },
+            ty::MD,
+            FontWeight::SEMIBOLD,
+            fg,
+        ));
+    }
+    if has("till") {
+        row = row.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(icon(Icon::Wallet, 16.0, move || muted))
+                .child(label_line(
+                    move || till_line(st, t),
+                    ty::SM,
+                    FontWeight::MEDIUM,
+                    fg,
+                )),
+        );
+    }
+    if has("cashier") {
+        row = row.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(icon(Icon::User, 16.0, move || muted))
+                .child(label_line(
+                    crate::shell::user_name(st),
+                    ty::SM,
+                    FontWeight::MEDIUM,
+                    fg,
+                )),
+        );
+    }
+    row
 }
 
 /// Payment in one control: its parts as the panel says (at once in cash,

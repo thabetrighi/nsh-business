@@ -260,6 +260,9 @@ fn store_switcher(st: AppState) -> View {
 /// The sidebar: full, or icons only (a section's pages in a menu).
 fn sidebar(st: AppState) -> View {
     view().child(dynamic(move || {
+        if st.focus.get() {
+            return view().into_element();
+        }
         if st.biz.sidebar_narrow.get() {
             narrow_sidebar(st).into_element()
         } else {
@@ -632,6 +635,7 @@ fn top_bar(st: AppState) -> View {
             st.lang.get();
             st.user.get();
             st.prefs.theme.get();
+            st.biz.status_icon_only.get();
             untracked(move || crate::topbar::user_menu(st)).into_element()
         }))
 }
@@ -682,11 +686,30 @@ fn sync_status(st: AppState) -> View {
             let f = st.t("sync.offline");
             move || SharedString::from(f())
         })
-        .child(badge(
-            Status::Warning,
-            Some(Icon::Offline),
-            st.t("sync.offline"),
-        ))
+        // Its words may go (the person's choice): the icon stays, its name
+        // in the tooltip; a press switches.
+        .child(dynamic(move || {
+            let v = if st.biz.status_icon_only.get() {
+                view()
+                    .w(px(30.0))
+                    .h(px(30.0))
+                    .rounded_full()
+                    .items_center()
+                    .justify_center()
+                    .bg(Tone::WarningSoft.color())
+                    .child(icon(Icon::Offline, 15.0, || Tone::Warning))
+            } else {
+                view().child(badge(
+                    Status::Warning,
+                    Some(Icon::Offline),
+                    st.t("sync.offline"),
+                ))
+            };
+            v.test_id("sync-status")
+                .cursor_pointer()
+                .on_press(move || st.biz.status_icon_only.update(|v| *v = !*v))
+                .into_element()
+        }))
 }
 
 // ---------------------------------------------------------------- phone

@@ -231,6 +231,10 @@ struct Till {
     closing: Signal<bool>,
     /// Bumped for each payment made at once (cash, the exact amount).
     direct: Signal<u32>,
+    /// The window is in full screen (the sidebar goes).
+    full: Signal<bool>,
+    /// The last sale made here (its number, total, change).
+    last: Signal<Option<nb_store::usecases::sales::SaleResult>>,
 }
 
 /// A sale reopened in the cart: its number, what is left of it, and
@@ -431,7 +435,11 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         till: state,
         closing,
         direct: signal(0),
+        full: signal(false),
+        last: signal(None),
     };
+    // Leaving the till gives the sidebar back.
+    cleanup(move || st.focus.set(false));
     effect(move || {
         if !t.printing_open.get() {
             t.printing.set(None);
@@ -1004,9 +1012,45 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
                 .into_element()
         })
     };
-    let grid = move |style: u8| {
+    // The favourites (reloaded when data changes).
+    let favs = resource(
+        move || Some(st.data_rev.get()),
+        move |_, _| {
+            let db = st.db();
+            async move {
+                db.call(move |s| {
+                    list_products(
+                        s,
+                        &ProductQuery {
+                            favorites: true,
+                            sort: ProductSort::Name,
+                            limit: 120,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .await
+            }
+        },
+    );
+    let fav_rows = computed(move || {
+        favs.with(|p: Option<&ProductPage>| p.map(|p| p.rows.clone()))
+            .unwrap_or_default()
+    });
+    // Products in a style; `from`: where their test ids start (the
+    // favourites' after the products').
+    let grid_of = move |rows: Memo<Vec<ProductRow>>, style: u8, from: usize| {
         dynamic(move || {
             let all = rows.get();
+            if all.is_empty() && from > 0 {
+                return empty_state(
+                    Icon::Star,
+                    st.t("pos.favorites.none"),
+                    st.t("pos.favorites.help"),
+                    None,
+                )
+                .into_element();
+            }
             if all.is_empty() {
                 return empty_state(
                     Icon::Search,
@@ -1022,6 +1066,11 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
                 )
                 .into_element();
             }
+            // A right click: a favourite or not, the product's card.
+            let menu = move |v: View, p: &ProductRow| {
+                let (id, fav) = (p.id.clone(), p.favorite);
+                crate::ui::menu::with_menu(v, move || product_acts(st, t, id.clone(), fav))
+            };
             // Sizes and what shows follow the layout.
             let pr = st.biz.pos;
             let _ = (pr.tile.get(), pr.stock.get(), pr.sku.get());
@@ -1032,27 +1081,31 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
                         .border_1()
                         .border_color(Tone::Border.color());
                     for (i, p) in all.into_iter().enumerate() {
-                        g = g.child(product_row(st, t, i, p, None));
+                        let m = p.clone();
+                        g = g.child(menu(product_row(st, t, from + i, p, None), &m));
                     }
                     g.into_element()
                 }
                 2 => {
                     let mut g = view().flex_row().flex_wrap().gap(px(12.0));
                     for (i, p) in all.into_iter().enumerate() {
-                        g = g.child(product_tile(st, t, i, p));
+                        let m = p.clone();
+                        g = g.child(menu(product_tile(st, t, from + i, p), &m));
                     }
                     g.into_element()
                 }
                 _ => {
                     let mut g = view().flex_row().flex_wrap().gap(px(10.0));
                     for (i, p) in all.into_iter().enumerate() {
-                        g = g.child(product_card(st, t, i, p, compact));
+                        let m = p.clone();
+                        g = g.child(menu(product_card(st, t, from + i, p, compact), &m));
                     }
                     g.into_element()
                 }
             }
         })
     };
+    let grid = move |style: u8| grid_of(rows, style, 0);
     if compact {
         let products = card()
             .flex_1()
@@ -1090,8 +1143,90 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
                         .child(view().pb(px(8.0)).child(grid(style))),
                 )
             }),
+            favorites: std::rc::Rc::new(move |style: u8| {
+                card()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .p(px(12.0))
+                    .gap(px(8.0))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(icon(Icon::Star, 16.0, || Tone::Warning))
+                            .child(label_line(
+                                st.t("pos.widget.favorites"),
+                                ty::SM,
+                                FontWeight::BOLD,
+                                Tone::Ink,
+                            )),
+                    )
+                    .child(
+                        scroll()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .child(view().pb(px(8.0)).child(grid_of(fav_rows, style, 500))),
+                    )
+            }),
         },
     )
+}
+
+/// What a product at the till offers on a right click: a favourite or
+/// not, its card in the catalog.
+fn product_acts(st: AppState, t: Till, id: String, fav: bool) -> Vec<crate::ui::menu::Act> {
+    use crate::ui::menu::Act;
+    let pid = id.clone();
+    vec![
+        Act::with(
+            Icon::Star,
+            st.tn(if fav {
+                "products.unfavorite"
+            } else {
+                "products.favorite"
+            }),
+            move || toggle_favorite(st, pid.clone(), !fav),
+        )
+        .when(st.can("products.edit")),
+        Act::with(Icon::Package, st.tn("pos.menu.edit_product"), move || {
+            t.product_edit.set(Some(id.clone()));
+            t.product_edit_open.set(true);
+        })
+        .when(st.can("products.edit")),
+    ]
+}
+
+/// Marks a product as a favourite or not.
+pub(crate) fn toggle_favorite(st: AppState, id: String, on: bool) {
+    let Some(session) = st.session.get_untracked() else {
+        return;
+    };
+    let Ok(pid) = id.parse() else {
+        return;
+    };
+    let meta = session.meta("product.favorite");
+    let db = st.db();
+    let task = spawn(async move {
+        match db
+            .call(move |s| nb_store::usecases::products::set_favorite(s, meta, &[pid], on))
+            .await
+        {
+            Ok(_) => {
+                st.changed();
+                show_toast(
+                    st,
+                    st.tn(if on {
+                        "products.favorited"
+                    } else {
+                        "products.unfavorited"
+                    }),
+                );
+            }
+            Err(e) => show_toast(st, first_error(st, &e)),
+        }
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
 }
 
 fn product_card(st: AppState, t: Till, i: usize, p: ProductRow, compact: bool) -> View {
@@ -1268,6 +1403,29 @@ struct CartParts {
     customer: bool,
     sums: bool,
     pay: bool,
+    /// Its title and count.
+    head: bool,
+    /// The title's buttons (hold, print before paying, clear).
+    actions: bool,
+    /// The table's columns.
+    cols: Cols,
+    /// The table's header stays while its lines scroll.
+    sticky: bool,
+}
+
+impl CartParts {
+    fn of(lines: Option<bool>, customer: bool, sums: bool, pay: bool) -> Self {
+        CartParts {
+            lines,
+            customer,
+            sums,
+            pay,
+            head: true,
+            actions: true,
+            cols: Cols::all(),
+            sticky: false,
+        }
+    }
 }
 
 /// The cart's lines as a list.
@@ -1415,19 +1573,9 @@ fn cart_sums(st: AppState, t: Till, in_sheet: bool, band: bool, total: bool) -> 
 
 fn cart_panel(st: AppState, t: Till, in_sheet: bool, side_only: bool) -> View {
     let parts = if side_only {
-        CartParts {
-            lines: None,
-            customer: true,
-            sums: true,
-            pay: true,
-        }
+        CartParts::of(None, true, true, true)
     } else {
-        CartParts {
-            lines: Some(false),
-            customer: true,
-            sums: true,
-            pay: true,
-        }
+        CartParts::of(Some(false), true, true, true)
     };
     cart_box(st, t, in_sheet, parts, side_only)
 }
@@ -1442,60 +1590,65 @@ fn cart_box(st: AppState, t: Till, in_sheet: bool, parts: CartParts, side_only: 
             &[("count", &st.fmt().integer(t.cart.with(Vec::len) as i64))],
         )
     };
+    let (cols, sticky, with_actions) = (parts.cols, parts.sticky, parts.actions);
     card()
         .flex_1()
         .h_full()
         .min_h(px(0.0))
-        .child(card_header_icon(
-            Some(Icon::Cart),
-            st.t("pos.cart"),
-            Some(Box::new(count)),
-            view().child(when(
-                move || !t.cart.get().is_empty(),
-                move || {
-                    view()
-                        .flex_row()
-                        .gap(px(4.0))
-                        .child(
-                            button(
-                                Variant::Ghost,
-                                Size::Sm,
-                                Some(Icon::Clock),
-                                st.t("pos.hold"),
-                                move || hold(st, t),
+        .child(if !parts.head {
+            view()
+        } else {
+            card_header_icon(
+                Some(Icon::Cart),
+                st.t("pos.cart"),
+                Some(Box::new(count)),
+                view().child(when(
+                    move || with_actions && !t.cart.get().is_empty(),
+                    move || {
+                        view()
+                            .flex_row()
+                            .gap(px(4.0))
+                            .child(
+                                button(
+                                    Variant::Ghost,
+                                    Size::Sm,
+                                    Some(Icon::Clock),
+                                    st.t("pos.hold"),
+                                    move || hold(st, t),
+                                )
+                                .test_id(if in_sheet {
+                                    "sheet-hold"
+                                } else {
+                                    "cart-hold"
+                                }),
                             )
-                            .test_id(if in_sheet {
-                                "sheet-hold"
-                            } else {
-                                "cart-hold"
-                            }),
-                        )
-                        .child(
-                            icon_button(
-                                || Icon::Printer,
-                                st.t("pos.prebill"),
-                                Variant::Ghost,
-                                move || {
-                                    t.cart_open.set(false);
-                                    t.prebill_open.set(true);
-                                },
+                            .child(
+                                icon_button(
+                                    || Icon::Printer,
+                                    st.t("pos.prebill"),
+                                    Variant::Ghost,
+                                    move || {
+                                        t.cart_open.set(false);
+                                        t.prebill_open.set(true);
+                                    },
+                                )
+                                .test_id("cart-prebill"),
                             )
-                            .test_id("cart-prebill"),
-                        )
-                        .child(
-                            button(
-                                Variant::Ghost,
-                                Size::Sm,
-                                Some(Icon::Trash),
-                                st.t("pos.cart.clear"),
-                                move || t.clear(),
+                            .child(
+                                button(
+                                    Variant::Ghost,
+                                    Size::Sm,
+                                    Some(Icon::Trash),
+                                    st.t("pos.cart.clear"),
+                                    move || t.clear(),
+                                )
+                                .test_id("cart-clear"),
                             )
-                            .test_id("cart-clear"),
-                        )
-                        .into_element()
-                },
-            )),
-        ))
+                            .into_element()
+                    },
+                )),
+            )
+        })
         .child(if parts.customer {
             customer_chip(st, t, in_sheet)
         } else {
@@ -1546,13 +1699,27 @@ fn cart_box(st: AppState, t: Till, in_sheet: bool, parts: CartParts, side_only: 
                     0,
                 ))
                 .into_element(),
+            // A table whose header stays: the header above the scroll.
+            (false, Some(true)) if sticky => view()
+                .flex_1()
+                .min_h(px(0.0))
+                .border_t_1()
+                .border_color(Tone::Border.color())
+                .child(cart_table_head(st, cols))
+                .child(
+                    scroll()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .child(cart_table(st, t, cols, false)),
+                )
+                .into_element(),
             (false, Some(table)) => scroll()
                 .flex_1()
                 .min_h(px(0.0))
                 .border_t_1()
                 .border_color(Tone::Border.color())
                 .child(if table {
-                    cart_table(st, t)
+                    cart_table(st, t, cols, true)
                 } else {
                     cart_lines(st, t)
                 })
@@ -2317,6 +2484,7 @@ fn pay_dialog(
                 busy.set(false);
                 match r {
                     Ok((r, back)) => {
+                        t.last.set(Some(r.clone()));
                         t.clear();
                         st.changed();
                         close();

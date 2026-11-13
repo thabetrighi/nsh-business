@@ -333,6 +333,10 @@ pub fn user_menu(st: AppState) -> View {
             move || st.toggle_appearance(),
         ),
         Act::sub(Icon::Languages, st.tn("user.language"), langs),
+        Act::with(Icon::Offline, st.tn("user.status_text"), move || {
+            st.biz.status_icon_only.update(|v| *v = !*v)
+        })
+        .checked(!st.biz.status_icon_only.get_untracked()),
         Act::Line,
         Act::with(Icon::Settings, st.tn("nav.settings"), move || {
             st.route.set(Route::Settings)

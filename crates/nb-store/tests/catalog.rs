@@ -337,3 +337,37 @@ fn products_move_to_a_category_together() -> R {
     );
     Ok(())
 }
+
+#[test]
+fn favourites_are_marked_and_listed_on_their_own() -> R {
+    use nb_store::usecases::products::set_favorite;
+    let (mut s, setup) = store();
+    let a = create_product(&mut s, meta(&setup, "p"), product("Lait", "", 100))?;
+    create_product(&mut s, meta(&setup, "p"), product("Yaourt", "", 50))?;
+    let fav = |s: &nb_store::Store| -> Result<Vec<String>, nb_store::Error> {
+        let q = ProductQuery {
+            favorites: true,
+            ..Default::default()
+        };
+        Ok(list_products(s, &q)?
+            .rows
+            .into_iter()
+            .map(|r| r.name)
+            .collect())
+    };
+    assert!(fav(&s)?.is_empty());
+    set_favorite(&mut s, meta(&setup, "f"), &[a.product_id()?], true)?;
+    assert_eq!(fav(&s)?, ["Lait"]);
+    let all = list_products(&s, &ProductQuery::default())?;
+    assert!(all.rows.iter().any(|r| r.name == "Lait" && r.favorite));
+    set_favorite(&mut s, meta(&setup, "f"), &[a.product_id()?], false)?;
+    assert!(fav(&s)?.is_empty());
+    assert_eq!(
+        count(
+            &s,
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'set_favorite'"
+        ),
+        2
+    );
+    Ok(())
+}

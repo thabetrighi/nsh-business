@@ -11,6 +11,7 @@ pub mod design;
 pub mod expenses;
 pub mod forms;
 pub mod home;
+pub mod home_layout;
 pub mod import;
 pub mod inventory;
 pub mod lock;

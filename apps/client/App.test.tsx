@@ -1209,12 +1209,67 @@ test("the bell, help and the user's menu; a sale paid at once; a panel set large
   await app.press("id:pos-opts-0-0");
   await app.press("text:Taille du texte");
   await app.press("text:Très grande");
-  await app.press("id:pos-edit-footer");
-  await app.waitFor("id:pos-panel-footer");
+  await app.waitUntil(() => !app.texts().includes("Taille du texte"));
+  await app.press("id:pos-add-strip");
+  await app.press("text:Bande en bas");
+  await app.press("text:Barre du panier");
+  await app.waitFor("id:pos-strip-bottom-0");
   await app.press("id:pos-edit-save");
   await app.waitFor("id:pos-cart-bar");
   await app.waitFor("id:bar-total");
   // Back to the shop's layout for the other tests on this device.
+  await app.press("id:pos-customize");
+  await app.press("id:pos-layout-use-0");
+  await app.press("id:pos-customize-done");
+});
+
+test("the dashboard is arranged; favourites are marked and found; carts on hold as badges", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  // Arrange: hide a card, add another, back to the default.
+  await app.press("id:home-arrange");
+  await app.waitFor("id:home-edit-bar");
+  await app.press("id:home-opts-revenue");
+  await app.press("text:Masquer");
+  await app.press("id:home-add");
+  await app.press("text:Plus gros débiteurs");
+  await app.waitFor("id:home-card-debts");
+  await app.press("id:home-arrange");
+  await app.waitUntil(() => !app.shows("id:home-edit-bar"));
+  expect(app.texts()).not.toContain("Ventes brutes");
+  await app.press("id:home-arrange");
+  await app.press("id:home-reset");
+  await app.press("id:home-arrange");
+  await app.waitFor("text:Ventes brutes");
+  // A favourite from the products' list, then the list of favourites.
+  await app.press("text:Catalogue");
+  await app.press("id:nav-products");
+  await app.waitFor("id:product-more >> nth=0");
+  await app.press("id:product-more >> nth=0");
+  await app.press("text:Ajouter aux favoris");
+  await app.waitFor("text:Ajouté aux favoris");
+  await app.press("id:products-favorites");
+  await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–1 sur 1"));
+  // The carts on hold as badges: take one back with a press.
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-layout-edit");
+  await app.waitFor("id:pos-edit-bar");
+  await app.press("id:pos-add-strip");
+  await app.press("text:Bande en haut");
+  await app.press("text:Paniers en attente");
+  await app.press("id:pos-edit-save");
+  await app.waitFor("id:pos-held-bar");
+  await app.press("id:pos-item-0");
+  await app.press("id:held-bar-hold");
+  await app.waitFor("id:held-badge-0");
+  await app.waitUntil(() => !app.shows("id:cart-line-0"));
+  await app.press("id:held-badge-0");
+  await app.waitFor("id:cart-line-0");
+  await app.waitUntil(() => !app.shows("id:held-badge-0"));
   await app.press("id:pos-customize");
   await app.press("id:pos-layout-use-0");
   await app.press("id:pos-customize-done");

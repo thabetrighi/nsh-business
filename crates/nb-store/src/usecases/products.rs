@@ -588,6 +588,28 @@ pub fn set_products_category(
     })
 }
 
+/// Marks products as favourites or not (offered first at the till).
+pub fn set_favorite(store: &mut Store, meta: OpMeta, ids: &[ProductId], on: bool) -> Result<u32> {
+    store.write(meta, |w| {
+        w.require(Permission::ProductsEdit, &Target::org())?;
+        let org = w.org()?.to_string();
+        for id in ids {
+            let n = w.tx().execute(
+                "UPDATE products SET favorite = ?1, updated_at = ?2, version = version + 1
+                 WHERE id = ?3 AND org_id = ?4 AND deleted_at IS NULL",
+                rusqlite::params![i64::from(on), w.now(), id.to_string(), org],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound("product"));
+            }
+            let what = serde_json::json!({ "favorite": on });
+            w.event("product.updated", "product", &id.to_string(), &what)?;
+            w.audit("set_favorite", "product", &id.to_string(), &what)?;
+        }
+        Ok(u32::try_from(ids.len()).unwrap_or(u32::MAX))
+    })
+}
+
 /// The products screen's page.
 pub fn list_products(store: &Store, q: &ProductQuery) -> Result<ProductPage> {
     store.read(|r| {

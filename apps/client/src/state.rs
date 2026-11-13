@@ -180,6 +180,10 @@ pub struct BizPrefs {
     pub pos: PosPrefs,
     /// The sidebar shows icons only.
     pub sidebar_narrow: Signal<bool>,
+    /// The home dashboard's cards as arranged on this device (JSON).
+    pub home: Signal<String>,
+    /// The connection's state reads as an icon only (no words).
+    pub status_icon_only: Signal<bool>,
 }
 
 /// The till's screen, as this device's cashier arranged it.
@@ -228,6 +232,8 @@ impl BizPrefs {
             scale: persisted_index("nb.device.scale", 0),
             scanner: persisted_flag("nb.device.scanner", true),
             sidebar_narrow: persisted_flag("nb.app.sidebar_narrow", false),
+            home: persisted_text("nb.home.layout"),
+            status_icon_only: persisted_flag("nb.app.status_icon_only", false),
             pos: PosPrefs {
                 tile: persisted_index("nb.pos.tile", 1),
                 stock: persisted_flag("nb.pos.stock", true),
@@ -257,6 +263,9 @@ pub struct AppState {
     pub palette: Signal<bool>,
     /// The keyboard shortcuts' sheet is open.
     pub shortcuts: Signal<bool>,
+    /// A screen takes the whole window (the till in full screen, or its
+    /// layout without the sidebar): the sidebar does not show.
+    pub focus: Signal<bool>,
     /// A pending request for the screen being opened.
     pub intent: Signal<Option<Intent>>,
     /// The local database of this app instance (set by [`AppState::connect`]).
@@ -308,6 +317,7 @@ impl AppState {
             toast: signal(None),
             palette: signal(false),
             shortcuts: signal(false),
+            focus: signal(false),
             intent: signal(None),
             db: nsh_core::prelude::stored(None),
             session: signal(None),

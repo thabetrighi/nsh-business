@@ -151,6 +151,11 @@ icons! {
     Bag => "shopping-bag",
     Hash => "hash",
     UserX => "user-round-x",
+    ArrowUpDown => "arrow-up-down",
+    AlignCenter => "align-center",
+    EyeOff => "eye-off",
+    Star => "star",
+    LayoutDashboard => "layout-dashboard",
 }
 
 /// An icon `size` points square, stroked in `tone`.

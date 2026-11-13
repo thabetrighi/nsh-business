@@ -33,6 +33,12 @@ impl Till {
         self.paying.set(true);
     }
 
+    /// Full screen on or off (the sidebar goes with it).
+    pub(super) fn toggle_full(self) {
+        toggle_full_screen();
+        self.full.update(|v| *v = !*v);
+    }
+
     /// Pays at once: cash, the exact amount, no payment screen (a sale
     /// that brings goods back or corrects another shows it).
     pub(super) fn pay_now(self, st: AppState, print: bool) {
@@ -473,7 +479,7 @@ pub(super) fn head_tools(t: Till, st: AppState) -> View {
                 || Icon::Monitor,
                 st.t("pos.fullscreen"),
                 Variant::Ghost,
-                toggle_full_screen,
+                move || t.toggle_full(),
             )
             .test_id("pos-fullscreen"),
         )
@@ -728,9 +734,51 @@ pub(super) fn total_band(st: AppState, t: Till) -> View {
         ))
 }
 
-/// The cart as a table (the scanning layout): every line on one row.
-pub(super) fn cart_table(st: AppState, t: Till) -> View {
-    let totals = computed(move || t.totals(currency(st)));
+/// Which columns the cart's table shows (`pos_layout` items of the cart:
+/// `num`, `sku`, `qty`, `price`, `discount`, `total`; none chosen: all).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Cols {
+    pub num: bool,
+    pub sku: bool,
+    pub qty: bool,
+    pub price: bool,
+    pub discount: bool,
+    pub total: bool,
+}
+
+impl Cols {
+    pub fn all() -> Self {
+        Cols {
+            num: true,
+            sku: true,
+            qty: true,
+            price: true,
+            discount: true,
+            total: true,
+        }
+    }
+
+    pub fn of(items: &[String]) -> Self {
+        let has = |c: &str| items.iter().any(|i| i == c);
+        let c = Cols {
+            num: has("num"),
+            sku: has("sku"),
+            qty: has("qty"),
+            price: has("price"),
+            discount: has("discount"),
+            total: has("total"),
+        };
+        // A table needs a figure: none chosen is all of them.
+        if !(c.qty || c.price || c.total) {
+            Cols::all()
+        } else {
+            c
+        }
+    }
+}
+
+/// The header of the cart's table (above its scroll when it stays put).
+pub(super) fn cart_table_head(st: AppState, cols: Cols) -> View {
     let head = |key: &'static str, w: Option<f32>, end: bool| {
         let v = match w {
             Some(w) => view().w(px(w)).flex_shrink_0(),
@@ -744,7 +792,8 @@ pub(super) fn cart_table(st: AppState, t: Till) -> View {
             Tone::Muted,
         ))
     };
-    let header = view()
+    let mut header = view()
+        .test_id("cart-table-head")
         .flex_row()
         .items_center()
         .gap(px(8.0))
@@ -752,19 +801,35 @@ pub(super) fn cart_table(st: AppState, t: Till) -> View {
         .px(px(14.0))
         .bg(Tone::Subtle.color())
         .border_b_1()
-        .border_color(Tone::Border.color())
-        .child(view().w(px(28.0)).child(label_line(
+        .border_color(Tone::Border.color());
+    if cols.num {
+        header = header.child(view().w(px(28.0)).child(label_line(
             || "#".to_owned(),
             ty::XS,
             FontWeight::SEMIBOLD,
             Tone::Muted,
-        )))
-        .child(head("print.col.item", None, false))
-        .child(head("pos.qty", Some(124.0), false))
-        .child(head("pos.unit_price", Some(96.0), true))
-        .child(head("pos.discount_pct", Some(56.0), true))
-        .child(head("pos.line_total", Some(104.0), true))
-        .child(view().w(px(40.0)));
+        )));
+    }
+    header = header.child(head("print.col.item", None, false));
+    if cols.qty {
+        header = header.child(head("pos.qty", Some(124.0), false));
+    }
+    if cols.price {
+        header = header.child(head("pos.unit_price", Some(96.0), true));
+    }
+    if cols.discount {
+        header = header.child(head("pos.discount_pct", Some(56.0), true));
+    }
+    if cols.total {
+        header = header.child(head("pos.line_total", Some(104.0), true));
+    }
+    header.child(view().w(px(40.0)))
+}
+
+/// The cart as a table: every line on one row, the columns chosen; its
+/// header above (`with_head`) or kept apart by the caller.
+pub(super) fn cart_table(st: AppState, t: Till, cols: Cols, with_head: bool) -> View {
+    let totals = computed(move || t.totals(currency(st)));
     let rows = dynamic(move || {
         let items = t.cart.get();
         if items.is_empty() {
@@ -831,12 +896,16 @@ pub(super) fn cart_table(st: AppState, t: Till) -> View {
                     })
                     .cursor_pointer()
                     .on_press(move || t.selected.set(Some(i)))
-                    .child(view().w(px(28.0)).child(figure(
-                        move || (i + 1).to_string(),
-                        ty::SM,
-                        FontWeight::MEDIUM,
-                        || Tone::Muted,
-                    )))
+                    .child(if cols.num {
+                        view().w(px(28.0)).child(figure(
+                            move || (i + 1).to_string(),
+                            ty::SM,
+                            FontWeight::MEDIUM,
+                            || Tone::Muted,
+                        ))
+                    } else {
+                        view()
+                    })
                     .child(
                         view()
                             .flex_1()
@@ -847,15 +916,20 @@ pub(super) fn cart_table(st: AppState, t: Till) -> View {
                                 FontWeight::SEMIBOLD,
                                 Tone::Ink,
                             ))
-                            .child(label_line(
-                                move || sku.clone(),
-                                ty::XS,
-                                FontWeight::NORMAL,
-                                Tone::Muted,
-                            )),
+                            .child(if cols.sku {
+                                label_line(
+                                    move || sku.clone(),
+                                    ty::XS,
+                                    FontWeight::NORMAL,
+                                    Tone::Muted,
+                                )
+                                .into_element()
+                            } else {
+                                view().into_element()
+                            }),
                     )
                     .child(
-                        cell(124.0, false).child(
+                        cell(124.0, false).hidden_if(!cols.qty).child(
                             view()
                                 .flex_row()
                                 .items_center()
@@ -886,7 +960,7 @@ pub(super) fn cart_table(st: AppState, t: Till) -> View {
                                 )),
                         ),
                     )
-                    .child(cell(96.0, true).child(pressable(
+                    .child(cell(96.0, true).hidden_if(!cols.price).child(pressable(
                         format!("cart-price-{i}"),
                         Quick::Price,
                         view().child(figure(
@@ -896,7 +970,7 @@ pub(super) fn cart_table(st: AppState, t: Till) -> View {
                             || Tone::Body,
                         )),
                     )))
-                    .child(cell(56.0, true).child(pressable(
+                    .child(cell(56.0, true).hidden_if(!cols.discount).child(pressable(
                         format!("cart-disc-{i}"),
                         Quick::Discount,
                         view().child(figure(
@@ -915,7 +989,7 @@ pub(super) fn cart_table(st: AppState, t: Till) -> View {
                             || Tone::Muted,
                         )),
                     )))
-                    .child(cell(104.0, true).child(figure(
+                    .child(cell(104.0, true).hidden_if(!cols.total).child(figure(
                         move || money(st, line_total),
                         ty::MD,
                         FontWeight::BOLD,
@@ -937,7 +1011,11 @@ pub(super) fn cart_table(st: AppState, t: Till) -> View {
         }
         v.into_element()
     });
-    view().child(header).child(rows)
+    if with_head {
+        view().child(cart_table_head(st, cols)).child(rows)
+    } else {
+        view().child(rows)
+    }
 }
 
 /// The cart's figures before paying, as a receipt marked as such.
@@ -994,4 +1072,15 @@ pub(super) fn prebill_sale(st: AppState, t: Till) -> Option<nb_docs::templates::
         balance: None,
         settled_minor: 0,
     })
+}
+
+/// Hides a view when `off` (a column the table does not show).
+trait HideIf {
+    fn hidden_if(self, off: bool) -> Self;
+}
+
+impl HideIf for View {
+    fn hidden_if(self, off: bool) -> Self {
+        if off { self.hidden() } else { self }
+    }
 }
