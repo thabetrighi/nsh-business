@@ -220,6 +220,7 @@ impl Route {
                 "reports.view"
             }
             Route::Purchases | Route::PurchaseOrders => "purchases.order",
+            Route::Tours | Route::Vans | Route::FieldOrders => "distribution.view",
             _ => return None,
         })
     }

@@ -37,6 +37,11 @@ pub enum Intent {
     StockAt(String),
     /// One warehouse's movements.
     MovesAt(String),
+    /// A new transfer between these warehouses (loading or unloading a
+    /// vehicle): from, to.
+    TransferWith(Option<String>, Option<String>),
+    /// Open this tour on the tours page (its id).
+    Tour(String),
 }
 
 /// Light, dark, or as the system.
@@ -547,6 +552,11 @@ impl AppState {
     /// A reactive translated string.
     pub fn t(self, key: &'static str) -> impl Fn() -> String + 'static {
         move || tr(self.lang.get(), key).into_owned()
+    }
+
+    /// A reactive translation of a key built at run time.
+    pub fn t_dyn(self, key: String) -> impl Fn() -> String + 'static {
+        move || tr(self.lang.get(), &key).into_owned()
     }
 
     /// A translated string now (for one-off labels built inside a reactive scope).

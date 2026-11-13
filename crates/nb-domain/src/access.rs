@@ -101,6 +101,12 @@ permissions! {
     904 AuditView "audit.view" false,
     905 DevicesManage "devices.manage" false,
     906 BackupManage "backup.manage" false,
+    // Distribution and field sales
+    1001 DistributionView "distribution.view" false,
+    1002 DistributionPlan "distribution.plan" false,
+    1003 DistributionDrive "distribution.drive" false,
+    1004 DistributionSettle "distribution.settle" true,
+    1005 DistributionFleet "distribution.fleet" false,
 }
 
 impl Permission {
@@ -226,6 +232,7 @@ impl BuiltinRole {
             AccountingView,
             ReportsView,
             AuditView,
+            DistributionView,
         ];
         match self {
             BuiltinRole::Owner => PermissionSet::all(),
@@ -269,6 +276,11 @@ impl BuiltinRole {
                 PurchasesReceive,
                 ReportsView,
                 ReportsProfit,
+                DistributionView,
+                DistributionPlan,
+                DistributionDrive,
+                DistributionSettle,
+                DistributionFleet,
             ]),
             BuiltinRole::Accountant => PermissionSet::of(&[
                 CashExpense,
@@ -301,6 +313,8 @@ impl BuiltinRole {
                 CustomersEdit,
                 DebtsCollect,
                 ReportsView,
+                DistributionView,
+                DistributionPlan,
             ]),
             BuiltinRole::Cashier => PermissionSet::of(&[
                 SalesSell,
@@ -321,6 +335,7 @@ impl BuiltinRole {
                 StockTransfer,
                 StockCount,
                 PurchasesReceive,
+                DistributionView,
             ]),
             BuiltinRole::Purchasing => PermissionSet::of(&[
                 ProductsView,
@@ -340,14 +355,27 @@ impl BuiltinRole {
                 DebtsAdjust,
                 ReportsView,
             ]),
+            // A rep visits, takes orders and sells from the van; a driver
+            // delivers, collects and may sell from the van too.
             BuiltinRole::SalesRep => PermissionSet::of(&[
                 SalesSell,
                 ProductsView,
                 StockView,
                 CustomersView,
+                CustomersEdit,
                 DebtsCollect,
+                DistributionView,
+                DistributionDrive,
             ]),
-            BuiltinRole::Driver => PermissionSet::of(&[CustomersView, DebtsCollect]),
+            BuiltinRole::Driver => PermissionSet::of(&[
+                SalesSell,
+                ProductsView,
+                StockView,
+                CustomersView,
+                DebtsCollect,
+                DistributionView,
+                DistributionDrive,
+            ]),
             BuiltinRole::Auditor => PermissionSet::of(&views),
         }
     }

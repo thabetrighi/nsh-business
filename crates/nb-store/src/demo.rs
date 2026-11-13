@@ -248,6 +248,200 @@ pub fn seed(store: &mut Store, setup: &SetupResult, lang: DemoLang, n: usize) ->
     })
 }
 
+/// Where the demo customers are (around El Oued), their zone (0 centre,
+/// 1 north) and visit days, in the order of [`CUSTOMERS`].
+const PLACES: [(&str, usize, i64); 8] = [
+    ("33.368300, 6.867400", 0, 1 | 4 | 16),
+    ("33.490000, 6.800000", 1, 2 | 8),
+    ("33.361200, 6.853900", 0, 1 | 4 | 16),
+    ("33.515000, 6.950000", 1, 2 | 8),
+    ("33.404000, 6.854000", 1, 2 | 8),
+    ("33.277000, 6.910000", 0, 1 | 16),
+    ("33.372900, 6.875800", 0, 1 | 4 | 16),
+    ("", 0, 0),
+];
+
+/// Distribution for the demo shop (M16; its pages show once the activity
+/// or the modules turn them on): two zones, the
+/// customers on the map, two vehicles, a tour on the road with its next
+/// customer close, and two orders waiting for a tour.
+pub fn seed_distribution(store: &mut Store, setup: &SetupResult, lang: DemoLang) -> Result<()> {
+    use crate::usecases::distribution as d;
+    use crate::usecases::documents::{DocumentInput, approve_document, save_document};
+    use crate::usecases::sales::SaleLineInput;
+    let ar = lang == DemoLang::Ar;
+    let m = |kind: &'static str| OpMeta::new(kind, Some(setup.org), Some(setup.owner));
+    let mut zones = Vec::new();
+    for (name_ar, name_fr, color) in [("وسط المدينة", "Centre-ville", 1), ("الشمال", "Nord", 4)]
+    {
+        zones.push(
+            d::save_zone(
+                store,
+                m("demo.zone"),
+                d::ZoneInput {
+                    name: (if ar { name_ar } else { name_fr }).into(),
+                    color,
+                    ..Default::default()
+                },
+            )?
+            .id,
+        );
+    }
+    let customers: Vec<String> = store.read(|r| {
+        let mut s = r
+            .conn()
+            .prepare("SELECT id FROM customers WHERE org_id = ?1 ORDER BY code")?;
+        let rows = s
+            .query_map([setup.org.to_string()], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        Ok(rows)
+    })?;
+    for (c, (at, zone, days)) in customers.iter().zip(PLACES) {
+        if at.is_empty() {
+            continue;
+        }
+        d::set_customer_place(
+            store,
+            m("demo.place"),
+            c,
+            d::CustomerPlace {
+                zone_id: Some(zones[zone].clone()),
+                position: at.into(),
+                visit_days: days,
+                delivery_note: String::new(),
+            },
+        )?;
+    }
+    let truck = d::save_vehicle(
+        store,
+        m("demo.vehicle"),
+        d::VehicleInput {
+            name: (if ar { "شاحنة 1" } else { "Camion 1" }).into(),
+            plate: "01234-121-39".into(),
+            kind: "truck".into(),
+            capacity_kg: 3_500,
+            driver_id: Some(setup.owner.to_string()),
+            phone: "0661 22 33 44".into(),
+            speed_kmh: 40,
+            ..Default::default()
+        },
+    )?;
+    d::save_vehicle(
+        store,
+        m("demo.vehicle"),
+        d::VehicleInput {
+            name: (if ar {
+                "سيارة نفعية 2"
+            } else {
+                "Fourgon 2"
+            })
+            .into(),
+            plate: "05678-118-39".into(),
+            kind: "van".into(),
+            capacity_kg: 1_200,
+            speed_kmh: 35,
+            ..Default::default()
+        },
+    )?;
+    // Today's tour through the centre: the first stop done, the truck
+    // a few hundred metres from the next.
+    let centre: Vec<String> = customers
+        .iter()
+        .zip(PLACES)
+        .filter(|(_, (at, zone, _))| !at.is_empty() && *zone == 0)
+        .map(|(c, _)| c.clone())
+        .collect();
+    d::record_position(
+        store,
+        m("demo.gps"),
+        &truck.id,
+        "33.360000, 6.860000",
+        Some(0),
+    )?;
+    let t = d::create_tour(
+        store,
+        m("demo.tour"),
+        d::TourInput {
+            vehicle_id: truck.id.clone(),
+            kind: "van".into(),
+            customers: centre,
+            optimize: true,
+            ..Default::default()
+        },
+    )?;
+    let t = d::start_tour(store, m("demo.tour"), &t.tour.id, Some(48_250))?;
+    if let Some(first) = t.stops.first() {
+        d::complete_stop(
+            store,
+            m("demo.stop"),
+            &first.id,
+            d::StopDone {
+                receiver: (if ar {
+                    "السيد سعيد"
+                } else {
+                    "M. Saïd"
+                })
+                .into(),
+                ..Default::default()
+            },
+        )?;
+    }
+    if let Some(next) = t.stops.get(1).and_then(|s| s.point) {
+        let near = nb_domain::geo::Point::new(next.lat_e6 - 5_000, next.lng_e6)?;
+        d::record_position(store, m("demo.gps"), &truck.id, &near.text(), Some(25))?;
+    }
+    // Two orders from the north waiting for a tour.
+    let product: Option<String> = store.read(|r| {
+        Ok(r.conn()
+            .query_row(
+                "SELECT id FROM products WHERE org_id = ?1 AND kind = 'goods' ORDER BY created_at LIMIT 1",
+                [setup.org.to_string()],
+                |r| r.get(0),
+            )
+            .ok())
+    })?;
+    if let Some(product) = product {
+        let north: Vec<(String, String)> = customers
+            .iter()
+            .zip(PLACES)
+            .filter(|(_, (_, zone, _))| *zone == 1)
+            .take(2)
+            .map(|(c, _)| {
+                let name: String = store
+                    .read(|r| {
+                        Ok(r.conn()
+                            .query_row("SELECT name FROM customers WHERE id = ?1", [c], |r| {
+                                r.get(0)
+                            })
+                            .unwrap_or_default())
+                    })
+                    .unwrap_or_default();
+                (c.clone(), name)
+            })
+            .collect();
+        for ((c, name), qty) in north.into_iter().zip(["24", "12"]) {
+            let doc = save_document(
+                store,
+                m("demo.order"),
+                DocumentInput {
+                    kind: "order".into(),
+                    warehouse_id: setup.warehouse.to_string(),
+                    customer_id: Some(c.clone()),
+                    customer_name: name.clone(),
+                    lines: vec![SaleLineInput {
+                        product_id: product.clone(),
+                        qty: qty.into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )?;
+            approve_document(store, m("demo.order"), &doc.row.id)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +468,17 @@ mod tests {
             },
         )?;
         assert_eq!(seed(&mut s, &setup, DemoLang::Fr, 2_000)?, 2_000);
+        seed_distribution(&mut s, &setup, DemoLang::Fr)?;
+        let board = crate::usecases::distribution::distribution_board(&s)?;
+        assert_eq!(
+            (board.on_road, board.open_orders, board.vehicles),
+            (1, 2, 2)
+        );
+        assert!(
+            board.alerts.iter().any(|a| a.kind == "near"),
+            "{:?}",
+            board.alerts
+        );
         let page = list_products(&s, &ProductQuery::default())?;
         assert_eq!(page.counts, [2_000, 1_799, 129, 72]);
         assert!(crate::usecases::stock::rebuild_balances(&s)?.is_empty());

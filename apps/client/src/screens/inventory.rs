@@ -784,6 +784,13 @@ pub fn transfers_page(st: AppState, compact: bool) -> View {
         },
     );
     let creating = signal(false);
+    // Loading or unloading a vehicle (from its page): the warehouses chosen.
+    let preset: Signal<(Option<String>, Option<String>)> = signal((None, None));
+    if let Some(Intent::TransferWith(a, b)) = st.intent.get_untracked() {
+        st.intent.set(None);
+        preset.set((a, b));
+        creating.set(true);
+    }
     let receiving: Signal<Option<TransferRow>> = signal(None);
     let receiving_open = signal(false);
     effect(move || receiving_open.set(receiving.get().is_some()));
@@ -941,7 +948,7 @@ pub fn transfers_page(st: AppState, compact: bool) -> View {
             compact,
         ))
         .child(modal(creating, compact, move || {
-            new_transfer(st, move || creating.set(false)).into_element()
+            new_transfer(st, preset.get_untracked(), move || creating.set(false)).into_element()
         }))
         .child(modal(receiving_open, compact, move || {
             match receiving.get_untracked() {
@@ -951,7 +958,11 @@ pub fn transfers_page(st: AppState, compact: bool) -> View {
         }))
 }
 
-fn new_transfer(st: AppState, close: impl Fn() + Clone + 'static) -> View {
+fn new_transfer(
+    st: AppState,
+    preset: (Option<String>, Option<String>),
+    close: impl Fn() + Clone + 'static,
+) -> View {
     let Some(session) = st.session.get_untracked() else {
         return view();
     };
@@ -959,6 +970,26 @@ fn new_transfer(st: AppState, close: impl Fn() + Clone + 'static) -> View {
     let whs = warehouses(st);
     let from = signal(0usize);
     let to = signal(1usize);
+    // The warehouses asked for, once the list is there.
+    effect(move || {
+        let w = whs.get();
+        let at = |id: &Option<String>| {
+            id.as_ref()
+                .and_then(|id| w.iter().position(|x| x.id == *id))
+        };
+        if let Some(i) = at(&preset.0) {
+            from.set(i);
+            if preset.1.is_none() && i == to.get_untracked() {
+                to.set(usize::from(i == 0));
+            }
+        }
+        if let Some(i) = at(&preset.1) {
+            to.set(i);
+            if preset.0.is_none() && i == from.get_untracked() {
+                from.set(usize::from(i == 0));
+            }
+        }
+    });
     let note = signal(String::new());
     let lines: Signal<Vec<Line>> = signal(Vec::new());
     let error = signal(String::new());

@@ -495,7 +495,6 @@ test("a quote becomes an order, invoiced at the till with its discount", async (
   await app.press("text:Ventes");
   await app.press("id:nav-quotes");
   await app.waitFor("id:doc-new-quote");
-  await app.waitFor("text:Aucun document");
   await app.press("id:doc-new-quote");
   await app.type("id:doc-customer", "Boulangerie El Amel");
   await app.type("id:doc-search", "Biscuits");
@@ -1372,4 +1371,84 @@ test("the price display, the warehouses and the dashboard's ready-made cards", a
   await app.press("id:price-exit-confirm");
   await app.waitFor("text:Ventes brutes");
   await app.waitUntil(shows("Ventes par heure"));
+});
+
+test("distribution: a customer made at the till, the board, a tour worked and settled, vehicles and orders planned", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  // A new customer from the till, chosen at once (the phone typed in the search).
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-item-0");
+  await app.press("id:pos-customer");
+  await app.type("id:cust-search", "0661999888");
+  await app.press("id:cust-new");
+  await app.waitFor("id:cust-new-form");
+  await app.type("id:cust-new-name", "Superette Nouvelle");
+  await app.press("id:cust-new-save");
+  await seen(/^Client créé et choisi$/);
+  await app.waitFor("text:Superette Nouvelle");
+  // A wholesaler's modules: distribution shows.
+  await app.press("id:nav-settings");
+  await app.press("id:settings-store");
+  await app.press("id:activity-select");
+  await app.press("text:Commerce de gros");
+  await app.press("id:store-save");
+  await app.waitFor("text:Paramètres enregistrés");
+  // The day's board: the truck on the road, its next customer close.
+  await app.press("text:Distribution");
+  await app.press("id:nav-tours");
+  await app.waitFor("id:live-0");
+  await app.waitFor("id:dist-alert-0");
+  await seen(/est à \d+ m de/);
+  // The tour: the next stop reached and delivered, the one after failed.
+  await app.press("id:live-0");
+  await app.waitFor("id:stop-1");
+  await app.press("id:stop-more-1-0");
+  await seen(/^Sur place$/);
+  await app.press("id:stop-more-1-0");
+  await app.waitFor("id:stop-receiver");
+  await app.type("id:stop-receiver", "Mme Amel");
+  await app.press("id:stop-save");
+  await seen(/^Reçu par Mme Amel$/);
+  await app.press("id:stop-more-2");
+  await app.press("text:Échec");
+  await app.waitFor("id:stop-save");
+  await app.press("id:stop-save");
+  await seen(/^Fermé$/);
+  // Back at the depot, then the cash counted.
+  await app.press("id:tour-end");
+  await app.type("id:end-km", "48320");
+  await app.press("id:end-save");
+  await seen(/^Tournée terminée$/);
+  await app.press("id:tour-settle");
+  await app.type("id:settle-counted", "0");
+  await app.press("id:end-save");
+  await seen(/^Tournée soldée$/);
+  await app.press("id:tour-close");
+  // The vehicles: one more.
+  await app.press("id:nav-vans");
+  await app.waitFor("id:vehicle-1");
+  await app.press("id:vehicle-add");
+  await app.type("id:vehicle-name", "Moto 3");
+  await app.press("text:Moto");
+  await app.press("id:vehicle-save");
+  await app.waitFor("id:vehicle-2");
+  // The orders waiting: one ticked and planned into a tour.
+  await app.press("id:nav-field_orders");
+  await app.waitFor("id:field-order-0");
+  await app.press("id:field-order-0");
+  await app.press("id:field-plan");
+  await app.waitFor("id:plan-save");
+  await app.press("id:plan-save");
+  await seen(/^Tournée planifiée$/);
+  await app.waitFor("id:stop-0");
+  await app.press("id:tour-close");
+  // The zones.
+  await app.press("id:nav-field_orders");
+  await app.press("text:Zones");
+  await app.waitFor("id:zone-1");
 });

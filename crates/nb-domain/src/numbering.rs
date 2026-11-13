@@ -23,10 +23,12 @@ pub enum DocKind {
     Payment,
     Expense,
     Journal,
+    /// A delivery or sales tour (M16).
+    Tour,
 }
 
 impl DocKind {
-    pub const ALL: [DocKind; 14] = [
+    pub const ALL: [DocKind; 15] = [
         DocKind::Invoice,
         DocKind::Quote,
         DocKind::Order,
@@ -41,6 +43,7 @@ impl DocKind {
         DocKind::Payment,
         DocKind::Expense,
         DocKind::Journal,
+        DocKind::Tour,
     ];
 
     /// The prefix printed on the document (French, as on Algerian forms).
@@ -60,6 +63,7 @@ impl DocKind {
             DocKind::Payment => "PM",
             DocKind::Expense => "DP",
             DocKind::Journal => "OD",
+            DocKind::Tour => "TN",
         }
     }
 

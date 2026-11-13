@@ -12,7 +12,9 @@ use nb_domain::tax::TaxMode;
 use nb_i18n::tr_args;
 use nb_store::repo::catalog::{ProductPage, ProductQuery, ProductRow, ProductSort};
 use nb_store::usecases::catalog::{Scan, TaxClass, list_tax_classes, scan};
-use nb_store::usecases::customers::{CustomerQuery, CustomerRow, list_customers};
+use nb_store::usecases::customers::{
+    CustomerInput, CustomerQuery, CustomerRow, list_customers, save_customer,
+};
 use nb_store::usecases::documents::get_document;
 use nb_store::usecases::org::{Register, registers};
 use nb_store::usecases::products::list_products;
@@ -4206,6 +4208,138 @@ fn customer_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) ->
             v.into_element()
         })
     };
+    // A new customer from the till (owner notes), for those who may add
+    // one: what was searched becomes the name, or the phone if digits.
+    let adding = signal(false);
+    let new_name = signal(String::new());
+    let new_phone = signal(String::new());
+    let new_city = signal(String::new());
+    let new_error = signal(String::new());
+    let busy = signal(false);
+    let start_adding = move || {
+        let q = text.get_untracked();
+        let q = q.trim();
+        if !q.is_empty()
+            && q.chars()
+                .all(|c| c.is_ascii_digit() || c == ' ' || c == '+')
+        {
+            new_phone.set(q.to_owned());
+            new_name.set(String::new());
+        } else {
+            new_name.set(q.to_owned());
+        }
+        new_error.set(String::new());
+        adding.set(true);
+    };
+    let save_new = {
+        let close = close.clone();
+        move || {
+            if busy.get_untracked() {
+                return;
+            }
+            let Some(session) = st.session.get_untracked() else {
+                return;
+            };
+            let name = new_name.get_untracked().trim().to_owned();
+            if name.is_empty() {
+                new_error.set(error_text(st, "required"));
+                return;
+            }
+            let input = CustomerInput {
+                kind: "person".into(),
+                name,
+                phone: new_phone.get_untracked().trim().to_owned(),
+                city: new_city.get_untracked().trim().to_owned(),
+                status: "active".into(),
+                ..Default::default()
+            };
+            busy.set(true);
+            let close = close.clone();
+            let db = st.db();
+            let task = spawn(async move {
+                let r = db
+                    .call(move |s| save_customer(s, session.meta("customer.create"), input))
+                    .await;
+                busy.set(false);
+                match r {
+                    Ok(c) => {
+                        st.changed();
+                        t.customer.set(Some(c));
+                        show_toast(st, st.tn("pos.customer.created"));
+                        close();
+                    }
+                    Err(e) => new_error.set(first_error(st, &e)),
+                }
+            });
+            drop(task); // runs to completion: tasks end with their owner, not their handle
+        }
+    };
+    let new_form = view()
+        .test_id("cust-new-form")
+        .gap(px(12.0))
+        .p(px(14.0))
+        .rounded(px(radius::md()))
+        .border_1()
+        .border_color(Tone::Primary.color())
+        .bg(Tone::PrimarySoft.color())
+        .child(label_line(
+            st.t("pos.customer.new"),
+            ty::SM,
+            FontWeight::BOLD,
+            Tone::Primary,
+        ))
+        .child(crate::ui::form::focused_field(
+            st.t("customers.name"),
+            new_name,
+            String::new,
+            move || new_error.get(),
+            KeyboardType::Default,
+            "cust-new-name",
+        ))
+        .child(
+            view()
+                .flex_row()
+                .gap(px(10.0))
+                .child(view().flex_1().child(field(
+                    st.t("customers.phone"),
+                    new_phone,
+                    String::new,
+                    String::new,
+                    KeyboardType::Phone,
+                    "cust-new-phone",
+                )))
+                .child(view().flex_1().child(field(
+                    st.t("customers.city"),
+                    new_city,
+                    String::new,
+                    String::new,
+                    KeyboardType::Default,
+                    "cust-new-city",
+                ))),
+        )
+        .child(
+            view()
+                .flex_row()
+                .gap(px(8.0))
+                .child(view().flex_1())
+                .child(button(
+                    Variant::Secondary,
+                    Size::Md,
+                    None,
+                    st.t("form.cancel"),
+                    move || adding.set(false),
+                ))
+                .child(
+                    button(
+                        Variant::Primary,
+                        Size::Md,
+                        Some(Icon::Check),
+                        st.t("pos.customer.create_use"),
+                        save_new,
+                    )
+                    .test_id("cust-new-save"),
+                ),
+        );
     let body = view()
         .gap(px(12.0))
         .child(crate::ui::form::search_field(
@@ -4213,23 +4347,45 @@ fn customer_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) ->
             st.t("pos.customer.search"),
             "cust-search",
         ))
+        .child(dynamic(move || {
+            if adding.get() {
+                new_form.clone().into_element()
+            } else {
+                view().into_element()
+            }
+        }))
         .child(list);
-    let footer = view().child(
-        button(
-            Variant::Secondary,
-            Size::Md,
-            None,
-            st.t("pos.customer.counter"),
-            {
-                let close = close.clone();
-                move || {
-                    t.customer.set(None);
-                    close();
-                }
+    let footer = view()
+        .child(when(
+            move || st.can("customers.edit") && !adding.get(),
+            move || {
+                button(
+                    Variant::Secondary,
+                    Size::Md,
+                    Some(Icon::UserPlus),
+                    st.t("pos.customer.new"),
+                    start_adding,
+                )
+                .test_id("cust-new")
+                .into_element()
             },
-        )
-        .test_id("cust-counter"),
-    );
+        ))
+        .child(
+            button(
+                Variant::Secondary,
+                Size::Md,
+                None,
+                st.t("pos.customer.counter"),
+                {
+                    let close = close.clone();
+                    move || {
+                        t.customer.set(None);
+                        close();
+                    }
+                },
+            )
+            .test_id("cust-counter"),
+        );
     dialog_frame(
         st,
         st.t("pos.customer.title"),

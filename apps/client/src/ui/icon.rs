@@ -164,6 +164,12 @@ icons! {
     TrendingUp => "trending-up",
     Target => "target",
     Phone => "phone",
+    Navigation => "navigation",
+    Message => "message-circle",
+    Play => "play",
+    Flag => "flag",
+    Route => "route",
+    Locate => "locate-fixed",
 }
 
 /// An icon `size` points square, stroked in `tone`.

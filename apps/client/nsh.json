@@ -6,5 +6,15 @@
   "rust": ".",
   "root": "App",
   "theme": "theme.json",
-  "appearance": "system"
+  "appearance": "system",
+  "capabilities": {
+    "openUrl": {
+      "schemes": [
+        "https",
+        "tel",
+        "sms",
+        "mailto"
+      ]
+    }
+  }
 }

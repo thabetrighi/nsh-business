@@ -9,6 +9,7 @@ pub mod backups;
 pub mod catalog;
 pub mod customers;
 pub mod debts;
+pub mod distribution;
 pub mod documents;
 pub mod expenses;
 pub mod import;

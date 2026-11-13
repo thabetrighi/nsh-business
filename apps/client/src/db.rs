@@ -169,6 +169,7 @@ fn demo_shop(store: &mut Store, lang: DemoLang) -> Result<Session, Error> {
         },
     )?;
     demo::seed(store, &setup, lang, 2_000)?;
+    demo::seed_distribution(store, &setup, lang)?;
     Ok(Session {
         setup,
         currency: Currency::DZD,
