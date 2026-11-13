@@ -156,6 +156,11 @@ icons! {
     EyeOff => "eye-off",
     Star => "star",
     LayoutDashboard => "layout-dashboard",
+    Apps => "layout-grid",
+    PanelTop => "panel-top",
+    Frame => "square-dashed",
+    Move => "move",
+    Scaling => "scaling",
 }
 
 /// An icon `size` points square, stroked in `tone`.

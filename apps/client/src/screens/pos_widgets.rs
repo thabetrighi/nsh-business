@@ -79,13 +79,16 @@ fn action(st: AppState, t: Till, code: &str, n: usize) -> Option<Button> {
             "held",
             Rc::new(move || t.recalling.set(true)),
         ),
-        "misc" => b(
-            Icon::PackagePlus,
-            "pos.key.free",
-            "F4",
-            "free",
-            Rc::new(move || t.free_open.set(true)),
-        ),
+        "misc" => Button {
+            allowed: st.can("sales.sell"),
+            ..b(
+                Icon::PackagePlus,
+                "pos.key.free",
+                "F4",
+                "free",
+                Rc::new(move || t.free_open.set(true)),
+            )
+        },
         "return" => Button {
             allowed: st.can("sales.return") || st.can("sales.sell"),
             ..b(
@@ -128,12 +131,32 @@ fn action(st: AppState, t: Till, code: &str, n: usize) -> Option<Button> {
             "keys",
             Rc::new(move || t.keys_open.set(true)),
         ),
-        "close" => b(
-            Icon::Lock,
-            "pos.close_till",
+        "close" => Button {
+            allowed: st.can("cash.close_shift"),
+            ..b(
+                Icon::Lock,
+                "pos.close_till",
+                "",
+                "close",
+                Rc::new(move || t.closing.set(true)),
+            )
+        },
+        "edit" => Button {
+            allowed: st.can("settings.edit"),
+            ..b(
+                Icon::Pencil,
+                "pos.layouts.edit_this",
+                "",
+                "edit",
+                Rc::new(move || edit_layout(st, t)),
+            )
+        },
+        "theme" => b(
+            Icon::SunMoon,
+            "pos.head.theme",
             "",
-            "close",
-            Rc::new(move || t.closing.set(true)),
+            "theme",
+            Rc::new(move || st.toggle_appearance()),
         ),
         "fullscreen" => b(
             Icon::Maximize,
@@ -151,6 +174,175 @@ fn action(st: AppState, t: Till, code: &str, n: usize) -> Option<Button> {
         ),
         _ => return None,
     })
+}
+
+/// Edits the layout in use (a ready-made one as a copy of its own).
+pub(super) fn edit_layout(st: AppState, t: Till) {
+    let k = super::board::Board::kept(st);
+    let l = k.current();
+    let ready = k.chosen.is_empty() || k.chosen.starts_with(crate::screens::pos_layout::BUILTIN);
+    let name = if ready {
+        nb_i18n::tr_args(
+            st.lang(),
+            "templates.copy_of",
+            &[("name", &st.tn(&format!("pos.layout.{}", l.name)))],
+        )
+    } else {
+        l.name.clone()
+    };
+    t.board.edit(l, name);
+}
+
+/// The test id of a head button (the ones the tests know by name).
+fn head_id(code: &str) -> String {
+    match code {
+        "misc" => "pos-free".into(),
+        "held" => "pos-held".into(),
+        "return" => "pos-return".into(),
+        "sales" => "pos-sales".into(),
+        "layouts" => "pos-customize".into(),
+        "edit" => "pos-layout-edit".into(),
+        "keys" => "pos-keys".into(),
+        "fullscreen" => "pos-fullscreen".into(),
+        "close" => "till-close".into(),
+        "quick" => "pos-quick".into(),
+        other => format!("pos-head-{other}"),
+    }
+}
+
+/// The app's pages from the till (owner notes: in full screen, or with
+/// the sidebar hidden): the top ones, then each section's, as the user
+/// may open them.
+pub(super) fn quick_acts(st: AppState, t: Till) -> Vec<crate::ui::menu::Act> {
+    use crate::nav::{Route, SECTIONS, TOP};
+    use crate::ui::menu::Act;
+    let go = move |r: Route| {
+        move || {
+            if t.full.get_untracked() {
+                t.toggle_full();
+            }
+            st.route.set(r)
+        }
+    };
+    let mut acts = vec![Act::Title(st.tn("pos.head.quick"))];
+    for &r in TOP.iter().filter(|r| **r != Route::Sell && st.shows(**r)) {
+        acts.push(Act::with(r.icon(), st.tn(r.key()), go(r)));
+    }
+    for section in SECTIONS {
+        let items: Vec<Act> = section
+            .routes
+            .iter()
+            .filter(|r| st.shows(**r))
+            .map(|&r| Act::with(r.icon(), st.tn(r.key()), go(r)))
+            .collect();
+        if !items.is_empty() {
+            acts.push(Act::sub(section.icon, st.tn(section.key), items));
+        }
+    }
+    acts.push(Act::Line);
+    for r in [Route::Design, Route::Settings] {
+        if st.shows(r) {
+            acts.push(Act::with(r.icon(), st.tn(r.key()), go(r)));
+        }
+    }
+    acts
+}
+
+/// The till's head beside its chip (owner notes): the buttons the layout
+/// chooses, in its order, one look and one height; those the user may not
+/// use do not show.
+pub(super) fn head_buttons(st: AppState, t: Till, compact: bool) -> View {
+    view().child(dynamic(move || {
+        let l = t.board.shown(st);
+        let labels = l.head_labels;
+        let mut row = view().flex_row().flex_wrap().items_center().gap(px(6.0));
+        for code in l.head_shown() {
+            let code = code.as_str();
+            // Words beside the icon: always (2), or for closing the till (0).
+            let words = !compact && (labels == 2 || (labels == 0 && code == "close"));
+            let id = head_id(code);
+            // One height for all, the till's chip's.
+            let side = crate::ui::tokens::control::lg();
+            let make = |ic: Icon, key: &'static str, run: Rc<dyn Fn()>| -> View {
+                if words {
+                    button(
+                        Variant::Secondary,
+                        Size::Md,
+                        Some(ic),
+                        st.t(key),
+                        move || run(),
+                    )
+                    .h(px(side))
+                } else {
+                    icon_button(move || ic, st.t(key), Variant::Secondary, move || run())
+                        .w(px(side))
+                        .h(px(side))
+                }
+            };
+            let v = match code {
+                "quick" => crate::ui::menu::menu_on(
+                    make(Icon::Apps, "pos.head.quick", Rc::new(|| {})).test_id(&id),
+                    quick_acts(st, t),
+                ),
+                "held" => {
+                    let n = t.held.get().len();
+                    if n == 0 {
+                        continue;
+                    }
+                    let caption = move || {
+                        tr_args(
+                            st.lang(),
+                            "pos.held.count",
+                            &[("count", &st.fmt().integer(n as i64))],
+                        )
+                    };
+                    if compact || labels == 1 {
+                        view()
+                            .relative()
+                            .child(
+                                icon_button(
+                                    || Icon::Clock,
+                                    caption,
+                                    Variant::Secondary,
+                                    move || t.recalling.set(true),
+                                )
+                                .w(px(side))
+                                .h(px(side))
+                                .test_id(&id),
+                            )
+                            .child(
+                                view()
+                                    .absolute()
+                                    .top(px(-6.0))
+                                    .right(px(-6.0))
+                                    .child(count_badge(move || n)),
+                            )
+                    } else {
+                        button(
+                            Variant::Secondary,
+                            Size::Md,
+                            Some(Icon::Clock),
+                            caption,
+                            move || t.recalling.set(true),
+                        )
+                        .h(px(side))
+                        .test_id(&id)
+                    }
+                }
+                other => {
+                    let Some(btn) = action(st, t, other, 0) else {
+                        continue;
+                    };
+                    if !btn.allowed {
+                        continue;
+                    }
+                    make(btn.icon, btn.key, btn.run.clone()).test_id(&id)
+                }
+            };
+            row = row.child(v);
+        }
+        row.into_element()
+    }))
 }
 
 /// A count over a button (the carts on hold).
@@ -1257,7 +1449,7 @@ pub(super) fn till_chip(st: AppState, t: Till, compact: bool) -> View {
         .flex_row()
         .items_center()
         .gap(px(10.0))
-        .h(px(crate::ui::tokens::control::md() + 6.0))
+        .h(px(crate::ui::tokens::control::lg()))
         .px(px(10.0))
         .rounded(px(radius::md()))
         .border_1()

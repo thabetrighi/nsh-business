@@ -120,6 +120,17 @@ pub fn page(
         .child(body)
 }
 
+/// A unit's short name in the language shown (`pc` → قطعة, `kg` → كغ):
+/// a unit the app does not know shows as typed.
+pub fn unit_short(st: AppState, code: &str) -> String {
+    if code.is_empty() {
+        return String::new();
+    }
+    let key = format!("unit.short.{code}");
+    let t = st.tn(&key);
+    if t == key { code.to_owned() } else { t }
+}
+
 /// The export button of a list page (one look everywhere).
 pub fn export_button(st: AppState, test_id: &'static str, run: impl Fn() + 'static) -> View {
     crate::ui::kit::button(

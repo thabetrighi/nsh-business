@@ -211,7 +211,13 @@ fn desktop(st: AppState) -> View {
         view()
             .flex_1()
             .min_w(px(0.0))
-            .child(top_bar(st))
+            .child(dynamic(move || {
+                if st.bare.get() {
+                    view().into_element()
+                } else {
+                    top_bar(st).into_element()
+                }
+            }))
             .child(content(st, false)),
     )
 }

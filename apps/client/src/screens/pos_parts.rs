@@ -263,7 +263,7 @@ pub(super) fn quick_dialog(
         Quick::Discount => "pos.discount_pct",
     };
     let suffix = match q {
-        Quick::Qty => it.unit.clone(),
+        Quick::Qty => crate::screens::common::unit_short(st, &it.unit),
         Quick::Price => String::new(),
         Quick::Discount => "%".into(),
     };
@@ -436,64 +436,6 @@ pub(super) fn keys_dialog(st: AppState, close: impl Fn() + Clone + 'static) -> V
     )
 }
 
-/// The till's tools beside its actions: how it looks, full screen, keys.
-pub(super) fn head_tools(t: Till, st: AppState) -> View {
-    view()
-        .flex_row()
-        .gap(px(4.0))
-        .child(
-            icon_button(
-                || Icon::LayoutTemplate,
-                st.t("pos.layouts"),
-                Variant::Ghost,
-                move || t.board.layouts_open.set(true),
-            )
-            .test_id("pos-customize"),
-        )
-        .child(
-            icon_button(
-                || Icon::Pencil,
-                st.t("pos.layouts.edit_this"),
-                Variant::Ghost,
-                move || {
-                    let k = super::board::Board::kept(st);
-                    let l = k.current();
-                    let ready = k.chosen.is_empty()
-                        || k.chosen.starts_with(crate::screens::pos_layout::BUILTIN);
-                    let name = if ready {
-                        nb_i18n::tr_args(
-                            st.lang(),
-                            "templates.copy_of",
-                            &[("name", &st.tn(&format!("pos.layout.{}", l.name)))],
-                        )
-                    } else {
-                        l.name.clone()
-                    };
-                    t.board.edit(l, name);
-                },
-            )
-            .test_id("pos-layout-edit"),
-        )
-        .child(
-            icon_button(
-                || Icon::Monitor,
-                st.t("pos.fullscreen"),
-                Variant::Ghost,
-                move || t.toggle_full(),
-            )
-            .test_id("pos-fullscreen"),
-        )
-        .child(
-            icon_button(
-                || Icon::Help,
-                st.t("pos.keys"),
-                Variant::Ghost,
-                move || t.keys_open.set(true),
-            )
-            .test_id("pos-keys"),
-        )
-}
-
 /// The categories as chips above the products: one press filters them.
 pub(super) fn category_chips(st: AppState, t: Till) -> View {
     let cats = resource(
@@ -639,6 +581,87 @@ pub(super) fn product_row(
         )))
 }
 
+/// A card's narrowest width and its height (all cards alike: a grid
+/// with no gaps, and a card that never changes size).
+pub(super) fn card_size(tile: usize, tiles: bool) -> (f32, f32) {
+    let (w, h) = match tile {
+        4 => (112.0, 84.0),
+        0 => (132.0, 96.0),
+        2 => (210.0, 132.0),
+        3 => (260.0, 164.0),
+        _ => (168.0, 112.0),
+    };
+    // A tile adds its coloured block above the name.
+    if tiles {
+        (w, w * 0.42 + h * 0.62 + 6.0)
+    } else {
+        (w, h)
+    }
+}
+
+/// The products' grid: as many equal columns as fit (or as the layout
+/// says), every card the same size.
+pub(super) fn card_grid(st: AppState, tiles: bool, compact: bool) -> View {
+    let pr = st.biz.pos;
+    let (w, _) = card_size(if compact { 0 } else { pr.tile.get_untracked() }, tiles);
+    let cols = pr.cols.get_untracked();
+    let tracks = if cols == 0 || compact {
+        format!("repeat(auto-fill, minmax({w}px, 1fr))")
+    } else {
+        format!("repeat({cols}, minmax(0px, 1fr))")
+    };
+    view()
+        .grid()
+        .grid_template_columns(SharedString::from(tracks))
+        .gap(px(if tiles { 12.0 } else { 10.0 }))
+}
+
+/// How many of a product are in the cart.
+pub(super) fn in_cart(t: Till, id: String) -> Memo<i64> {
+    computed(move || {
+        t.cart.with(|v| {
+            v.iter()
+                .filter(|l| l.product.as_ref().is_some_and(|x| x.id == id))
+                .map(|l| l.qty_milli)
+                .sum::<i64>()
+        })
+    })
+}
+
+/// The quantity in the cart over a card's corner (it takes no room: the
+/// card keeps its size).
+pub(super) fn cart_badge(st: AppState, n: Memo<i64>) -> View {
+    let v = view().absolute().top(px(6.0));
+    // At the card's end corner, whichever way the text reads.
+    let v = if st.rtl() {
+        v.left(px(6.0))
+    } else {
+        v.right(px(6.0))
+    };
+    v.child(when(
+        move || n.get() > 0,
+        move || {
+            view()
+                .test_id("pos-in-cart")
+                .min_w(px(24.0))
+                .h(px(24.0))
+                .px(px(7.0))
+                .rounded_full()
+                .items_center()
+                .justify_center()
+                .bg(Tone::Primary.color())
+                .shadow_sm()
+                .child(label_line(
+                    move || qty_text(st, n.get()),
+                    ty::XS,
+                    FontWeight::BOLD,
+                    Tone::OnPrimary,
+                ))
+                .into_element()
+        },
+    ))
+}
+
 /// A product as a large tile (restaurants, cafés): its initial on a
 /// coloured block, its name and price.
 pub(super) fn product_tile(st: AppState, t: Till, i: usize, p: ProductRow) -> View {
@@ -658,33 +681,37 @@ pub(super) fn product_tile(st: AppState, t: Till, i: usize, p: ProductRow) -> Vi
         .bytes()
         .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
     let color = hues[h % hues.len()];
-    let size = match st.biz.pos.tile.get_untracked() {
-        0 => 120.0,
-        2 => 190.0,
-        _ => 150.0,
-    };
+    let (size, height) = card_size(st.biz.pos.tile.get_untracked(), true);
+    let n = in_cart(t, p.id.clone());
     view()
         .test_id(&format!("pos-item-{i}"))
-        .flex_grow(1.0)
-        .basis(px(size))
-        .max_w(px(size * 1.5))
+        .relative()
+        .min_w(px(0.0))
+        .h(px(height))
         .rounded(px(radius::lg()))
         .overflow_hidden()
         .border_1()
-        .border_color(Tone::Border.color())
+        .border_color(move || {
+            if n.get() > 0 {
+                Tone::Primary.color()
+            } else {
+                Tone::Border.color()
+            }
+        })
         .bg(Tone::Surface.color())
         .cursor_pointer()
         .hover(|s| s.border_color(Tone::Primary.color()))
         .on_press(move || t.add(p.clone(), 1_000))
         .child(
             view()
-                .h(px(size * 0.55))
+                .h(px(size * 0.42))
+                .flex_shrink(0.0)
                 .items_center()
                 .justify_center()
                 .bg(rgb(color))
                 .child(
                     text(move || initial.clone())
-                        .text_size(px(size * 0.28))
+                        .text_size(px(size * 0.2))
                         .font_weight(FontWeight::BOLD)
                         .text_color(rgb(0xFFFFFF)),
                 ),
@@ -706,6 +733,7 @@ pub(super) fn product_tile(st: AppState, t: Till, i: usize, p: ProductRow) -> Vi
                     || Tone::Primary,
                 )),
         )
+        .child(cart_badge(st, n))
 }
 
 /// The total in a large band.
@@ -856,7 +884,7 @@ pub(super) fn cart_table(st: AppState, t: Till, cols: Cols, with_head: bool) -> 
             let selected = computed(move || t.selected.get() == Some(i));
             let (name, unit, sku) = (
                 it.name.clone(),
-                it.unit.clone(),
+                crate::screens::common::unit_short(st, &it.unit),
                 it.product
                     .as_ref()
                     .map(|p| p.sku.clone())

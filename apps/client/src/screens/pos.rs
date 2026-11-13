@@ -438,8 +438,11 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
         full: signal(false),
         last: signal(None),
     };
-    // Leaving the till gives the sidebar back.
-    cleanup(move || st.focus.set(false));
+    // Leaving the till gives the sidebar and the app's bar back.
+    cleanup(move || {
+        st.focus.set(false);
+        st.bare.set(false);
+    });
     effect(move || {
         if !t.printing_open.get() {
             t.printing.set(None);
@@ -635,95 +638,11 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
                 .flex_row()
                 .flex_wrap()
                 .items_center()
-                .gap(px(8.0))
+                .gap(px(6.0))
                 // Which till, which shift, since when and who; its menu.
                 .child(till_chip(st, t, compact))
-                // Phones: the actions as icons, beside the till's badge.
-                .child(dynamic(move || {
-                    let n = t.held.get().len();
-                    if n == 0 {
-                        return view().into_element();
-                    }
-                    let caption = move || {
-                        tr_args(
-                            st.lang(),
-                            "pos.held.count",
-                            &[("count", &st.fmt().integer(n as i64))],
-                        )
-                    };
-                    if compact {
-                        icon_button(
-                            || Icon::Clock,
-                            caption,
-                            Variant::Secondary,
-                            move || t.recalling.set(true),
-                        )
-                    } else {
-                        button(
-                            Variant::Secondary,
-                            Size::Md,
-                            Some(Icon::Clock),
-                            caption,
-                            move || t.recalling.set(true),
-                        )
-                    }
-                    .test_id("pos-held")
-                    .into_element()
-                }))
-                // The sales made: reprint or correct one (F1).
-                // An icon: the bar stays on one line beside the till's badge.
-                .child(
-                    icon_button(
-                        || Icon::Receipt,
-                        st.t("pos.sales"),
-                        Variant::Secondary,
-                        move || t.sales_open.set(true),
-                    )
-                    .test_id("pos-sales"),
-                )
-                // A cashier may ask a supervisor for a return.
-                .child(when(
-                    move || st.can("sales.return") || st.can("sales.sell"),
-                    move || {
-                        // Icons: the head stays on one line beside the till's chip.
-                        icon_button(
-                            || Icon::Undo,
-                            st.t("pos.return"),
-                            Variant::Secondary,
-                            move || t.returning.set(true),
-                        )
-                        .test_id("pos-return")
-                        .into_element()
-                    },
-                ))
-                .child(
-                    icon_button(
-                        || Icon::PackagePlus,
-                        st.t("pos.free"),
-                        Variant::Secondary,
-                        move || t.free_open.set(true),
-                    )
-                    .test_id("pos-free"),
-                )
-                .child(head_tools(t, st))
-                .child(if compact {
-                    icon_button(
-                        || Icon::Lock,
-                        st.t("pos.close_till"),
-                        Variant::Secondary,
-                        move || closing.set(true),
-                    )
-                    .test_id("till-close")
-                } else {
-                    button(
-                        Variant::Secondary,
-                        Size::Md,
-                        Some(Icon::Lock),
-                        st.t("pos.close_till"),
-                        move || closing.set(true),
-                    )
-                    .test_id("till-close")
-                })
+                // The buttons the layout chooses, in its order.
+                .child(head_buttons(st, t, compact))
                 .into_element(),
             _ => view().into_element(),
         }))
@@ -746,7 +665,11 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
     view()
         .flex_1()
         .min_h(px(0.0))
-        .p(px(page_pad(compact)))
+        // The space around the till: the layout's own, or the app's.
+        .p(move || {
+            let pad = if compact { None } else { t.board.shown(st).pad };
+            px(pad.map_or(page_pad(compact), f32::from))
+        })
         .gap(px(if compact { 12.0 } else { 16.0 }))
         // A layout may leave the title out (more room to sell): the
         // actions stay, on one line.
@@ -1087,7 +1010,8 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
                     g.into_element()
                 }
                 2 => {
-                    let mut g = view().flex_row().flex_wrap().gap(px(12.0));
+                    let _ = pr.cols.get();
+                    let mut g = card_grid(st, true, compact);
                     for (i, p) in all.into_iter().enumerate() {
                         let m = p.clone();
                         g = g.child(menu(product_tile(st, t, from + i, p), &m));
@@ -1095,7 +1019,8 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
                     g.into_element()
                 }
                 _ => {
-                    let mut g = view().flex_row().flex_wrap().gap(px(10.0));
+                    let _ = pr.cols.get();
+                    let mut g = card_grid(st, false, compact);
                     for (i, p) in all.into_iter().enumerate() {
                         let m = p.clone();
                         g = g.child(menu(product_card(st, t, from + i, p, compact), &m));
@@ -1231,43 +1156,41 @@ pub(crate) fn toggle_favorite(st: AppState, id: String, on: bool) {
 
 fn product_card(st: AppState, t: Till, i: usize, p: ProductRow, compact: bool) -> View {
     let (name, price, stock) = (p.name.clone(), p.price_minor, p.on_hand_milli);
+    let sku = p.sku.clone();
     let service = p.kind == "service";
-    let in_cart = {
-        let id = p.id.clone();
-        computed(move || {
-            t.cart.with(|v| {
-                v.iter()
-                    .filter(|l| l.product.as_ref().is_some_and(|x| x.id == id))
-                    .map(|l| l.qty_milli)
-                    .sum::<i64>()
-            })
-        })
+    let n = in_cart(t, p.id.clone());
+    let tile = if compact {
+        0
+    } else {
+        st.biz.pos.tile.get_untracked()
     };
+    let (_, height) = card_size(tile, false);
+    let (name_size, price_size) = match tile {
+        4 => (ty::XS, ty::SM),
+        3 => (ty::MD, ty::LG),
+        2 => (ty::SM, ty::LG),
+        _ => (ty::SM, ty::MD),
+    };
+    let pr = st.biz.pos;
     view()
         .test_id(&format!("pos-item-{i}"))
-        // Cards grow to fill each row (a gap-free grid at any width).
-        .flex_grow(1.0)
-        .basis(px(match (compact, st.biz.pos.tile.get_untracked()) {
-            (true, _) => 140.0,
-            (_, 0) => 132.0,
-            (_, 2) => 210.0,
-            _ => 168.0,
-        }))
-        .max_w(px(300.0))
-        .min_h(px(100.0))
-        .p(px(12.0))
-        .gap(px(6.0))
+        .relative()
+        .min_w(px(0.0))
+        .h(px(height))
+        .p(px(if tile == 4 { 8.0 } else { 12.0 }))
+        .gap(px(4.0))
+        .overflow_hidden()
         .rounded(px(radius::lg()))
         .border_1()
         .border_color(move || {
-            if in_cart.get() > 0 {
+            if n.get() > 0 {
                 Tone::Primary.color()
             } else {
                 Tone::Border.color()
             }
         })
         .bg(move || {
-            if in_cart.get() > 0 {
+            if n.get() > 0 {
                 Tone::PrimarySoft.color()
             } else {
                 Tone::Surface.color()
@@ -1276,50 +1199,36 @@ fn product_card(st: AppState, t: Till, i: usize, p: ProductRow, compact: bool) -
         .cursor_pointer()
         .hover(|s| s.border_color(Tone::Primary.color()))
         .on_press(move || t.add(p.clone(), 1_000))
-        .child(
+        // The name keeps clear of the badge's corner.
+        .child(view().pe(px(26.0)).min_w(px(0.0)).child(label(
+            move || name.clone(),
+            name_size,
+            FontWeight::SEMIBOLD,
+            Tone::Ink,
+        )))
+        .child(if pr.sku.get_untracked() {
+            view().child(label_line(
+                move || sku.clone(),
+                ty::XS,
+                FontWeight::NORMAL,
+                Tone::Muted,
+            ))
+        } else {
             view()
-                .flex_row()
-                .items_start()
-                .gap(px(6.0))
-                .child(view().flex_1().min_w(px(0.0)).child(label(
-                    move || name.clone(),
-                    ty::SM,
-                    FontWeight::SEMIBOLD,
-                    Tone::Ink,
-                )))
-                .child(when(
-                    move || in_cart.get() > 0,
-                    move || {
-                        view()
-                            .min_w(px(22.0))
-                            .h(px(22.0))
-                            .px(px(6.0))
-                            .rounded_full()
-                            .items_center()
-                            .justify_center()
-                            .bg(Tone::Primary.color())
-                            .child(label_line(
-                                move || qty_text(st, in_cart.get()),
-                                ty::XS,
-                                FontWeight::BOLD,
-                                Tone::OnPrimary,
-                            ))
-                            .into_element()
-                    },
-                )),
-        )
+        })
         .child(view().flex_1())
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .child(view().flex_1().child(figure(
+                .gap(px(6.0))
+                .child(view().flex_1().min_w(px(0.0)).child(figure(
                     move || money(st, price),
-                    ty::MD,
+                    price_size,
                     FontWeight::BOLD,
                     || Tone::Primary,
                 )))
-                .child(if service || !st.biz.pos.stock.get_untracked() {
+                .child(if service || !pr.stock.get_untracked() {
                     view()
                 } else {
                     view().child(label_line(
@@ -1334,6 +1243,7 @@ fn product_card(st: AppState, t: Till, i: usize, p: ProductRow, compact: bool) -
                     ))
                 }),
         )
+        .child(cart_badge(st, n))
 }
 
 /// Phones: the cart's count and total, and "pay", at the bottom.
@@ -1770,7 +1680,7 @@ fn cart_line(st: AppState, t: Till, i: usize, it: Item, line_total: i64) -> View
         (ty::SM, ty::XS)
     };
     let name = it.name.clone();
-    let unit = it.unit.clone();
+    let unit = crate::screens::common::unit_short(st, &it.unit);
     let (qty, price, discount, edited, free) = (
         it.qty_milli,
         it.price_minor,
@@ -3599,7 +3509,7 @@ fn return_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> V
                     }
                 });
             });
-            let unit = l.unit.clone();
+            let unit = crate::screens::common::unit_short(st, &l.unit);
             let sold = l.qty_milli;
             let info = move || {
                 tr_args(

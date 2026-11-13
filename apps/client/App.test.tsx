@@ -1310,3 +1310,21 @@ test("more filters, labels on an A4 sheet, held stock and an export on every lis
   await app.waitUntil(() => app.texts().some((t) => plain(t).startsWith("21 étiquettes par feuille")));
   await app.press("id:dialog-close");
 });
+
+test("the till's head: quick access to the pages, full screen without the app's bar", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-sell");
+  await app.waitFor("id:till-open");
+  await app.type("id:till-float", "0");
+  await app.press("id:till-open");
+  await app.waitFor("id:pos-quick");
+  expect(app.shows("id:open-palette")).toBe(true);
+  // Full screen: no sidebar, no bar at the top; the quick menu still goes.
+  await app.press("id:pos-fullscreen");
+  await app.waitUntil(() => !app.shows("id:open-palette"));
+  await app.press("id:pos-quick");
+  await app.press("text:Accueil");
+  await app.waitFor("text:Ventes brutes");
+  await app.waitFor("id:open-palette");
+});

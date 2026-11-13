@@ -49,6 +49,8 @@
 - **اختبارات الواجهة:** `app.type` ينهي السطر بزر الإدخال؛ لنص متعدد الأسطر استعمل `app.paste(sel, { text })`. الأرقام في النصوص معزولة bidi: قارن عبر `plain()`.
 - **متغيرات الرسائل `{name}` لا `{ $name }`:** `nb-i18n` يستبدل `{name}` فقط (اختبار `placeholders_are_plain_names`).
 - **الجداول مقسّمة صفحات:** `ui::table::Paging` + `pager(...)`، والجدول بطول صفوفه فتتمرر الصفحة كلها؛ الاستعلام يأخذ `limit/offset` من `Paging`، وأي تغيير في المرشحات يستدعي `paging.reset()`.
+- **`nsh test` يبني في `target` الجذر إن لم يُحدَّد:** شغّله من `apps/client` بـ `CARGO_TARGET_DIR=$PWD/target CARGO_INCREMENTAL=0 nsh test .` وإلا امتلأ القرص (Bus error عند الربط).
+- **السحب في NSH:** الضغط يأسر المؤشر فلا تصل `on_mouse_enter` لعناصر أخرى؛ السحب بـ `claim_touches` + `on_responder_move` وقياس مواضع الأهداف بـ `ElementRef::measure` عند البدء (`pos_board.rs`).
 - **الخط الافتراضي Tajawal** (طلب المالك)؛ الأرقام تبقى بـ Cairo (`FIGURE_FONT`) لتساوي عرض الخانات.
 - **لا تخلط رقماً بكلمة في نص واحد:** في العربية يعيد bidi ترتيب مجموعات الأرقام؛ اعرض الرقم (`figure`) والكلمة (مدين/دائن) عنصرين متجاورين (`balance_cell`).
 - **`label` بارتفاع سطر 1.5:** خط Tajawal يلصق الأسطر العربية الملتفة بدونه.

@@ -193,8 +193,10 @@ pub struct BizPrefs {
 /// The till's screen, as this device's cashier arranged it.
 #[derive(Clone, Copy)]
 pub struct PosPrefs {
-    /// Cards: 0 small, 1 medium, 2 large.
+    /// Cards: 4 extra small, 0 small, 1 medium, 2 large, 3 extra large.
     pub tile: Signal<usize>,
+    /// Cards across (0: as many as fit).
+    pub cols: Signal<usize>,
     pub stock: Signal<bool>,
     /// The total in a large band.
     pub big_total: Signal<bool>,
@@ -240,6 +242,7 @@ impl BizPrefs {
             status_icon_only: persisted_flag("nb.app.status_icon_only", false),
             pos: PosPrefs {
                 tile: persisted_index("nb.pos.tile", 1),
+                cols: signal(0),
                 stock: persisted_flag("nb.pos.stock", true),
                 big_total: persisted_flag("nb.pos.big_total", true),
                 sku: persisted_flag("nb.pos.sku", false),
@@ -270,6 +273,8 @@ pub struct AppState {
     /// A screen takes the whole window (the till in full screen, or its
     /// layout without the sidebar): the sidebar does not show.
     pub focus: Signal<bool>,
+    /// No app bar at the top (the till asks for the whole screen).
+    pub bare: Signal<bool>,
     /// A pending request for the screen being opened.
     pub intent: Signal<Option<Intent>>,
     /// The local database of this app instance (set by [`AppState::connect`]).
@@ -322,6 +327,7 @@ impl AppState {
             palette: signal(false),
             shortcuts: signal(false),
             focus: signal(false),
+            bare: signal(false),
             intent: signal(None),
             db: nsh_core::prelude::stored(None),
             session: signal(None),

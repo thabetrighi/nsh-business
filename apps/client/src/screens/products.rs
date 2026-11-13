@@ -1489,7 +1489,11 @@ pub fn products(st: AppState, compact: bool) -> View {
                 let item = crate::screens::printing::LabelItem {
                     name: p.name.clone(),
                     price_minor: p.price_minor,
-                    unit: p.units.first().map(|u| u.code.clone()).unwrap_or_default(),
+                    unit: p
+                        .units
+                        .first()
+                        .map(|u| crate::screens::common::unit_short(st, &u.code))
+                        .unwrap_or_default(),
                     barcode: p.barcodes.first().cloned(),
                     sku: p.sku.clone(),
                 };

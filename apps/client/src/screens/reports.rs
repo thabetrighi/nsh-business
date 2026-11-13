@@ -812,7 +812,11 @@ fn stock_rows(
                 if plain {
                     Quantity::from_milli(v).to_string()
                 } else {
-                    format!("{} {}", qty(st, v), row.unit)
+                    format!(
+                        "{} {}",
+                        qty(st, v),
+                        crate::screens::common::unit_short(st, &row.unit)
+                    )
                 }
             };
             let mut v = vec![row.name.clone(), row.sku.clone(), q(row.on_hand_milli)];

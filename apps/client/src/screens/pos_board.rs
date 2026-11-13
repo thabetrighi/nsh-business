@@ -12,18 +12,48 @@ use crate::screens::pos_layout::{
 
 use nsh_core::element::{ResponderEvent, TouchClaim};
 
-use crate::screens::pos_layout::{ALIGNS, COLORS, LABELS, Spot, TEXT_SIZES};
+use crate::screens::pos_layout::{ALIGNS, COLORS, LABELS, Place, Spot, TEXT_SIZES};
 use crate::ui::menu::{Act, menu_on};
+use nsh_core::element::ElementRef;
 
 use super::*;
 
-/// Where a dragged panel would go.
+/// What a drag can be dropped on: a place (a slot between panels, a new
+/// column, between strips), or a panel (before it or after it, by which
+/// half the pointer is over).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum Slot {
-    /// Column, place before which it goes.
-    At(usize, usize),
-    /// A column of its own, at this place.
-    NewColumn(usize),
+enum Target {
+    Place(Place),
+    Panel(Spot),
+}
+
+/// A target where it is on the screen: (target, left, top, width, height).
+type Rect = (Target, f32, f32, f32, f32);
+
+thread_local! {
+    /// The drop targets on the board now (built again with it).
+    static TARGETS: std::cell::RefCell<Vec<(Target, ElementRef)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Where they are on the screen, measured when a drag starts: (target,
+    /// left, top, width, height).
+    static RECTS: std::cell::RefCell<Vec<Rect>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Makes `v` a drop target.
+fn target(v: View, t: Target) -> View {
+    let r = element_ref();
+    TARGETS.with(|x| x.borrow_mut().push((t, r)));
+    v.element_ref(&r)
+}
+
+/// Where a target sends what is dropped at `y` over it.
+fn place_of(t: Target, top: f32, h: f32, y: f32) -> Option<Place> {
+    let after = y > top + h / 2.0;
+    match t {
+        Target::Place(p) => Some(p),
+        Target::Panel(Spot::Col(c, i)) => Some(Place::Col(c, i + usize::from(after))),
+        Target::Panel(Spot::Top(i)) => Some(Place::Strip(true, i + usize::from(after))),
+        Target::Panel(Spot::Bottom(i)) => Some(Place::Strip(false, i + usize::from(after))),
+    }
 }
 
 /// What a drag resizes.
@@ -39,8 +69,14 @@ pub(super) enum Resize {
 pub(super) struct Board {
     pub editing: Signal<bool>,
     pub draft: Signal<Layout>,
-    pub drag: Signal<Option<(usize, usize)>>,
-    pub over: Signal<Option<Slot>>,
+    /// The panel being dragged (or picked, on a touch screen).
+    pub drag: Signal<Option<Spot>>,
+    pub over: Signal<Option<Place>>,
+    /// Where the pointer is while dragging, in the board.
+    pub ghost: Signal<Option<(f32, f32)>>,
+    /// The board on the screen (where the ghost is drawn from).
+    pub root: ElementRef,
+    pub origin: Signal<(f32, f32)>,
     pub resizing: Signal<Option<Resize>>,
     /// Where the pointer was when the resize last stepped.
     pub start: Signal<(f32, f32)>,
@@ -65,6 +101,9 @@ impl Board {
             draft: signal(builtin().remove(0)),
             drag: signal(None),
             over: signal(None),
+            ghost: signal(None),
+            root: element_ref(),
+            origin: signal((0.0, 0.0)),
             resizing: signal(None),
             start: signal((0.0, 0.0)),
             width: signal(1000.0),
@@ -122,14 +161,76 @@ impl Board {
         };
         self.drag.set(None);
         self.over.set(None);
-        match over {
-            Some(Slot::At(c, i)) => self.change(|l| {
-                l.move_panel(from, (c, i));
-            }),
-            Some(Slot::NewColumn(at)) => self.change(|l| {
-                l.split_off_column(from, at);
-            }),
-            None => {}
+        self.ghost.set(None);
+        if let Some(to) = over {
+            self.change(|l| {
+                l.move_to(from, to);
+            });
+        }
+    }
+
+    /// A drag starts at `page` (a panel's handle): where the targets are
+    /// is measured once, then the pointer is followed.
+    fn start_drag(self, from: Spot, page: Point<Points>) {
+        self.drag.set(Some(from));
+        self.over.set(None);
+        self.start.set((page.x.0, page.y.0));
+        let refs = TARGETS.with(|t| t.borrow().clone());
+        let root = self.root;
+        let task = spawn(async move {
+            let mut rects = Vec::with_capacity(refs.len());
+            for (t, r) in refs {
+                if let Some(m) = r.measure().await {
+                    rects.push((
+                        t,
+                        m.page.x.0,
+                        m.page.y.0,
+                        m.frame.size.width.0,
+                        m.frame.size.height.0,
+                    ));
+                }
+            }
+            RECTS.with(|x| *x.borrow_mut() = rects);
+            if let Some(m) = root.measure().await {
+                self.origin.set((m.page.x.0, m.page.y.0));
+            }
+        });
+        drop(task); // runs to completion: tasks end with their owner, not their handle
+    }
+
+    /// The pointer moved while dragging: the ghost follows, the place
+    /// under it lights.
+    fn follow(self, page: Point<Points>) {
+        if self.drag.get_untracked().is_none() {
+            return;
+        }
+        let (x, y) = (page.x.0, page.y.0);
+        let (x0, y0) = self.start.get_untracked();
+        // A press without a move picks the panel (touch: then a slot).
+        if self.ghost.get_untracked().is_none() && (x - x0).abs() + (y - y0).abs() < 6.0 {
+            return;
+        }
+        self.ghost.set(Some((x, y)));
+        // Places first (they lie between and beside the panels).
+        let found = RECTS.with(|r| {
+            let r = r.borrow();
+            let inside = |&&(_, l, t, w, h): &&Rect| x >= l && x <= l + w && y >= t && y <= t + h;
+            r.iter()
+                .filter(|e| matches!(e.0, Target::Place(_)))
+                .find(inside)
+                .or_else(|| r.iter().find(inside))
+                .and_then(|&(t, _, top, _, h)| place_of(t, top, h, y))
+        });
+        if self.over.get_untracked() != found {
+            self.over.set(found);
+        }
+    }
+
+    /// The press ended: a drag drops; a press that did not move keeps the
+    /// panel picked for a slot to be pressed (touch).
+    fn release(self) {
+        if self.ghost.get_untracked().is_some() {
+            self.drop_now();
         }
     }
 
@@ -443,6 +544,45 @@ fn panel_acts(st: AppState, b: Board, at: Spot, p: &Panel) -> Vec<Act> {
                 .collect(),
         ));
     }
+    // Its height in a column: its content's, what is left, or a share.
+    if let Spot::Col(..) = at {
+        let mut hs = vec![
+            Act::new(
+                st.tn("pos.panel.height.content"),
+                set(Rc::new(|p: &mut Panel| {
+                    p.height = 0;
+                    p.fill = false;
+                })),
+            )
+            .checked(p.height == 0 && !p.fill),
+            Act::new(
+                st.tn("pos.panel.height.fill"),
+                set(Rc::new(|p: &mut Panel| {
+                    p.height = 0;
+                    p.fill = true;
+                })),
+            )
+            .checked(p.fill),
+            Act::Line,
+        ];
+        for h in [2u8, 3, 4, 6, 8, 10, 12] {
+            hs.push(
+                Act::new(
+                    tr_args(
+                        st.lang(),
+                        "pos.panel.height.share",
+                        &[("n", &h.to_string())],
+                    ),
+                    set(Rc::new(move |p: &mut Panel| {
+                        p.height = h;
+                        p.fill = false;
+                    })),
+                )
+                .checked(!p.fill && p.height == h),
+            );
+        }
+        acts.push(Act::sub(Icon::ArrowUpDown, st.tn("pos.panel.height"), hs));
+    }
     acts.push(Act::Line);
     acts.push(Act::with(
         if p.hidden { Icon::Eye } else { Icon::EyeOff },
@@ -503,8 +643,23 @@ fn strip_frame(st: AppState, b: Board, at: Spot, p: Panel, content: View) -> Vie
         Spot::Col(c, i) => (format!("{c}-{i}"), "pos.strip.bottom", Icon::PanelBottom),
     };
     let hidden = p.hidden;
-    view()
+    let dragged = computed(move || b.drag.get() == Some(at));
+    let arrow = |ic: Icon, key: &'static str, up: bool, tid: String| {
+        icon_button(
+            move || ic,
+            st.t(key),
+            Variant::Ghost,
+            move || {
+                b.change(|l| {
+                    l.move_strip(at, up);
+                })
+            },
+        )
+        .test_id(&tid)
+    };
+    let frame = view()
         .test_id(&format!("pos-strip-{id}"))
+        .opacity(move || if dragged.get() { 0.45_f32 } else { 1.0_f32 })
         .rounded(px(10.0))
         .border_2()
         .border_color(Tone::BorderStrong.color())
@@ -517,21 +672,33 @@ fn strip_frame(st: AppState, b: Board, at: Spot, p: Panel, content: View) -> Vie
                 .px(px(10.0))
                 .py(px(4.0))
                 .bg(Tone::PrimarySoft.color())
-                .child(icon(ic, 16.0, || Tone::Primary))
+                .child(grip(st, b, at, w, format!("pos-strip-grip-{id}")))
+                .child(icon(ic, 14.0, || Tone::Muted))
                 .child(label_line(
                     move || {
-                        let name = format!("{} · {}", st.tn(place), widget_name(st, w));
                         if hidden {
-                            format!("{name} · {}", st.tn("pos.panel.hidden"))
+                            format!("{} · {}", st.tn(place), st.tn("pos.panel.hidden"))
                         } else {
-                            name
+                            st.tn(place)
                         }
                     },
-                    ty::SM,
-                    FontWeight::BOLD,
-                    Tone::Primary,
+                    ty::XS,
+                    FontWeight::MEDIUM,
+                    Tone::Muted,
                 ))
                 .child(view().flex_1())
+                .child(arrow(
+                    Icon::ArrowUp,
+                    "pos.strip.up",
+                    true,
+                    format!("pos-strip-up-{id}"),
+                ))
+                .child(arrow(
+                    Icon::ArrowDown,
+                    "pos.strip.down",
+                    false,
+                    format!("pos-strip-down-{id}"),
+                ))
                 .child(options_button(st, b, at, &p, format!("pos-opts-{id}"))),
         )
         .child(
@@ -539,7 +706,8 @@ fn strip_frame(st: AppState, b: Board, at: Spot, p: Panel, content: View) -> Vie
                 .p(px(6.0))
                 .opacity(if hidden { 0.4 } else { 1.0 })
                 .child(content),
-        )
+        );
+    target(frame, Target::Panel(at))
 }
 
 /// The till's screen from its layout; while editing, with the handles.
@@ -549,10 +717,15 @@ pub(super) fn board_view(st: AppState, t: Till, parts: BoardParts) -> View {
     let screen = dynamic(move || {
         let l = b.shown(st);
         let editing = b.editing.get();
+        // The targets are those of this board.
+        TARGETS.with(|t| t.borrow_mut().clear());
         // What the products show follows the layout.
         let pr = st.biz.pos;
         if pr.tile.get_untracked() != usize::from(l.tile) {
             pr.tile.set(usize::from(l.tile));
+        }
+        if pr.cols.get_untracked() != usize::from(l.tile_cols) {
+            pr.cols.set(usize::from(l.tile_cols));
         }
         if pr.stock.get_untracked() != l.stock {
             pr.stock.set(l.stock);
@@ -574,15 +747,24 @@ pub(super) fn board_view(st: AppState, t: Till, parts: BoardParts) -> View {
         if st.focus.get_untracked() != focus {
             st.focus.set(focus);
         }
+        // The app's bar at the top: as the layout says, and gone in full
+        // screen (the till's quick menu reaches the pages).
+        let bare = !l.navbar || t.full.get();
+        if st.bare.get_untracked() != bare {
+            st.bare.set(bare);
+        }
         let gap = f32::from(l.gap);
         let n = l.columns.len();
         // Buttons may be in several places: each has its own test ids.
         let mut actions_seen = 0usize;
-        let mut row = view()
-            .flex_1()
-            .min_h(px(0.0))
-            .flex_row()
-            .gap(px(if editing { 0.0 } else { gap }));
+        // While editing the board scrolls: the columns are as tall as their
+        // panels (nothing under the strips below them).
+        let mut row = if editing {
+            view().flex_row().flex_shrink(0.0)
+        } else {
+            view().flex_1().min_h(px(0.0)).flex_row()
+        }
+        .gap(px(if editing { 0.0 } else { gap }));
         for (c, col) in l.columns.iter().enumerate() {
             // A column with nothing shown is not there (but while editing).
             if !editing && col.panels.iter().all(|p| p.hidden) {
@@ -619,10 +801,18 @@ pub(super) fn board_view(st: AppState, t: Till, parts: BoardParts) -> View {
                 } else {
                     content
                 };
-                let sized = if editing && p.height > 0 {
+                let sized = if editing && (p.height > 0 || p.fill) {
                     // While editing the board scrolls: a share is a fixed height.
+                    let h = if p.fill { 6 } else { p.height };
                     view()
-                        .h(px(f32::from(p.height) * SHARE_H + 40.0))
+                        .h(px(f32::from(h) * SHARE_H + 40.0))
+                        .child(content.flex_1().min_h(px(0.0)))
+                } else if p.fill {
+                    // The height the others leave.
+                    view()
+                        .flex_1()
+                        .basis(px(0.0))
+                        .min_h(px(72.0))
                         .child(content.flex_1().min_h(px(0.0)))
                 } else if p.height > 0 {
                     view()
@@ -632,6 +822,12 @@ pub(super) fn board_view(st: AppState, t: Till, parts: BoardParts) -> View {
                         .child(content.flex_1().min_h(px(0.0)))
                 } else {
                     view().child(content)
+                };
+                // What the search finds opens over the panels after it.
+                let sized = if p.widget == Widget::Search {
+                    sized.relative().z_index(30)
+                } else {
+                    sized
                 };
                 stack = stack.child(if editing {
                     edit_frame(st, b, c, i, p.clone(), n, col.panels.len(), sized)
@@ -662,34 +858,65 @@ pub(super) fn board_view(st: AppState, t: Till, parts: BoardParts) -> View {
                 0
             };
             let content = panel_view(st, t, &l, p, &parts, which);
+            let content = if p.widget == Widget::Search {
+                content.relative().z_index(30)
+            } else {
+                content
+            };
             Some(if editing {
                 strip_frame(st, b, at, p.clone(), content)
             } else {
                 content
             })
         };
-        let tops: Vec<View> = l
-            .top
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| strip(Spot::Top(i), p))
-            .collect();
-        let bottoms: Vec<View> = l
-            .bottom
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| strip(Spot::Bottom(i), p))
-            .collect();
+        let mut tops: Vec<View> = Vec::new();
+        for (i, p) in l.top.iter().enumerate() {
+            if editing {
+                tops.push(place_slot(
+                    b,
+                    Place::Strip(true, i),
+                    format!("pos-slot-top-{i}"),
+                ));
+            }
+            tops.extend(strip(Spot::Top(i), p));
+        }
+        if editing {
+            let n = l.top.len();
+            tops.push(place_slot(
+                b,
+                Place::Strip(true, n),
+                format!("pos-slot-top-{n}"),
+            ));
+        }
+        let mut bottoms: Vec<View> = Vec::new();
+        for (i, p) in l.bottom.iter().enumerate() {
+            if editing {
+                bottoms.push(place_slot(
+                    b,
+                    Place::Strip(false, i),
+                    format!("pos-slot-bottom-{i}"),
+                ));
+            }
+            bottoms.extend(strip(Spot::Bottom(i), p));
+        }
+        if editing {
+            let n = l.bottom.len();
+            bottoms.push(place_slot(
+                b,
+                Place::Strip(false, n),
+                format!("pos-slot-bottom-{n}"),
+            ));
+        }
         let mut v = view()
             .flex_1()
             .min_h(px(0.0))
             .gap(px(if editing { 10.0 } else { gap }));
         if editing {
-            let mut inner = view().flex_1().gap(px(10.0)).pb(px(24.0));
+            let mut inner = view().gap(px(4.0)).pb(px(24.0));
             for s in tops {
                 inner = inner.child(s);
             }
-            inner = inner.child(row.flex_1());
+            inner = inner.child(row);
             for s in bottoms {
                 inner = inner.child(s);
             }
@@ -697,19 +924,55 @@ pub(super) fn board_view(st: AppState, t: Till, parts: BoardParts) -> View {
                 .child(edit_bar(st, b))
                 .child(scroll().flex_1().min_h(px(0.0)).child(inner));
         } else {
+            // The strips keep their height; the columns take the rest
+            // (what does not fit scrolls inside its panel, under nothing).
             for s in tops {
-                v = v.child(s);
+                v = v.child(s.flex_shrink(0.0));
             }
-            v = v.child(row);
+            v = v.child(row.overflow_hidden());
             for s in bottoms {
-                v = v.child(s);
+                v = v.child(s.flex_shrink(0.0));
             }
         }
         v.into_element()
     });
+    // What is being dragged, under the pointer.
+    let ghost = dynamic(move || {
+        let (Some((x, y)), Some(from)) = (b.ghost.get(), b.drag.get_untracked()) else {
+            return view().into_element();
+        };
+        let (ox, oy) = b.origin.get();
+        let Some(w) = b.draft.with_untracked(|l| l.panel(from).map(|p| p.widget)) else {
+            return view().into_element();
+        };
+        view()
+            .test_id("pos-drag-ghost")
+            .absolute()
+            .left(px(x - ox + 14.0))
+            .top(px(y - oy + 14.0))
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .rounded(px(8.0))
+            .bg(Tone::Primary.color())
+            .shadow_lg()
+            .opacity(0.92)
+            .child(icon(widget_icon(w), 16.0, || Tone::OnPrimary))
+            .child(label_line(
+                move || widget_name(st, w),
+                ty::SM,
+                FontWeight::BOLD,
+                Tone::OnPrimary,
+            ))
+            .into_element()
+    });
     view()
         .flex_1()
         .min_h(px(0.0))
+        .relative()
+        .element_ref(&b.root)
         .on_layout(move |r: &Bounds<Points>| b.width.set(r.size.width.0))
         // A drag or resize follows the pointer over the whole board.
         .on_mouse_move(move |e: &MouseEvent| {
@@ -718,13 +981,20 @@ pub(super) fn board_view(st: AppState, t: Till, parts: BoardParts) -> View {
             }
         })
         .child(screen)
+        .child(ghost)
 }
 
 /// Where a dragged panel can go: a thin line, wider while dragging.
 fn slot(b: Board, c: usize, i: usize) -> View {
-    let here = computed(move || b.over.get() == Some(Slot::At(c, i)));
-    view()
-        .test_id(&format!("pos-slot-{c}-{i}"))
+    place_slot(b, Place::Col(c, i), format!("pos-slot-{c}-{i}"))
+}
+
+/// A place a panel can be dropped on, lit while the pointer is over it;
+/// on a touch screen, pressed after the panel's handle.
+fn place_slot(b: Board, place: Place, id: String) -> View {
+    let here = computed(move || b.over.get() == Some(place));
+    let v = view()
+        .test_id(&id)
         .min_h(move || px(if b.drag.get().is_some() { 26.0 } else { 8.0 }))
         .my(px(2.0))
         .rounded(px(6.0))
@@ -745,26 +1015,21 @@ fn slot(b: Board, c: usize, i: usize) -> View {
                 clear()
             }
         })
-        .on_mouse_enter(move |_: &MouseEvent| {
-            if b.drag.get_untracked().is_some() {
-                b.over.set(Some(Slot::At(c, i)));
-            }
-        })
-        .on_press_up(move || b.drop_now())
         // Touch: a press on the slot puts the chosen panel there.
         .on_press(move || {
             if b.drag.get_untracked().is_some() {
-                b.over.set(Some(Slot::At(c, i)));
+                b.over.set(Some(place));
                 b.drop_now();
             }
-        })
+        });
+    target(v, Target::Place(place))
 }
 
 /// A new column at `at`: a strip at the side of a column.
 fn new_column_slot(st: AppState, b: Board, at: usize) -> View {
-    let here = computed(move || b.over.get() == Some(Slot::NewColumn(at)));
+    let here = computed(move || b.over.get() == Some(Place::NewColumn(at)));
     let full = computed(move || b.draft.with(|l| l.columns.len() >= MAX_COLUMNS));
-    view()
+    let v = view()
         .test_id(&format!("pos-newcol-{at}"))
         .w(move || {
             px(if b.drag.get().is_some() && !full.get() {
@@ -794,15 +1059,9 @@ fn new_column_slot(st: AppState, b: Board, at: usize) -> View {
                 clear()
             }
         })
-        .on_mouse_enter(move |_: &MouseEvent| {
-            if b.drag.get_untracked().is_some() && !full.get_untracked() {
-                b.over.set(Some(Slot::NewColumn(at)));
-            }
-        })
-        .on_press_up(move || b.drop_now())
         .on_press(move || {
             if b.drag.get_untracked().is_some() && !full.get_untracked() {
-                b.over.set(Some(Slot::NewColumn(at)));
+                b.over.set(Some(Place::NewColumn(at)));
                 b.drop_now();
             }
         })
@@ -810,7 +1069,54 @@ fn new_column_slot(st: AppState, b: Board, at: usize) -> View {
             move || b.drag.get().is_some() && !full.get(),
             move || icon(Icon::Plus, 16.0, || Tone::Primary).into_element(),
         ))
-        .label(move || SharedString::from(st.tn("pos.layouts.new_column")))
+        .label(move || SharedString::from(st.tn("pos.layouts.new_column")));
+    target(v, Target::Place(Place::NewColumn(at)))
+}
+
+/// A panel's handle: dragged (mouse or finger) it carries the panel; a
+/// press without a move picks it for a slot to be pressed (touch).
+fn grip(st: AppState, b: Board, from: Spot, w: Widget, id: String) -> View {
+    let picked = computed(move || b.drag.get() == Some(from));
+    view()
+        .test_id(&id)
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(6.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .bg(move || {
+            if picked.get() {
+                Tone::Surface.color()
+            } else {
+                clear()
+            }
+        })
+        .hover(|s| s.bg(Tone::Surface.color()))
+        .claim_touches(TouchClaim::on_start())
+        .on_responder_grant(move |e: &ResponderEvent| {
+            // A second press on a picked panel puts it down.
+            if b.drag.get_untracked() == Some(from) && b.ghost.get_untracked().is_none() {
+                b.drag.set(None);
+                return;
+            }
+            b.start_drag(from, e.page);
+        })
+        .on_responder_move(move |e: &ResponderEvent| b.follow(e.page))
+        .on_responder_release(move |_: &ResponderEvent| b.release())
+        .on_responder_terminate(move |_: &ResponderEvent| {
+            b.ghost.set(None);
+            b.drag.set(None);
+            b.over.set(None);
+        })
+        .child(icon(Icon::Grip, 16.0, || Tone::Primary))
+        .child(label_line(
+            move || widget_name(st, w),
+            ty::SM,
+            FontWeight::BOLD,
+            Tone::Primary,
+        ))
 }
 
 /// The bar between two columns: drag it to share the width differently.
@@ -930,7 +1236,7 @@ fn edit_frame(
     panels: usize,
     content: View,
 ) -> View {
-    let dragged = computed(move || b.drag.get() == Some((c, i)));
+    let dragged = computed(move || b.drag.get() == Some(Spot::Col(c, i)));
     let w = p.widget;
     let tool = |ic: Icon, key: &'static str, id: String, f: Box<dyn Fn()>| {
         icon_button(move || ic, st.t(key), Variant::Ghost, f).test_id(&id)
@@ -942,31 +1248,7 @@ fn edit_frame(
         .px(px(6.0))
         .py(px(2.0))
         .bg(Tone::PrimarySoft.color())
-        .child(
-            view()
-                .test_id(&format!("pos-grip-{c}-{i}"))
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(6.0))
-                .py(px(6.0))
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .hover(|s| s.bg(Tone::Surface.color()))
-                // Drag it (mouse) or press it, then a slot (touch).
-                .on_press_down(move || {
-                    b.drag.set(Some((c, i)));
-                    b.over.set(None);
-                })
-                .on_press_up(move || b.drop_now())
-                .child(icon(Icon::Grip, 16.0, || Tone::Primary))
-                .child(label_line(
-                    move || widget_name(st, w),
-                    ty::SM,
-                    FontWeight::BOLD,
-                    Tone::Primary,
-                )),
-        )
+        .child(grip(st, b, Spot::Col(c, i), w, format!("pos-grip-{c}-{i}")))
         .child(view().flex_1());
     // Its style (products: cards, list, tiles…).
     if !w.styles().is_empty() {
@@ -997,10 +1279,13 @@ fn edit_frame(
         format!("pos-opts-{c}-{i}"),
     ));
     let height = p.height;
+    let fill = p.fill;
     bar = bar
         .child(label_line(
             move || {
-                if height == 0 {
+                if fill {
+                    st.tn("pos.panel.height.fill")
+                } else if height == 0 {
                     st.tn("pos.layouts.auto")
                 } else {
                     format!("↕ {height}")
@@ -1101,14 +1386,8 @@ fn edit_frame(
         .rounded(px(10.0))
         .border_2()
         .opacity(move || if dragged.get() { 0.45_f32 } else { 1.0_f32 })
-        // Over a panel: the dragged one goes before it.
-        .on_mouse_enter(move |_: &MouseEvent| {
-            if b.drag.get_untracked().is_some_and(|d| d != (c, i)) {
-                b.over.set(Some(Slot::At(c, i)));
-            }
-        })
         .border_color(move || {
-            if (b.over.get() == Some(Slot::At(c, i)) && b.drag.get().is_some()) || dragged.get() {
+            if dragged.get() {
                 Tone::Primary.color()
             } else {
                 Tone::BorderStrong.color()
@@ -1154,58 +1433,144 @@ fn edit_frame(
                 ),
         );
     let _ = grows;
-    frame
+    target(frame, Target::Panel(Spot::Col(c, i)))
 }
 
 /// While editing: the layout's name, its look, the ready-made layouts to
 /// start from, cancel and save.
 fn edit_bar(st: AppState, b: Board) -> View {
-    let tiles: Vec<(u8, Box<dyn Fn() -> String>)> = vec![
-        (0, Box::new(st.t("pos.tile.s"))),
-        (1, Box::new(st.t("pos.tile.m"))),
-        (2, Box::new(st.t("pos.tile.l"))),
-    ];
-    let tile = signal(b.draft.get_untracked().tile);
-    let stock = signal(b.draft.get_untracked().stock);
-    let sku = signal(b.draft.get_untracked().sku);
-    let gap = signal(b.draft.get_untracked().gap);
-    let head = signal(b.draft.get_untracked().head);
-    let big = signal(b.draft.get_untracked().big_lines);
-    effect(move || {
-        let now = (
-            tile.get(),
-            stock.get(),
-            sku.get(),
-            gap.get(),
-            head.get(),
-            big.get(),
-        );
-        // Only a change rebuilds the board (which builds this bar again).
-        let same = b
-            .draft
-            .with_untracked(|l| (l.tile, l.stock, l.sku, l.gap, l.head, l.big_lines) == now);
-        if !same {
-            b.draft.update(|l| {
-                (l.tile, l.stock, l.sku, l.gap, l.head, l.big_lines) = now;
-            });
+    use crate::screens::pos_layout::{HEAD_ITEMS, PADS, TILES, tile_key};
+    let l = b.draft.get_untracked();
+    let set = move |f: Rc<dyn Fn(&mut Layout)>| {
+        move || {
+            let f = f.clone();
+            b.change(move |l| f(l))
         }
-    });
-    let gaps: Vec<(u8, Box<dyn Fn() -> String>)> = [6u8, 10, 14, 20]
-        .into_iter()
-        .map(|g| {
-            (
-                g,
-                Box::new(move || g.to_string()) as Box<dyn Fn() -> String>,
+    };
+    let flag = |key: &'static str, on: bool, f: fn(&mut Layout)| {
+        Act::new(st.tn(key), set(Rc::new(move |l: &mut Layout| f(l)))).checked(on)
+    };
+    // The products' cards: size, how many across, what they show.
+    let products = vec![
+        Act::sub(
+            Icon::Scaling,
+            st.tn("pos.edit.card_size"),
+            TILES
+                .iter()
+                .map(|&k| {
+                    Act::new(
+                        st.tn(tile_key(k)),
+                        set(Rc::new(move |l: &mut Layout| l.tile = k)),
+                    )
+                    .checked(l.tile == k)
+                })
+                .collect(),
+        ),
+        Act::sub(
+            Icon::Columns,
+            st.tn("pos.edit.card_cols"),
+            (0u8..=8)
+                .filter(|n| *n != 1)
+                .map(|n| {
+                    Act::new(
+                        if n == 0 {
+                            st.tn("pos.layouts.auto")
+                        } else {
+                            n.to_string()
+                        },
+                        set(Rc::new(move |l: &mut Layout| l.tile_cols = n)),
+                    )
+                    .checked(l.tile_cols == n)
+                })
+                .collect(),
+        ),
+        Act::Line,
+        flag("pos.show.stock", l.stock, |l| l.stock = !l.stock),
+        flag("pos.show.sku", l.sku, |l| l.sku = !l.sku),
+    ];
+    // The page around the till.
+    let pads = std::iter::once(None)
+        .chain(PADS.iter().map(|p| Some(*p)))
+        .map(|p| {
+            Act::new(
+                p.map_or_else(|| st.tn("pos.edit.pad_default"), |p| p.to_string()),
+                set(Rc::new(move |l: &mut Layout| l.pad = p)),
             )
+            .checked(l.pad == p)
         })
         .collect();
-    let side = signal(b.draft.get_untracked().sidebar);
-    effect(move || {
-        let on = side.get();
-        if b.draft.with_untracked(|l| l.sidebar) != on {
-            b.draft.update(|l| l.sidebar = on);
-        }
-    });
+    let gaps = [4u8, 6, 10, 14, 20, 28]
+        .into_iter()
+        .map(|g| {
+            Act::new(g.to_string(), set(Rc::new(move |l: &mut Layout| l.gap = g)))
+                .checked(l.gap == g)
+        })
+        .collect();
+    let page = vec![
+        flag("pos.show.head", l.head, |l| l.head = !l.head),
+        flag("pos.show.navbar", l.navbar, |l| l.navbar = !l.navbar),
+        flag("pos.show.sidebar", l.sidebar, |l| l.sidebar = !l.sidebar),
+        flag("pos.show.big_lines", l.big_lines, |l| {
+            l.big_lines = !l.big_lines
+        }),
+        Act::Line,
+        Act::sub(Icon::Frame, st.tn("pos.edit.pad"), pads),
+        Act::sub(Icon::Columns, st.tn("pos.edit.gap"), gaps),
+    ];
+    // The head's buttons: which, in what order, how they read.
+    let shown = l.head_shown();
+    let mut head: Vec<Act> = HEAD_ITEMS
+        .iter()
+        .map(|&code| {
+            Act::new(
+                st.tn(&format!("pos.head.item.{code}")),
+                set(Rc::new(move |l: &mut Layout| l.toggle_head(code))),
+            )
+            .checked(shown.iter().any(|s| s == code))
+        })
+        .collect();
+    if shown.len() > 1 {
+        head.push(Act::Line);
+        head.push(Act::sub(
+            Icon::ArrowUpDown,
+            st.tn("pos.panel.order"),
+            shown
+                .iter()
+                .skip(1)
+                .map(|code| {
+                    let c = code.clone();
+                    Act::new(
+                        tr_args(
+                            st.lang(),
+                            "pos.panel.earlier",
+                            &[("name", &st.tn(&format!("pos.head.item.{code}")))],
+                        ),
+                        set(Rc::new(move |l: &mut Layout| l.head_up(&c))),
+                    )
+                })
+                .collect(),
+        ));
+    }
+    head.push(Act::sub(
+        Icon::Type,
+        st.tn("pos.panel.labels"),
+        [
+            "pos.head.labels.auto",
+            "pos.panel.labels.icon",
+            "pos.panel.labels.both",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(k, key)| {
+            let k = u8::try_from(k).unwrap_or(0);
+            Act::new(
+                st.tn(key),
+                set(Rc::new(move |l: &mut Layout| l.head_labels = k)),
+            )
+            .checked(l.head_labels == k)
+        })
+        .collect(),
+    ));
     // Strips to add, above or below the columns.
     let strip_acts = move |top: bool| -> Vec<Act> {
         b.draft.with_untracked(|l| {
@@ -1222,54 +1587,32 @@ fn edit_bar(st: AppState, b: Board) -> View {
                 .collect()
         })
     };
-    let add_strip = Act::sub(Icon::ArrowUp, st.tn("pos.strip.add_top"), strip_acts(true));
-    let add_strip_bottom = Act::sub(
-        Icon::PanelBottom,
-        st.tn("pos.strip.add_bottom"),
-        strip_acts(false),
-    );
     let start_acts: Vec<Act> = builtin()
         .into_iter()
         .map(|l| {
             let label = st.tn(&format!("pos.layout.{}", l.name));
-            Act::with(Icon::LayoutTemplate, label, move || {
-                tile.set(l.tile);
-                stock.set(l.stock);
-                sku.set(l.sku);
-                gap.set(l.gap);
-                head.set(l.head);
-                big.set(l.big_lines);
-                side.set(l.sidebar);
-                b.draft.set(l.clone());
-            })
+            Act::with(Icon::LayoutTemplate, label, move || b.draft.set(l.clone()))
         })
         .collect();
-    let toggle = |key: &'static str, on: Signal<bool>, id: &'static str| {
-        view()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .child(switch(on, st.t(key)).test_id(id))
-            .child(label_line(
-                st.t(key),
-                ty::SM,
-                FontWeight::NORMAL,
-                Tone::Body,
-            ))
+    let menu = |ic: Icon, key: &'static str, id: &'static str, acts: Vec<Act>| {
+        menu_on(
+            button(Variant::Secondary, Size::Md, Some(ic), st.t(key), || {}).test_id(id),
+            acts,
+        )
     };
     view()
         .test_id("pos-edit-bar")
         .flex_row()
         .flex_wrap()
         .items_center()
-        .gap(px(12.0))
-        .p(px(12.0))
+        .gap(px(8.0))
+        .p(px(10.0))
         .rounded(px(12.0))
         .border_1()
         .border_color(Tone::Primary.color())
         .bg(Tone::PrimarySoft.color())
         .child(icon(Icon::LayoutTemplate, 18.0, || Tone::Primary))
-        .child(view().w(px(200.0)).child(field(
+        .child(view().w(px(190.0)).child(field(
             String::new,
             b.name,
             st.t("pos.layouts.name"),
@@ -1277,45 +1620,39 @@ fn edit_bar(st: AppState, b: Board) -> View {
             KeyboardType::Default,
             "pos-layout-name",
         )))
-        .child(menu_on(
-            button(
-                Variant::Secondary,
-                Size::Md,
-                Some(Icon::LayoutTemplate),
-                st.t("pos.layouts.start_from"),
-                || {},
-            )
-            .test_id("pos-start-from"),
+        .child(menu(
+            Icon::LayoutTemplate,
+            "pos.layouts.start_from",
+            "pos-start-from",
             start_acts,
         ))
-        .child(segmented(tiles, tile).test_id("pos-edit-tile"))
-        .child(segmented(gaps, gap).test_id("pos-edit-gap"))
-        .child(toggle("pos.show.stock", stock, "pos-edit-stock"))
-        .child(toggle("pos.show.sku", sku, "pos-edit-sku"))
-        .child(toggle("pos.show.head", head, "pos-edit-head"))
-        .child(toggle("pos.show.big_lines", big, "pos-edit-big-lines"))
-        .child(toggle("pos.show.sidebar", side, "pos-edit-sidebar"))
-        .child(menu_on(
-            button(
-                Variant::Secondary,
-                Size::Md,
-                Some(Icon::PanelBottom),
-                st.t("pos.strip.add"),
-                || {},
-            )
-            .test_id("pos-add-strip"),
-            vec![add_strip, add_strip_bottom],
+        .child(menu(
+            Icon::Package,
+            "pos.edit.products",
+            "pos-edit-products",
+            products,
+        ))
+        .child(menu(Icon::Frame, "pos.edit.page", "pos-edit-page", page))
+        .child(menu(
+            Icon::PanelTop,
+            "pos.edit.head",
+            "pos-edit-head-items",
+            head,
+        ))
+        .child(menu(
+            Icon::PanelBottom,
+            "pos.strip.add",
+            "pos-add-strip",
+            vec![
+                Act::sub(Icon::ArrowUp, st.tn("pos.strip.add_top"), strip_acts(true)),
+                Act::sub(
+                    Icon::PanelBottom,
+                    st.tn("pos.strip.add_bottom"),
+                    strip_acts(false),
+                ),
+            ],
         ))
         .child(view().flex_1())
-        .child(
-            label(
-                st.t("pos.layouts.hint"),
-                ty::XS,
-                FontWeight::NORMAL,
-                Tone::Muted,
-            )
-            .max_w(px(260.0)),
-        )
         .child(
             button(
                 Variant::Secondary,
@@ -1336,6 +1673,12 @@ fn edit_bar(st: AppState, b: Board) -> View {
             )
             .test_id("pos-edit-save"),
         )
+        .child(view().w_full().child(label(
+            st.t("pos.layouts.hint"),
+            ty::XS,
+            FontWeight::NORMAL,
+            Tone::Muted,
+        )))
 }
 
 /// The layouts: the ready-made ones and the cashier's, which one shows,

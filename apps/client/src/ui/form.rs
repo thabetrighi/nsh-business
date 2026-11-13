@@ -296,13 +296,15 @@ pub fn is_required(test_id: &str) -> bool {
 
 /// A field's caption, with a red star when it must be filled.
 pub fn caption_row(caption: impl Fn() -> String + 'static, required: bool) -> View {
+    // A field without a caption (its placeholder says it) has no star.
+    let named = !untracked(&caption).is_empty();
     let mut row = view().flex_row().items_center().gap(px(3.0)).child(label(
         caption,
         ty::SM,
         FontWeight::SEMIBOLD,
         Tone::Ink,
     ));
-    if required {
+    if required && named {
         row = row.child(
             label(|| "*".to_owned(), ty::SM, FontWeight::BOLD, Tone::Danger)
                 .test_id("required-mark"),

@@ -36,8 +36,9 @@ fn first_error(st: AppState, e: &DbError) -> String {
 
 fn qty_text(st: AppState, milli: i64, unit: &str) -> String {
     format!(
-        "{} {unit}",
-        st.fmt().quantity(Quantity::from_milli(milli), 3)
+        "{} {}",
+        st.fmt().quantity(Quantity::from_milli(milli), 3),
+        crate::screens::common::unit_short(st, unit)
     )
 }
 

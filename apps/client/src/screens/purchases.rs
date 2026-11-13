@@ -2619,7 +2619,7 @@ fn purchase_detail(st: AppState, p: PurchaseRow, close: impl Fn() + Clone + 'sta
             let detail = format!(
                 "{} {} × {}",
                 st.fmt().quantity(Quantity::from_milli(b.qty_milli), 3),
-                b.unit,
+                crate::screens::common::unit_short(st, &b.unit),
                 money(st, b.unit_cost_minor)
             );
             let name = b.name.clone();

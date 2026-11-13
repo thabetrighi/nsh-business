@@ -207,6 +207,9 @@ pub struct Panel {
     /// Kept in the layout but not shown.
     #[serde(default)]
     pub hidden: bool,
+    /// Takes the column's height left by the others.
+    #[serde(default)]
+    pub fill: bool,
 }
 
 /// The colours a panel may take.
@@ -237,6 +240,7 @@ impl Panel {
             color: 0,
             align: 0,
             hidden: false,
+            fill: false,
         }
     }
 
@@ -383,6 +387,74 @@ pub struct Layout {
     /// The cart's lines in large type (touch screens, a customer display).
     #[serde(default)]
     pub big_lines: bool,
+    /// The app's bar at the top (search, alerts, the user) beside the till.
+    #[serde(default = "yes")]
+    pub navbar: bool,
+    /// The buttons beside the till's chip, in order (empty: the defaults).
+    #[serde(default)]
+    pub head_items: Vec<String>,
+    /// How they read: 0 icons (closing the till in words), 1 icons, 2
+    /// icons and words.
+    #[serde(default)]
+    pub head_labels: u8,
+    /// The space around the till, in points (none: the app's own).
+    #[serde(default)]
+    pub pad: Option<u8>,
+    /// Products' cards across (0: as many as fit).
+    #[serde(default)]
+    pub tile_cols: u8,
+}
+
+/// What the head of the till may show beside the till's chip, in order.
+pub const HEAD_ITEMS: [&str; 16] = [
+    "quick",
+    "held",
+    "sales",
+    "return",
+    "misc",
+    "discount",
+    "customer",
+    "hold",
+    "clear",
+    "prebill",
+    "layouts",
+    "edit",
+    "fullscreen",
+    "keys",
+    "theme",
+    "close",
+];
+
+/// What it shows unless chosen otherwise.
+pub const HEAD_DEFAULT: [&str; 10] = [
+    "quick",
+    "held",
+    "sales",
+    "return",
+    "misc",
+    "layouts",
+    "edit",
+    "fullscreen",
+    "keys",
+    "close",
+];
+
+/// The space around the till a layout may choose.
+pub const PADS: [u8; 6] = [0, 8, 12, 16, 24, 32];
+
+/// Cards' sizes, smallest first (the stored codes: 4 extra small, 0 small,
+/// 1 medium, 2 large, 3 extra large).
+pub const TILES: [u8; 5] = [4, 0, 1, 2, 3];
+
+/// Card sizes' names (by stored code).
+pub fn tile_key(tile: u8) -> &'static str {
+    match tile {
+        4 => "pos.tile.xs",
+        0 => "pos.tile.s",
+        2 => "pos.tile.l",
+        3 => "pos.tile.xl",
+        _ => "pos.tile.m",
+    }
 }
 
 fn medium() -> u8 {
@@ -393,6 +465,17 @@ fn yes() -> bool {
 }
 fn gap() -> u8 {
     14
+}
+
+/// Where a dragged panel may go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// Column, place before which it goes.
+    Col(usize, usize),
+    /// A column of its own, at this place.
+    NewColumn(usize),
+    /// Above (`true`) or below the columns, at this place.
+    Strip(bool, usize),
 }
 
 /// Where a panel is: a column and its place, or a strip.
@@ -424,6 +507,123 @@ impl Layout {
             bottom: Vec::new(),
             footer: None,
             sidebar: true,
+            navbar: true,
+            head_items: Vec::new(),
+            head_labels: 0,
+            pad: None,
+            tile_cols: 0,
+        }
+    }
+
+    /// The head's buttons, in order.
+    pub fn head_shown(&self) -> Vec<String> {
+        if self.head_items.is_empty() {
+            HEAD_DEFAULT.iter().map(|s| (*s).to_owned()).collect()
+        } else {
+            self.head_items
+                .iter()
+                .filter(|i| HEAD_ITEMS.contains(&i.as_str()))
+                .cloned()
+                .collect()
+        }
+    }
+
+    /// Shows a head button or not (back at its place among those shown).
+    pub fn toggle_head(&mut self, item: &str) {
+        let mut now = self.head_shown();
+        if let Some(at) = now.iter().position(|i| i == item) {
+            now.remove(at);
+        } else if HEAD_ITEMS.contains(&item) {
+            let rank = |x: &str| {
+                HEAD_ITEMS
+                    .iter()
+                    .position(|o| *o == x)
+                    .unwrap_or(usize::MAX)
+            };
+            let at = now
+                .iter()
+                .position(|i| rank(i) > rank(item))
+                .unwrap_or(now.len());
+            now.insert(at, item.to_owned());
+        }
+        // An empty list means the defaults: none at all is kept apart.
+        if now.is_empty() {
+            now.push("none".into());
+        }
+        self.head_items = now;
+    }
+
+    /// A head button one place earlier.
+    pub fn head_up(&mut self, item: &str) {
+        let mut now = self.head_shown();
+        if let Some(at) = now.iter().position(|i| i == item)
+            && at > 0
+        {
+            now.swap(at, at - 1);
+            self.head_items = now;
+        }
+    }
+
+    /// Takes the panel at `at` out (none if it is not there).
+    fn take(&mut self, at: Spot) -> Option<Panel> {
+        match at {
+            Spot::Col(c, i) => {
+                let col = self.columns.get_mut(c)?;
+                (i < col.panels.len()).then(|| col.panels.remove(i))
+            }
+            Spot::Top(i) => (i < self.top.len()).then(|| self.top.remove(i)),
+            Spot::Bottom(i) => (i < self.bottom.len()).then(|| self.bottom.remove(i)),
+        }
+    }
+
+    /// Moves a panel or a strip anywhere: into a column (before a panel),
+    /// a new column, or the strips above or below. What the layout cannot
+    /// hold (a list as a strip, too many) leaves it as it was.
+    pub fn move_to(&mut self, from: Spot, to: Place) -> bool {
+        let before = self.clone();
+        let Some(p) = self.take(from) else {
+            return false;
+        };
+        // Places after the one taken out move back by one.
+        let shift = |same: bool, i: usize, taken: usize| if same && i > taken { i - 1 } else { i };
+        match to {
+            Place::Col(c, i) => {
+                let i = match from {
+                    Spot::Col(fc, fi) => shift(fc == c, i, fi),
+                    _ => i,
+                };
+                match self.columns.get_mut(c) {
+                    Some(col) => col.panels.insert(i.min(col.panels.len()), p),
+                    None => {
+                        *self = before;
+                        return false;
+                    }
+                }
+            }
+            Place::NewColumn(at) => self.columns.insert(
+                at.min(self.columns.len()),
+                Column {
+                    width: 4,
+                    panels: vec![p],
+                },
+            ),
+            Place::Strip(top, i) => {
+                let i = match from {
+                    Spot::Top(fi) if top => shift(true, i, fi),
+                    Spot::Bottom(fi) if !top => shift(true, i, fi),
+                    _ => i,
+                };
+                let list = if top { &mut self.top } else { &mut self.bottom };
+                list.insert(i.min(list.len()), p);
+            }
+        }
+        // A column left empty goes; its new column's place counts it.
+        self.drop_empty();
+        if self.check() {
+            true
+        } else {
+            *self = before;
+            false
         }
     }
 
@@ -483,8 +683,11 @@ impl Layout {
             })
             && strips_ok
             && once
-            && self.tile <= 2
+            && self.tile <= 4
             && self.gap <= 32
+            && self.head_labels <= 2
+            && self.pad.is_none_or(|p| p <= 48)
+            && self.tile_cols <= 8
     }
 
     /// The widgets that may be added (not on the screen yet, or that may
@@ -494,6 +697,15 @@ impl Layout {
             .into_iter()
             .filter(|w| w.repeatable() || !self.panels().any(|p| p.widget == *w))
             .collect()
+    }
+
+    /// The panel at `at`.
+    pub fn panel(&self, at: Spot) -> Option<&Panel> {
+        match at {
+            Spot::Col(c, i) => self.columns.get(c).and_then(|c| c.panels.get(i)),
+            Spot::Top(i) => self.top.get(i),
+            Spot::Bottom(i) => self.bottom.get(i),
+        }
     }
 
     /// The panel at `at`.
@@ -589,29 +801,6 @@ impl Layout {
         }
         let target = &mut self.columns[to.0].panels;
         target.insert(at.min(target.len()), p);
-        self.drop_empty();
-        true
-    }
-
-    /// A panel into a new column at `at` (its own column).
-    pub fn split_off_column(&mut self, from: (usize, usize), at: usize) -> bool {
-        if self.columns.len() >= MAX_COLUMNS {
-            return false;
-        }
-        let Some(col) = self.columns.get_mut(from.0) else {
-            return false;
-        };
-        if from.1 >= col.panels.len() {
-            return false;
-        }
-        let p = col.panels.remove(from.1);
-        self.columns.insert(
-            at.min(self.columns.len()),
-            Column {
-                width: 4,
-                panels: vec![p],
-            },
-        );
         self.drop_empty();
         true
     }
@@ -1143,6 +1332,53 @@ mod tests {
     }
 
     #[test]
+    fn panels_and_strips_go_anywhere_the_head_is_chosen() {
+        let mut l = builtin().remove(0);
+        let cols = l.columns.len();
+        // A column's search above the columns, then below, then back.
+        let at = l.columns[0]
+            .panels
+            .iter()
+            .position(|p| p.widget == Widget::Search)
+            .unwrap_or(0);
+        assert!(l.move_to(Spot::Col(0, at), Place::Strip(true, 0)));
+        assert_eq!(l.top[0].widget, Widget::Search);
+        assert!(l.move_to(Spot::Top(0), Place::Strip(false, 0)));
+        assert_eq!(l.bottom[0].widget, Widget::Search);
+        assert!(l.move_to(Spot::Bottom(0), Place::Col(0, 0)));
+        assert_eq!(l.columns[0].panels[0].widget, Widget::Search);
+        assert_eq!(l.columns.len(), cols);
+        // A list cannot be a strip: nothing moves.
+        let before = l.clone();
+        let list = l.columns.iter().enumerate().find_map(|(c, col)| {
+            col.panels
+                .iter()
+                .position(|p| p.widget.grows())
+                .map(|i| (c, i))
+        });
+        if let Some((c, i)) = list {
+            assert!(!l.move_to(Spot::Col(c, i), Place::Strip(true, 0)));
+            assert_eq!(l, before);
+        }
+        // The head: the defaults, one hidden, one moved, none at all.
+        assert_eq!(l.head_shown().len(), HEAD_DEFAULT.len());
+        l.toggle_head("keys");
+        assert!(!l.head_shown().iter().any(|i| i == "keys"));
+        l.toggle_head("theme");
+        assert!(l.head_shown().iter().any(|i| i == "theme"));
+        l.head_up("sales");
+        assert_eq!(l.head_shown()[1], "sales");
+        for i in l.head_shown() {
+            l.toggle_head(&i);
+        }
+        assert!(l.head_shown().is_empty());
+        assert!(l.check());
+        let back: Layout = serde_json::from_str(&serde_json::to_string(&l).unwrap_or_default())
+            .unwrap_or_else(|_| builtin().remove(1));
+        assert_eq!(back, l);
+    }
+
+    #[test]
     fn panels_move_resize_and_the_till_keeps_its_cart() {
         let mut l = builtin().remove(0);
         // The categories (column 0, second) to the top of column 1.
@@ -1152,7 +1388,7 @@ mod tests {
         assert!(l.move_panel((1, 0), (1, 2)));
         assert_eq!(l.columns[1].panels[1].widget, Widget::Categories);
         // Its own column, then back: the emptied column goes.
-        assert!(l.split_off_column((1, 1), 2));
+        assert!(l.move_to(Spot::Col(1, 1), Place::NewColumn(2)));
         assert_eq!(l.columns.len(), 3);
         assert!(l.move_panel((2, 0), (0, 0)));
         assert_eq!(l.columns.len(), 2);
