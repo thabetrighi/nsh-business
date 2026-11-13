@@ -204,8 +204,8 @@ pub enum Call {
 {variants}
 }
 
-/// An operation as kept in the log.
-#[derive(Debug, Clone)]
+/// An operation as kept in the log (and sent to the server).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggedOp {
     pub id: nb_core::OperationId,
     pub kind: String,
@@ -213,7 +213,18 @@ pub struct LoggedOp {
     pub actor: Option<UserId>,
     /// When it ran (its rows' time).
     pub at: i64,
+    /// The device that ran it (its rows carry it, its numbers its prefix);
+    /// `None`: this replica's own device.
+    #[serde(default)]
+    pub device: Option<OpDevice>,
     pub call: Call,
+}
+
+/// The device an operation ran on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpDevice {
+    pub id: nb_core::DeviceId,
+    pub prefix: String,
 }
 
 /// The name of an operation kind as the `'static` text [`OpMeta`] holds

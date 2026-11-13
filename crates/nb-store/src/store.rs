@@ -181,8 +181,16 @@ impl Store {
     /// skipped (their stored result comes back).
     pub fn replay_log(&mut self, log: Vec<crate::ops::LoggedOp>) -> Result<()> {
         let real = self.clock.clone();
+        let own = self.device.clone();
         for op in log {
             self.clock = std::sync::Arc::new(nb_core::FixedClock::new(op.at));
+            self.device = match &op.device {
+                Some(d) => Device {
+                    id: d.id,
+                    prefix: d.prefix.clone(),
+                },
+                None => own.clone(),
+            };
             let meta = crate::OpMeta {
                 id: op.id,
                 kind: crate::ops::intern(&op.kind),
@@ -194,19 +202,69 @@ impl Store {
             });
             if let Err(e) = run {
                 self.clock = real;
+                self.device = own;
                 return Err(e);
             }
         }
         self.clock = real;
+        self.device = own;
         Ok(())
     }
 
     /// The operations recorded here with their calls, oldest first.
     pub fn operation_log(&self) -> Result<Vec<crate::ops::LoggedOp>> {
-        let mut st = self.conn.prepare(
-            "SELECT id, kind, org_id, actor_id, created_at, call FROM operations
-             WHERE call IS NOT NULL ORDER BY created_at, rowid",
+        self.logged("WHERE call IS NOT NULL ORDER BY created_at, rowid")
+    }
+
+    /// The operations not sent to the server yet, oldest first (at most
+    /// `limit`).
+    pub fn unpushed(&self, limit: u32) -> Result<Vec<crate::ops::LoggedOp>> {
+        self.logged(&format!(
+            "WHERE call IS NOT NULL AND pushed_at IS NULL ORDER BY created_at, rowid LIMIT {}",
+            limit.clamp(1, 10_000)
+        ))
+    }
+
+    /// How many operations wait to be sent.
+    pub fn unpushed_count(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM operations WHERE call IS NOT NULL AND pushed_at IS NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Notes that the server took these operations.
+    pub fn mark_pushed(&mut self, ids: &[nb_core::OperationId]) -> Result<()> {
+        let now = self.clock.now_ms();
+        let tx = self.conn.transaction()?;
+        for id in ids {
+            tx.execute(
+                "UPDATE operations SET pushed_at = ?2 WHERE id = ?1",
+                rusqlite::params![id.to_string(), now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Notes that everything up to now is on the server (it received the
+    /// whole database).
+    pub fn mark_all_pushed(&mut self) -> Result<()> {
+        let now = self.clock.now_ms();
+        self.conn.execute(
+            "UPDATE operations SET pushed_at = ?1 WHERE pushed_at IS NULL",
+            [now],
         )?;
+        Ok(())
+    }
+
+    fn logged(&self, tail: &str) -> Result<Vec<crate::ops::LoggedOp>> {
+        let own_prefix = self.device.prefix.clone();
+        let own_id = self.device.id.to_string();
+        let mut st = self.conn.prepare(&format!(
+            "SELECT id, kind, org_id, actor_id, created_at, call, device_id FROM operations {tail}"
+        ))?;
         let rows = st.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -215,11 +273,12 @@ impl Store {
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, i64>(4)?,
                 r.get::<_, String>(5)?,
+                r.get::<_, Option<String>>(6)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, kind, org, actor, at, call) = row?;
+            let (id, kind, org, actor, at, call, device) = row?;
             let bad = |what: &str| Error::Corrupt(format!("operation {id}: {what}"));
             out.push(crate::ops::LoggedOp {
                 id: id.parse().map_err(|_| bad("id"))?,
@@ -230,6 +289,14 @@ impl Store {
                     .transpose()
                     .map_err(|_| bad("actor"))?,
                 at,
+                // Operations of this device carry it (for the server).
+                device: match device {
+                    Some(d) if d == own_id => Some(crate::ops::OpDevice {
+                        id: d.parse().map_err(|_| bad("device"))?,
+                        prefix: own_prefix.clone(),
+                    }),
+                    _ => None,
+                },
                 call: serde_json::from_str(&call)?,
             });
         }
@@ -269,7 +336,8 @@ impl Store {
     pub fn fingerprints(&self) -> Result<Vec<(String, String)>> {
         use sha2::{Digest, Sha256};
         let mut out = Vec::new();
-        const LOCAL: [&str; 9] = [
+        const LOCAL: [&str; 10] = [
+            "sync_link",
             "device",
             "operations",
             "outbox_events",

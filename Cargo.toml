@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/nb-core", "crates/nb-i18n", "crates/nb-domain", "crates/nb-store", "crates/nb-docs", "apps/client"]
+members = ["crates/nb-core", "crates/nb-i18n", "crates/nb-domain", "crates/nb-store", "crates/nb-docs", "crates/nb-server", "apps/client"]
 exclude = ["spikes"]
 
 [workspace.package]

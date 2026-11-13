@@ -16,6 +16,7 @@ pub mod ops;
 pub mod repo;
 pub mod secret;
 pub mod store;
+pub mod sync;
 pub mod time;
 pub mod uow;
 pub mod usecases;

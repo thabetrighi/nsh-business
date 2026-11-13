@@ -283,6 +283,8 @@ pub struct AppState {
     pub open_sections: Signal<u32>,
     /// The settings page's open tab.
     pub settings_tab: Signal<usize>,
+    /// Sync with the server (M11): linked, waiting, last exchange.
+    pub sync: Signal<crate::sync::SyncView>,
     /// The confirmation shown at the bottom of the screen (`ui::overlay::show_toast`).
     pub toast: Signal<Option<String>>,
     /// The command palette is open.
@@ -342,6 +344,7 @@ impl AppState {
             route: signal(Route::Home),
             open_sections: signal(0),
             settings_tab: signal(0),
+            sync: signal(crate::sync::SyncView::default()),
             toast: signal(None),
             palette: signal(false),
             shortcuts: signal(false),

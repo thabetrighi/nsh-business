@@ -170,6 +170,8 @@ icons! {
     Flag => "flag",
     Route => "route",
     Locate => "locate-fixed",
+    Link => "link",
+    Unlink => "unlink",
 }
 
 /// An icon `size` points square, stroked in `tone`.

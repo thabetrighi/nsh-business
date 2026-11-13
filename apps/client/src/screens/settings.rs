@@ -1064,61 +1064,7 @@ fn devices(st: AppState, compact: bool) -> View {
 }
 
 fn sync(st: AppState, compact: bool) -> View {
-    let stat = move |key: &'static str, value: Box<dyn Fn() -> String>| {
-        view()
-            .flex_1()
-            .min_w(px(150.0))
-            .gap(px(4.0))
-            .child(label(st.t(key), ty::XS, FontWeight::MEDIUM, Tone::Muted))
-            .child(label(value, ty::MD, FontWeight::SEMIBOLD, Tone::Ink))
-    };
-    let status = card()
-        .child(card_header_icon(
-            Some(Icon::CloudUpload),
-            st.t("sync.status"),
-            Some(Box::new(st.t("sync.local_first"))),
-            view().child(badge(
-                Status::Warning,
-                Some(Icon::Offline),
-                st.t("sync.offline"),
-            )),
-        ))
-        .child(divider())
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .gap(px(20.0))
-                .p(px(20.0))
-                .child(stat(
-                    "sync.pending_ops",
-                    Box::new(move || st.fmt().integer(0)),
-                ))
-                .child(stat("sync.last", Box::new(st.t("sync.never"))))
-                .child(stat(
-                    "sync.device",
-                    Box::new(|| "Linux · NB-7F3A".to_owned()),
-                )),
-        )
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .gap(px(8.0))
-                .justify_end()
-                .px(px(20.0))
-                .py(px(14.0))
-                .bg(Tone::Subtle.color())
-                .border_t_1()
-                .border_color(Tone::Border.color())
-                .child(button(
-                    Variant::Primary,
-                    Size::Md,
-                    Some(Icon::Refresh),
-                    st.t("action.sync_now"),
-                    || {},
-                )),
-        );
+    let status = crate::screens::cloud::cloud_card(st, compact);
     let mut v = view().gap(px(20.0)).child(status);
     #[cfg(not(target_arch = "wasm32"))]
     {

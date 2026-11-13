@@ -1,0 +1,69 @@
+name: server
+
+# Builds the sync server (nb-server, ADR-0006) for Linux and Windows and
+# publishes both as the "server-latest" pre-release: one binary each, no
+# installation (see docs/SERVER.md).
+
+on:
+  push:
+    branches: [main]
+    paths: ["crates/**", "Cargo.toml", "Cargo.lock", ".github/workflows/server.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: server
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            file: nb-server
+            asset: nb-server-linux-x86_64
+          - os: windows-latest
+            file: nb-server.exe
+            asset: nb-server-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        shell: bash
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server
+      - name: Test
+        shell: bash
+        run: cargo test -p nb-server
+      - name: Build
+        shell: bash
+        run: |
+          cargo build --release -p nb-server
+          cp target/release/${{ matrix.file }} ${{ matrix.asset }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish server-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete server-latest -y --cleanup-tag 2>/dev/null || true
+          gh release create server-latest dist/* --prerelease \
+            --title "NSH Business — خادم المزامنة" \
+            --notes "خادم المزامنة (ADR-0006) لـ Linux وWindows. طريقة التشغيل في docs/SERVER.md. Commit ${GITHUB_SHA::7}."

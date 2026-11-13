@@ -18,6 +18,7 @@ mod screens;
 mod sheets;
 mod shell;
 mod state;
+mod sync;
 mod topbar;
 mod ui;
 
@@ -77,6 +78,11 @@ pub fn App() -> impl IntoElement {
     // A device kept for showing prices opens on them.
     if crate::state::stored_flag(crate::screens::price_check::AT_START) {
         st.route.set(nav::Route::PriceCheck);
+    }
+    // NB_OPEN=sync: settings › sync (screenshots).
+    if env("NB_OPEN").as_deref() == Some("sync") {
+        st.route.set(nav::Route::Settings);
+        st.settings_tab.set(8);
     }
     // NB_OPEN=printing: settings › printing (screenshots).
     if env("NB_OPEN").as_deref() == Some("printing") {
@@ -138,6 +144,9 @@ pub fn App() -> impl IntoElement {
         let every = set_interval(std::time::Duration::from_secs(600), check);
         drop(every); // runs while the root lives
     }
+
+    // Sync with the server (M11/M1), from the root as well.
+    sync::start(st);
 
     let look = computed(move || st.prefs.look());
     view()

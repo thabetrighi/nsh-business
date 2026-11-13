@@ -8,6 +8,14 @@
   "theme": "theme.json",
   "appearance": "system",
   "capabilities": {
+    "network": {
+      "hosts": [
+        "*"
+      ]
+    },
+    "statusBar": true,
+    "clipboard": true,
+    "picker": true,
     "openUrl": {
       "schemes": [
         "https",

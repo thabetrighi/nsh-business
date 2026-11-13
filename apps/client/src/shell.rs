@@ -721,13 +721,11 @@ fn sync_status(st: AppState) -> View {
                     .into_element()
             },
         ))
-        .label({
-            let f = st.t("sync.offline");
-            move || SharedString::from(f())
-        })
+        .label(move || SharedString::from(st.tn(sync_state(st).2)))
         // Its words may go (the person's choice): the icon stays, its name
         // in the tooltip; a press switches.
         .child(dynamic(move || {
+            let (status, which, key) = sync_state(st);
             let v = if st.biz.status_icon_only.get() {
                 view()
                     .w(px(30.0))
@@ -735,20 +733,33 @@ fn sync_status(st: AppState) -> View {
                     .rounded_full()
                     .items_center()
                     .justify_center()
-                    .bg(Tone::WarningSoft.color())
-                    .child(icon(Icon::Offline, 15.0, || Tone::Warning))
+                    .bg(status.bg().color())
+                    .child(icon(which, 15.0, move || status.fg()))
             } else {
-                view().child(badge(
-                    Status::Warning,
-                    Some(Icon::Offline),
-                    st.t("sync.offline"),
-                ))
+                view().child(badge(status, Some(which), st.t(key)))
             };
             v.test_id("sync-status")
                 .cursor_pointer()
                 .on_press(move || st.biz.status_icon_only.update(|v| *v = !*v))
                 .into_element()
         }))
+}
+
+/// What the sync pill says: only on this device (no server), sending,
+/// failing, waiting, or in step with the server.
+fn sync_state(st: AppState) -> (Status, Icon, &'static str) {
+    let v = st.sync.get();
+    if !v.linked {
+        (Status::Warning, Icon::Offline, "sync.offline")
+    } else if v.busy {
+        (Status::Info, Icon::Refresh, "sync.busy")
+    } else if !v.error.is_empty() {
+        (Status::Danger, Icon::Alert, "sync.failing")
+    } else if v.pending > 0 {
+        (Status::Warning, Icon::CloudUpload, "sync.waiting")
+    } else {
+        (Status::Success, Icon::Synced, "sync.synced")
+    }
 }
 
 // ---------------------------------------------------------------- phone
