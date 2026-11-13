@@ -1,6 +1,7 @@
 //! The NSH Business design system (DESIGN.md v2): tokens, icons, components.
 
 pub mod chart;
+pub mod filters;
 pub mod form;
 pub mod icon;
 pub mod kit;

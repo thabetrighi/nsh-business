@@ -160,7 +160,7 @@ pub fn list_suppliers(
         ))?;
         let rows = s
             .query_map(
-                params![org.to_string(), search, owed, limit.clamp(1, 500), offset],
+                params![org.to_string(), search, owed, limit.clamp(1, 100_000), offset],
                 supplier_of,
             )?
             .collect::<std::result::Result<_, _>>()?;

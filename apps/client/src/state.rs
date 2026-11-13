@@ -29,6 +29,10 @@ pub enum Intent {
     Reopen(String),
     /// The products of this category (its id).
     ProductsIn(String),
+    /// Edit this product (its id) in the catalog.
+    EditProduct(String),
+    /// The stock movements of this product (id, name).
+    MovementsOf(String, String),
 }
 
 /// Light, dark, or as the system.

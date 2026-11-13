@@ -6,7 +6,7 @@
 //! browser).
 
 use nb_docs::templates::{Line, Options, Sale, ShelfLabel, Shop, apply, label_data, sale_data};
-use nb_docs::{Doc, OPEN_DRAWER, Paper, escpos_with, pdf, preview};
+use nb_docs::{Doc, LabelSheet, OPEN_DRAWER, Paper, escpos_with, label_sheet_pdf, pdf, preview};
 use nb_domain::template::{DocKind, Template, builtin};
 use nb_i18n::{Lang, tr_args};
 use nb_store::usecases::printing::{
@@ -920,6 +920,7 @@ pub struct LabelItem {
     pub price_minor: i64,
     pub unit: String,
     pub barcode: Option<String>,
+    pub sku: String,
 }
 
 fn shelf(st: AppState, item: &LabelItem) -> ShelfLabel {
@@ -929,40 +930,267 @@ fn shelf(st: AppState, item: &LabelItem) -> ShelfLabel {
         unit: item.unit.clone(),
         currency: currency(st),
         barcode: item.barcode.clone(),
-        sku: String::new(),
+        sku: item.sku.clone(),
     }
 }
 
-/// The label dialog of a product: which printer, how many, the preview.
+/// Single labels (label printers, or a PDF cut to size): width × height.
+pub const SINGLES: [(u16, u16); 16] = [
+    (25, 15),
+    (30, 20),
+    (32, 25),
+    (38, 25),
+    (40, 20),
+    (40, 30),
+    (50, 25),
+    (50, 30),
+    (57, 32),
+    (58, 40),
+    (60, 40),
+    (70, 50),
+    (100, 50),
+    (100, 70),
+    (100, 100),
+    (100, 150),
+];
+
+/// A4 sheets of labels (office printers): the common Avery/Tico layouts.
+pub fn sheets() -> [LabelSheet; 8] {
+    let s = |cols, rows, w_mm, h_mm, top_mm, left_mm, gap_x_mm| LabelSheet {
+        cols,
+        rows,
+        w_mm,
+        h_mm,
+        top_mm,
+        left_mm,
+        gap_x_mm,
+        gap_y_mm: 0.0,
+    };
+    [
+        s(2, 4, 105.0, 74.25, 0.0, 0.0, 0.0),
+        s(2, 7, 99.1, 38.1, 15.15, 4.65, 2.5),
+        s(3, 7, 63.5, 38.1, 15.15, 7.2, 2.5),
+        s(3, 8, 70.0, 37.0, 0.5, 0.0, 0.0),
+        s(3, 10, 70.0, 29.7, 0.0, 0.0, 0.0),
+        s(4, 10, 52.5, 29.7, 0.0, 0.0, 0.0),
+        s(4, 16, 48.5, 16.9, 13.0, 8.0, 0.0),
+        s(5, 13, 38.1, 21.2, 10.7, 4.75, 2.5),
+    ]
+}
+
+/// The label stock chosen: a single label, a sheet, or a size typed in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Stock {
+    Single(u16, u16),
+    Sheet(LabelSheet),
+}
+
+/// The choice "a size of my own" (after the singles and the sheets).
+pub const CUSTOM_STOCK: usize = SINGLES.len() + 8;
+
+/// The stock at `at` in the list (custom: the typed size).
+pub fn stock_at(at: usize, custom: (u16, u16)) -> Stock {
+    if let Some(&(w, h)) = SINGLES.get(at) {
+        return Stock::Single(w, h);
+    }
+    match sheets().get(at.wrapping_sub(SINGLES.len())) {
+        Some(sh) => Stock::Sheet(*sh),
+        None => Stock::Single(custom.0.clamp(15, 150), custom.1.clamp(10, 200)),
+    }
+}
+
+/// The paper one label is drawn on.
+pub fn stock_paper(stock: Stock) -> Paper {
+    match stock {
+        Stock::Single(w_mm, h_mm) => Paper::Label { w_mm, h_mm },
+        Stock::Sheet(sh) => Paper::Label {
+            w_mm: sh.w_mm as u16,
+            h_mm: sh.h_mm as u16,
+        },
+    }
+}
+
+fn mm(v: f32) -> String {
+    if v.fract().abs() < 0.01 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+/// What a label shows (each can be left out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shown {
+    pub name: bool,
+    pub price: bool,
+    pub barcode: bool,
+    pub sku: bool,
+    pub shop: bool,
+}
+
+/// The shop's label layout with only what is wanted: the parts left out
+/// removed, the code and the shop's name added if wanted and missing.
+pub fn label_template(t: &Template, shown: Shown) -> Template {
+    use nb_domain::template::{Align, Section};
+    let mut t = t.clone();
+    let uses = |t: &Template, var: &str| {
+        t.sections.iter().any(|s| match s {
+            Section::Text { text, .. } => text.contains(var),
+            Section::Barcode { value } => value.contains(var),
+            _ => false,
+        })
+    };
+    let gone = |text: &str| {
+        (!shown.name && text.contains("{item.name}"))
+            || (!shown.price && text.contains("{item.price}"))
+            || (!shown.barcode && text.contains("{item.barcode}"))
+            || (!shown.sku && text.contains("{item.sku}"))
+            || (!shown.shop && text.contains("{shop.name}"))
+    };
+    t.sections.retain(|s| match s {
+        Section::Text { text, .. } => !gone(text),
+        Section::Barcode { value } => !gone(value),
+        _ => true,
+    });
+    if shown.shop && !uses(&t, "{shop.name}") {
+        t.sections.insert(
+            0,
+            Section::Text {
+                text: "{shop.name}".into(),
+                align: Align::Center,
+                size: -1,
+                bold: false,
+            },
+        );
+    }
+    if shown.sku && !uses(&t, "{item.sku}") {
+        t.sections.push(Section::Text {
+            text: "{item.sku}".into(),
+            align: Align::Center,
+            size: -2,
+            bold: false,
+        });
+    }
+    t
+}
+
+/// The places of a started sheet already used.
+fn skipped(text: &str) -> usize {
+    text.trim().parse::<usize>().unwrap_or(0).min(200)
+}
+
+fn labels_of(text: &str) -> usize {
+    text.trim().parse::<usize>().unwrap_or(1).clamp(1, 999)
+}
+
+/// Saves the bytes `make` gives as a PDF the person names.
+fn save_bytes(
+    st: AppState,
+    name: String,
+    make: impl FnOnce() -> Result<Vec<u8>, String> + Send + 'static,
+    busy: Signal<bool>,
+) {
+    if busy.get_untracked() {
+        return;
+    }
+    busy.set(true);
+    let task = spawn(async move {
+        let dialog = nsh_core::file_dialog::SaveDialog::new()
+            .file_name(name)
+            .title(st.tn("print.save_pdf"));
+        let ok = match pick_save_path(dialog).await {
+            Ok(Some(path)) => off_thread(move || {
+                make().and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()))
+            })
+            .await
+            .map(|r| r.is_ok()),
+            Ok(None) => None,
+            Err(_) => Some(false),
+        };
+        busy.set(false);
+        match ok {
+            Some(true) => show_toast(st, st.tn("print.saved")),
+            Some(false) => show_toast(st, st.tn("print.failed")),
+            None => {}
+        }
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
+}
+
+/// A PDF (a sheet of labels) sent to an office printer.
+fn send_pdf(printer: &Printer, bytes: &[u8]) -> Result<(), String> {
+    match &printer.link {
+        Link::System { queue } => send::system(queue, bytes, 1),
+        Link::Network { addr } => send::network(addr, bytes).map_err(|e| e.to_string()),
+        Link::Device { path } => send::device(path, bytes).map_err(|e| e.to_string()),
+    }
+}
+
+/// The label dialog of a product: which printer, which labels (a roll's
+/// size, an A4 sheet, a size of one's own), how many, what they show, the
+/// preview.
 pub fn label_dialog(st: AppState, item: LabelItem, close: impl Fn() + Clone + 'static) -> View {
+    use crate::state::{persisted_flag, persisted_index, persisted_text};
+    use crate::ui::kit::checkbox;
     let chosen = signal(default_printer(st, Role::Label));
     let busy = signal(false);
     let count = signal("1".to_owned());
-    let size = signal(0usize); // a PDF alone: 0 = 40×30, 1 = 50×30, 2 = 58×40
+    let skip = signal("0".to_owned());
+    // The last stock and contents chosen are kept on the device.
+    let at = persisted_index("nb.label.stock", 5);
+    let custom_w = persisted_text("nb.label.custom_w");
+    let custom_h = persisted_text("nb.label.custom_h");
+    let show_name = persisted_flag("nb.label.name", true);
+    let show_price = persisted_flag("nb.label.price", true);
+    let show_barcode = persisted_flag("nb.label.barcode", true);
+    let show_sku = persisted_flag("nb.label.sku", false);
+    let show_shop = persisted_flag("nb.label.shop", false);
+    let shown = move || Shown {
+        name: show_name.get(),
+        price: show_price.get(),
+        barcode: show_barcode.get(),
+        sku: show_sku.get(),
+        shop: show_shop.get(),
+    };
     let printer = move || st.biz.printers.get().get(chosen.get()).cloned();
     let lang = st.lang();
-    let shop = String::new();
-    let paper = move || match printer().map(|p| p.sheet) {
-        Some(Sheet::Label { w_mm, h_mm, .. }) => Paper::Label { w_mm, h_mm },
-        Some(Sheet::Roll { print_mm, .. }) => Paper::Label {
-            w_mm: print_mm,
-            h_mm: 30,
-        },
-        _ => match size.get() {
-            1 => Paper::Label { w_mm: 50, h_mm: 30 },
-            2 => Paper::Label { w_mm: 58, h_mm: 40 },
-            _ => Paper::Label { w_mm: 40, h_mm: 30 },
-        },
+    let custom = move || {
+        let n = |s: Signal<String>, d| s.get().trim().parse::<u16>().unwrap_or(d);
+        (n(custom_w, 50), n(custom_h, 30))
+    };
+    // A label printer fixes the size; otherwise the stock chosen.
+    let stock = move || match printer().map(|p| p.sheet) {
+        Some(Sheet::Label { w_mm, h_mm, .. }) => Stock::Single(w_mm, h_mm),
+        Some(Sheet::Roll { print_mm, .. }) => Stock::Single(print_mm, 30),
+        _ => stock_at(at.get(), custom()),
+    };
+    let fixed = move || {
+        matches!(
+            printer().map(|p| p.sheet),
+            Some(Sheet::Label { .. } | Sheet::Roll { .. })
+        )
     };
     let label_doc = move |t: &Template, l: &ShelfLabel, paper: Paper, shop: &str| {
         let d = label_data(l, lang, (!shop.is_empty()).then_some(shop));
         draw(t, &Options::default(), &d, lang, paper)
     };
-    // The shop's label layout, once read (the built-in one until then).
+    // The shop's label layout and name, once read (the built-in one until
+    // then).
     let tpl = signal(builtin(DocKind::Label).remove(0).1);
+    let shop = signal(String::new());
     let task = spawn(async move {
-        if let Ok(t) = st.db().call(|s| Ok(layout(s, DocKind::Label))).await {
+        if let Ok((t, name)) = st
+            .db()
+            .call(|s| {
+                Ok((
+                    layout(s, DocKind::Label),
+                    print_shop(s).map(|p| p.name).unwrap_or_default(),
+                ))
+            })
+            .await
+        {
             tpl.set(t);
+            shop.set(name);
         }
     });
     drop(task); // runs to completion: tasks end with their owner, not their handle
@@ -970,21 +1198,79 @@ pub fn label_dialog(st: AppState, item: LabelItem, close: impl Fn() + Clone + 's
     let picture = resource(
         {
             let l = l.clone();
-            move || Some((l.clone(), paper(), tpl.get()))
-        },
-        {
-            let shop = shop.clone();
-            move |(l, paper, t), _| {
-                let shop = shop.clone();
-                async move {
-                    off_thread(move || preview(&label_doc(&t, &l, paper, &shop)).map_err(|e| e.0))
-                        .await
-                        .unwrap_or_else(|| Err(String::new()))
-                }
+            move || {
+                Some((
+                    l.clone(),
+                    stock_paper(stock()),
+                    label_template(&tpl.get(), shown()),
+                    shop.get(),
+                ))
             }
         },
+        move |(l, paper, t, shop), _| async move {
+            off_thread(move || preview(&label_doc(&t, &l, paper, &shop)).map_err(|e| e.0))
+                .await
+                .unwrap_or_else(|| Err(String::new()))
+        },
     );
-    let shown = dynamic(move || picture_view(st, picture.get(), None));
+    let size_choices = move || {
+        let mut v: Vec<(usize, String)> = SINGLES
+            .iter()
+            .enumerate()
+            .map(|(i, (w, h))| (i, format!("{w} × {h} mm")))
+            .collect();
+        for (i, sh) in sheets().iter().enumerate() {
+            v.push((
+                SINGLES.len() + i,
+                format!(
+                    "A4 · {} × {} — {} × {} mm",
+                    sh.cols,
+                    sh.rows,
+                    mm(sh.w_mm),
+                    mm(sh.h_mm)
+                ),
+            ));
+        }
+        v.push((CUSTOM_STOCK, st.tn("print.label_custom")));
+        v
+    };
+    let is_sheet = move || matches!(stock(), Stock::Sheet(_));
+    let tick = move |key: &'static str, on: Signal<bool>, id: &'static str| {
+        view()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .test_id(id)
+            .on_press(move || on.update(|v| *v = !*v))
+            .child(checkbox(
+                move || Some(on.get()),
+                move || on.update(|v| *v = !*v),
+            ))
+            .child(label(st.t(key), ty::SM, FontWeight::NORMAL, Tone::Ink))
+    };
+    let summary = move || match stock() {
+        Stock::Sheet(sh) => {
+            let used = skipped(&skip.get()).min(sh.per_page() - 1);
+            let n = labels_of(&count.get()) + used - 1;
+            tr_args(
+                st.lang(),
+                "print.label_sheets",
+                &[
+                    ("per", &sh.per_page().to_string()),
+                    ("pages", &(n / sh.per_page() + 1).to_string()),
+                ],
+            )
+        }
+        Stock::Single(w, h) => tr_args(
+            st.lang(),
+            "print.label_single",
+            &[(
+                "size",
+                &nb_i18n::bidi::isolate_ltr(&format!("{w} × {h} mm")),
+            )],
+        ),
+    };
     let body = view()
         .gap(px(16.0))
         .child(
@@ -994,7 +1280,7 @@ pub fn label_dialog(st: AppState, item: LabelItem, close: impl Fn() + Clone + 's
                 .items_end()
                 .gap(px(12.0))
                 .child(
-                    view().min_w(px(200.0)).child(labelled(
+                    view().min_w(px(200.0)).flex_1().child(labelled(
                         st.t("print.printer_used"),
                         dropdown(
                             move || printer_choices(st),
@@ -1007,7 +1293,69 @@ pub fn label_dialog(st: AppState, item: LabelItem, close: impl Fn() + Clone + 's
                         None,
                     )),
                 )
-                .child(view().w(px(90.0)).child(field(
+                .child(view().min_w(px(220.0)).flex_1().child(dynamic(move || {
+                    if fixed() {
+                        let Stock::Single(w, h) = stock() else {
+                            return view().into_element();
+                        };
+                        return labelled(
+                            st.t("print.paper"),
+                            view().h(px(36.0)).justify_center().child(label(
+                                move || format!("{w} × {h} mm"),
+                                ty::SM,
+                                FontWeight::MEDIUM,
+                                Tone::Body,
+                            )),
+                            Some(Box::new(st.t("print.label_from_printer"))),
+                        )
+                        .into_element();
+                    }
+                    labelled(
+                        st.t("print.paper"),
+                        dropdown(
+                            size_choices,
+                            at,
+                            Some(Icon::Tag),
+                            st.t("print.paper"),
+                            "label-size",
+                        )
+                        .w_full(),
+                        None,
+                    )
+                    .into_element()
+                }))),
+        )
+        .child(when(
+            move || !fixed() && at.get() == CUSTOM_STOCK,
+            move || {
+                view()
+                    .flex_row()
+                    .gap(px(12.0))
+                    .child(view().w(px(110.0)).child(field(
+                        st.t("printers.label_w"),
+                        custom_w,
+                        || "50".to_owned(),
+                        String::new,
+                        KeyboardType::Number,
+                        "label-custom-w",
+                    )))
+                    .child(view().w(px(110.0)).child(field(
+                        st.t("printers.label_h"),
+                        custom_h,
+                        || "30".to_owned(),
+                        String::new,
+                        KeyboardType::Number,
+                        "label-custom-h",
+                    )))
+            },
+        ))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_end()
+                .gap(px(12.0))
+                .child(view().w(px(110.0)).child(field(
                     st.t("print.labels"),
                     count,
                     || "1".to_owned(),
@@ -1015,34 +1363,74 @@ pub fn label_dialog(st: AppState, item: LabelItem, close: impl Fn() + Clone + 's
                     KeyboardType::Number,
                     "label-count",
                 )))
-                .child(when(
-                    move || printer().is_none(),
-                    move || {
-                        let sizes: Vec<(usize, Box<dyn Fn() -> String>)> = vec![
-                            (0, Box::new(|| "40 × 30".to_owned())),
-                            (1, Box::new(|| "50 × 30".to_owned())),
-                            (2, Box::new(|| "58 × 40".to_owned())),
-                        ];
-                        labelled(st.t("print.paper"), segmented(sizes, size), None)
-                    },
-                )),
+                .child(when(is_sheet, move || {
+                    view().w(px(150.0)).child(field(
+                        st.t("print.label_skip"),
+                        skip,
+                        || "0".to_owned(),
+                        String::new,
+                        KeyboardType::Number,
+                        "label-skip",
+                    ))
+                })),
         )
-        .child(shown);
-    let on_pdf = {
-        let (l, shop) = (l.clone(), shop.clone());
-        let name = format!("{}.pdf", item.name.replace(['/', '\\'], "-"));
+        .child(labelled(
+            st.t("print.label_shows"),
+            view()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(16.0))
+                .child(tick("print.show_name", show_name, "label-show-name"))
+                .child(tick("print.show_price", show_price, "label-show-price"))
+                .child(tick(
+                    "print.show_barcode",
+                    show_barcode,
+                    "label-show-barcode",
+                ))
+                .child(tick("print.show_sku", show_sku, "label-show-sku"))
+                .child(tick("print.show_shop", show_shop, "label-show-shop")),
+            None,
+        ))
+        .child(
+            view()
+                .gap(px(8.0))
+                .child(
+                    label(summary, ty::SM, FontWeight::MEDIUM, Tone::Muted)
+                        .test_id("label-summary"),
+                )
+                .child(dynamic(move || picture_view(st, picture.get(), None))),
+        );
+    // The labels as a PDF: one label a page, or the sheets.
+    let make = {
+        let l = l.clone();
         move || {
-            let (l, paper, shop, t) = (l.clone(), paper(), shop.clone(), tpl.get_untracked());
-            save_pdf(
-                st,
-                name.clone(),
-                move || label_doc(&t, &l, paper, &shop),
-                busy,
+            let (l, stock, t, shop) = (
+                l.clone(),
+                stock(),
+                label_template(&tpl.get_untracked(), shown()),
+                shop.get_untracked(),
             );
+            let (n, skip) = (
+                labels_of(&count.get_untracked()),
+                skipped(&skip.get_untracked()),
+            );
+            move || -> Result<Vec<u8>, String> {
+                let doc = label_doc(&t, &l, stock_paper(stock), &shop);
+                match stock {
+                    Stock::Sheet(sh) => label_sheet_pdf(&doc, sh, n, skip).map_err(|e| e.0),
+                    Stock::Single(..) => pdf(&doc).map_err(|e| e.0),
+                }
+            }
         }
+    };
+    let on_pdf = {
+        let make = make.clone();
+        let name = format!("{}.pdf", item.name.replace(['/', '\\'], "-"));
+        move || save_bytes(st, name.clone(), make(), busy)
     };
     let print_now = {
         let close = close.clone();
+        let l = l.clone();
         move || {
             let Some(pr) = printer() else {
                 return;
@@ -1051,19 +1439,32 @@ pub fn label_dialog(st: AppState, item: LabelItem, close: impl Fn() + Clone + 's
                 return;
             }
             busy.set(true);
+            let sheet_bytes = is_sheet().then(|| make());
             let (l, paper, n, shop, t) = (
                 l.clone(),
-                paper(),
-                copies_of(&count.get_untracked()),
-                shop.clone(),
-                tpl.get_untracked(),
+                stock_paper(stock()),
+                labels_of(&count.get_untracked()),
+                shop.get_untracked(),
+                label_template(&tpl.get_untracked(), shown()),
             );
             let close = close.clone();
             let task = spawn(async move {
-                let r =
-                    off_thread(move || print_on(&pr, &label_doc(&t, &l, paper, &shop), n, false))
-                        .await
-                        .unwrap_or_else(|| Err(String::new()));
+                let r = off_thread(move || match sheet_bytes {
+                    Some(make) => make().and_then(|b| send_pdf(&pr, &b)),
+                    None => {
+                        // At most 200 a job (copies are a byte).
+                        let doc = label_doc(&t, &l, paper, &shop);
+                        let mut left = n;
+                        while left > 0 {
+                            let k = left.min(200);
+                            print_on(&pr, &doc, k as u8, false)?;
+                            left -= k;
+                        }
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap_or_else(|| Err(String::new()));
                 busy.set(false);
                 if r.is_ok() {
                     show_toast(st, st.tn("print.sent"));
@@ -1160,6 +1561,45 @@ mod tests {
             receipt_t: builtin(DocKind::Receipt).remove(0).1,
             invoice_t: builtin(DocKind::Invoice).remove(0).1,
         }
+    }
+
+    #[test]
+    fn label_stocks_and_contents() {
+        assert_eq!(stock_at(5, (0, 0)), Stock::Single(40, 30));
+        assert!(
+            matches!(stock_at(SINGLES.len() + 2, (0, 0)), Stock::Sheet(s) if s.per_page() == 21)
+        );
+        // A size of one's own, kept within what prints.
+        assert_eq!(stock_at(CUSTOM_STOCK, (500, 5)), Stock::Single(150, 10));
+        // Every sheet fits on A4.
+        for sh in sheets() {
+            let w =
+                sh.left_mm + f32::from(sh.cols) * sh.w_mm + f32::from(sh.cols - 1) * sh.gap_x_mm;
+            let h = sh.top_mm + f32::from(sh.rows) * sh.h_mm + f32::from(sh.rows - 1) * sh.gap_y_mm;
+            assert!(w <= 210.1 && h <= 297.1, "{sh:?}");
+        }
+        let t = builtin(DocKind::Label).remove(0).1;
+        let all = Shown {
+            name: true,
+            price: true,
+            barcode: true,
+            sku: true,
+            shop: true,
+        };
+        let full = label_template(&t, all);
+        assert_eq!(full.sections.len(), t.sections.len() + 2);
+        let bare = label_template(
+            &t,
+            Shown {
+                barcode: false,
+                sku: false,
+                shop: false,
+                ..all
+            },
+        );
+        assert_eq!(bare.sections.len(), t.sections.len() - 1);
+        assert_eq!(skipped("x"), 0);
+        assert_eq!(labels_of("5000"), 999);
     }
 
     fn network_printer(addr: String) -> Printer {

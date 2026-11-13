@@ -245,6 +245,46 @@ fn a_shelf_label_prints_as_tspl() -> Result<(), nb_docs::DocError> {
     Ok(())
 }
 
+/// Labels on A4 sheets (office printer): as many pages as the copies
+/// need, the used places of a started sheet skipped.
+#[test]
+fn labels_fill_a4_sheets() -> Result<(), nb_docs::DocError> {
+    use nb_docs::templates::{ShelfLabel, shelf_label};
+    use nb_docs::{LabelSheet, label_sheet_pdf};
+    let l = ShelfLabel {
+        name: "Café moulu 250 g".into(),
+        price_minor: 45_000,
+        unit: String::new(),
+        currency: Currency::DZD,
+        barcode: Some("6130001000017".into()),
+        sku: "CAF-250".into(),
+    };
+    let doc = shelf_label(&l, Lang::Fr, Paper::Label { w_mm: 63, h_mm: 38 }, None);
+    let sheet = LabelSheet {
+        cols: 3,
+        rows: 7,
+        w_mm: 63.5,
+        h_mm: 38.1,
+        top_mm: 15.15,
+        left_mm: 7.2,
+        gap_x_mm: 2.5,
+        gap_y_mm: 0.0,
+    };
+    assert_eq!(sheet.per_page(), 21);
+    let pages = |b: &[u8]| {
+        b.windows(11)
+            .filter(|w| w == b"/Type /Page" || w == b"/Type/Page/")
+            .count()
+    };
+    let one = label_sheet_pdf(&doc, sheet, 21, 0)?;
+    assert!(one.starts_with(b"%PDF"));
+    let two = label_sheet_pdf(&doc, sheet, 21, 1)?;
+    assert!(pages(&two) > pages(&one), "{} {}", pages(&one), pages(&two));
+    // An empty sheet cannot hold anything.
+    assert!(label_sheet_pdf(&doc, LabelSheet { cols: 0, ..sheet }, 1, 0).is_err());
+    Ok(())
+}
+
 /// A receipt voucher and an instalment schedule, on a roll and a sheet.
 #[test]
 fn vouchers_and_schedules() -> Result<(), nb_docs::DocError> {

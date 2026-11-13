@@ -176,7 +176,7 @@ pub fn list_documents(store: &Store, q: &DocumentQuery) -> Result<DocumentPage> 
                     q.kind,
                     q.status,
                     search,
-                    q.limit.clamp(1, 500),
+                    q.limit.clamp(1, 100_000),
                     q.offset
                 ],
                 row_of,

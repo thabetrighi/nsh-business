@@ -363,12 +363,60 @@ pub fn journal_page(st: AppState, compact: bool) -> View {
         )
         .child(list)
         .child(pager(st, paging, move || page_data.get().total, compact));
+    let export = crate::screens::common::export_button(st, "journal-export", move || {
+        let (from, to) = span.bounds();
+        let q = JournalQuery {
+            text: text.get_untracked(),
+            from,
+            to,
+            limit: 100_000,
+            offset: 0,
+            ..Default::default()
+        };
+        crate::screens::common::export_from_db(
+            st,
+            "acc.journal.file",
+            move |s| journal(s, &q),
+            move |p: JournalPage| {
+                let plain = |v: i64| {
+                    if v == 0 {
+                        String::new()
+                    } else {
+                        Money::from_minor(v, currency(st)).to_plain_string()
+                    }
+                };
+                let mut out = vec![vec![
+                    st.tn("col.number"),
+                    st.tn("col.date"),
+                    st.tn("acc.entry.memo"),
+                    st.tn("acc.account"),
+                    st.tn("acc.account_name"),
+                    st.tn("acc.debit"),
+                    st.tn("acc.credit"),
+                ]];
+                for e in p.rows {
+                    for l in &e.lines {
+                        out.push(vec![
+                            e.number.clone(),
+                            e.date.clone(),
+                            e.memo.clone(),
+                            l.account.clone(),
+                            l.account_name.clone(),
+                            plain(l.debit_minor),
+                            plain(l.credit_minor),
+                        ]);
+                    }
+                }
+                out
+            },
+        );
+    });
     view()
         .child(page(
             st,
             Route::Journal,
             "acc.journal.subtitle",
-            actions,
+            crate::screens::common::actions_row(vec![export, actions]),
             body,
             compact,
         ))
@@ -900,12 +948,30 @@ pub fn accounts_page(st: AppState, compact: bool) -> View {
                     .child(side),
             )
     };
+    let export = crate::screens::common::export_button(st, "accounts-export", move || {
+        let plain = |v: i64| Money::from_minor(v, currency(st)).to_plain_string();
+        let mut out = vec![vec![
+            st.tn("acc.account"),
+            st.tn("acc.account_name"),
+            st.tn("acc.debit"),
+            st.tn("acc.credit"),
+        ]];
+        for a in rows.get_untracked() {
+            out.push(vec![
+                a.code,
+                a.name,
+                plain(a.debit_minor),
+                plain(a.credit_minor),
+            ]);
+        }
+        crate::screens::common::export_rows(st, "acc.chart.file", out);
+    });
     view()
         .child(page(
             st,
             Route::Accounts,
             "acc.chart.subtitle",
-            actions,
+            crate::screens::common::actions_row(vec![export, actions]),
             body,
             compact,
         ))
@@ -2022,11 +2088,47 @@ pub fn ledger_page(st: AppState, compact: bool) -> View {
                 .child(span_bar(st, span, compact)),
         )
         .child(content);
+    let export = crate::screens::common::export_button(st, "ledger-export", move || {
+        let Some(s) = st_data.get_untracked() else {
+            return;
+        };
+        let plain = |v: i64| Money::from_minor(v, currency(st)).to_plain_string();
+        let mut out = vec![vec![
+            st.tn("col.date"),
+            st.tn("col.number"),
+            st.tn("acc.account"),
+            st.tn("acc.entry.memo"),
+            st.tn("acc.debit"),
+            st.tn("acc.credit"),
+            st.tn("acc.balance"),
+        ]];
+        out.push(vec![
+            String::new(),
+            String::new(),
+            s.code.clone(),
+            st.tn("acc.opening"),
+            String::new(),
+            String::new(),
+            plain(s.opening_minor),
+        ]);
+        for l in s.lines {
+            out.push(vec![
+                l.date,
+                l.number,
+                l.account,
+                l.memo,
+                plain(l.debit_minor),
+                plain(l.credit_minor),
+                plain(l.balance_minor),
+            ]);
+        }
+        crate::screens::common::export_rows(st, "acc.ledger.file", out);
+    });
     page(
         st,
         Route::Ledger,
         "acc.ledger.subtitle",
-        view(),
+        export,
         body,
         compact,
     )
@@ -2216,11 +2318,33 @@ pub fn trial_balance_page(st: AppState, compact: bool) -> View {
                 .child(state),
         )
         .child(card().child(table));
+    let export = crate::screens::common::export_button(st, "trial-export", move || {
+        let plain = |v: i64| Money::from_minor(v, currency(st)).to_plain_string();
+        let mut out = vec![vec![
+            st.tn("acc.account"),
+            st.tn("acc.account_name"),
+            st.tn("acc.opening"),
+            st.tn("acc.debit"),
+            st.tn("acc.credit"),
+            st.tn("acc.balance"),
+        ]];
+        for r in tb.get_untracked().rows {
+            out.push(vec![
+                r.code,
+                r.name,
+                plain(r.opening_minor),
+                plain(r.debit_minor),
+                plain(r.credit_minor),
+                plain(r.closing_minor),
+            ]);
+        }
+        crate::screens::common::export_rows(st, "acc.trial.file", out);
+    });
     page(
         st,
         Route::TrialBalance,
         "acc.trial.subtitle",
-        view(),
+        export,
         body,
         compact,
     )

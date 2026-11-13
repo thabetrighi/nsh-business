@@ -24,7 +24,7 @@ use crate::ui::overlay::{modal, show_toast, wide_modal};
 use crate::ui::popup::dropdown;
 use crate::ui::surface::{card, empty_state, page_pad};
 use crate::ui::table::{Column, Paging, Selection, Sort, Width, pager, table};
-use crate::ui::tokens::{Status, Tone, control, radius, sp, ty};
+use crate::ui::tokens::{Status, Tone, control, radius, ty};
 use nsh_base::{menu, menu_item};
 use nsh_core::element::{Align, Placement};
 
@@ -116,6 +116,77 @@ fn product_cells(st: AppState, p: &ProductRow) -> Vec<String> {
     ]
 }
 
+/// The columns of an exported or copied list of products.
+fn product_head(st: AppState) -> Vec<String> {
+    vec![
+        st.tn("products.col.sku"),
+        st.tn("products.col.name"),
+        st.tn("products.col.category"),
+        st.tn("products.col.barcode"),
+        st.tn("products.col.stock"),
+        st.tn("products.col.price"),
+    ]
+}
+
+/// Undoes one of the [`Extra`] filters.
+type Clear = Box<dyn Fn(&mut Extra)>;
+
+/// Filters beyond the stock state and the category (owner notes).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Extra {
+    kind: Option<&'static str>,
+    active: Option<bool>,
+    barcode: Option<bool>,
+    below_cost: bool,
+    /// One of [`PRICES`].
+    price: Option<usize>,
+    /// (id, name).
+    brand: Option<(String, String)>,
+}
+
+/// Price ranges in whole currency units: (from, to).
+const PRICES: [(Option<i64>, Option<i64>); 5] = [
+    (None, Some(100)),
+    (Some(100), Some(500)),
+    (Some(500), Some(1_000)),
+    (Some(1_000), Some(5_000)),
+    (Some(5_000), None),
+];
+
+impl Extra {
+    fn count(&self) -> usize {
+        usize::from(self.kind.is_some())
+            + usize::from(self.active.is_some())
+            + usize::from(self.barcode.is_some())
+            + usize::from(self.below_cost)
+            + usize::from(self.price.is_some())
+            + usize::from(self.brand.is_some())
+    }
+
+    fn apply(&self, q: &mut ProductQuery, c: Currency) {
+        q.kind = self.kind.map(str::to_owned);
+        q.active = self.active;
+        q.barcode = self.barcode;
+        q.below_cost = self.below_cost;
+        q.brand_id = self.brand.as_ref().map(|b| b.0.clone());
+        if let Some(&(from, to)) = self.price.and_then(|i| PRICES.get(i)) {
+            let unit = 10_i64.pow(u32::from(c.exponent()));
+            q.price_min = from.map(|v| v * unit);
+            q.price_max = to.map(|v| v * unit - 1);
+        }
+    }
+}
+
+fn price_range_text(st: AppState, at: usize) -> String {
+    let n = |v: i64| st.fmt().integer(v);
+    match PRICES.get(at) {
+        Some((None, Some(to))) => format!("< {}", n(*to)),
+        Some((Some(from), None)) => format!("≥ {}", n(*from)),
+        Some((Some(from), Some(to))) => format!("{} – {}", n(*from), n(*to)),
+        _ => String::new(),
+    }
+}
+
 /// The selected products, a header first.
 fn chosen_rows(
     st: AppState,
@@ -123,14 +194,7 @@ fn chosen_rows(
     selection: Selection,
 ) -> Vec<Vec<String>> {
     let chosen = selection.ids.get_untracked();
-    let mut out = vec![vec![
-        st.tn("products.col.sku"),
-        st.tn("products.col.name"),
-        st.tn("products.col.category"),
-        st.tn("products.col.barcode"),
-        st.tn("products.col.stock"),
-        st.tn("products.col.price"),
-    ]];
+    let mut out = vec![product_head(st)];
     rows.with_untracked(|v| {
         for p in v.iter().filter(|p| chosen.contains(&id_of(p))) {
             out.push(product_cells(st, p));
@@ -304,11 +368,16 @@ pub fn products(st: AppState, compact: bool) -> View {
     let editor: Signal<Option<Target>> =
         signal((std::env::var("NB_OPEN").as_deref() == Ok("add_product")).then_some(Target::New));
     // Opened from the command palette's "Add a product".
-    effect(move || {
-        if st.intent.get() == Some(Intent::AddProduct) {
+    effect(move || match st.intent.get() {
+        Some(Intent::AddProduct) => {
             st.intent.set(None);
             editor.set(Some(Target::New));
         }
+        Some(Intent::EditProduct(id)) => {
+            st.intent.set(None);
+            editor.set(Some(Target::Edit(id)));
+        }
+        _ => {}
     });
     let query = signal(String::new());
     let filter = signal(Filter::All);
@@ -317,6 +386,7 @@ pub fn products(st: AppState, compact: bool) -> View {
     let sort = signal(None::<Sort>);
     // The favourites only.
     let favs_only = signal(false);
+    let extra = signal(Extra::default());
     let selection = Selection::new();
     let paging = Paging::new(25);
     // Other filters or another order start again from the first page.
@@ -326,6 +396,7 @@ pub fn products(st: AppState, compact: bool) -> View {
         category.with(|_| ());
         sort.with(|_| ());
         favs_only.with(|_| ());
+        extra.with(|_| ());
         paging.reset();
     });
 
@@ -347,6 +418,21 @@ pub fn products(st: AppState, compact: bool) -> View {
         },
     );
     let cat_list = computed(move || cats.get().unwrap_or_default());
+    let brands = resource(
+        move || st.session.get().map(|_| st.data_rev.get()),
+        move |_, _| {
+            let db = st.db();
+            async move {
+                db.call(|s| nb_store::usecases::catalog::list_brands(s))
+                    .await
+            }
+        },
+    );
+    let currency_now = move || {
+        st.session
+            .get_untracked()
+            .map_or(Currency::DZD, |s| s.currency)
+    };
     // Sent from the categories: their products.
     effect(move || {
         let Some(Intent::ProductsIn(id)) = st.intent.get() else {
@@ -366,24 +452,24 @@ pub fn products(st: AppState, compact: bool) -> View {
                 usize::MAX => None,
                 i => cat_list.with(|c: &Vec<Category>| c.get(i).map(|c| c.id.clone())),
             };
-            Some((
-                ProductQuery {
-                    text: query.get(),
-                    category_id,
-                    state: match filter.get() {
-                        Filter::All => None,
-                        Filter::Only(s) => Some(s.stored()),
-                    },
-                    sort,
-                    desc,
-                    limit: paging.size.get(),
-                    offset: paging.offset(),
-                    // Counted apart (below): a page turn reads one page.
-                    with_counts: false,
-                    favorites: favs_only.get(),
+            let mut q = ProductQuery {
+                text: query.get(),
+                category_id,
+                state: match filter.get() {
+                    Filter::All => None,
+                    Filter::Only(s) => Some(s.stored()),
                 },
-                st.data_rev.get(),
-            ))
+                sort,
+                desc,
+                limit: paging.size.get(),
+                offset: paging.offset(),
+                // Counted apart (below): a page turn reads one page.
+                with_counts: false,
+                favorites: favs_only.get(),
+                ..ProductQuery::default()
+            };
+            extra.with(|e| e.apply(&mut q, currency_now()));
+            Some((q, st.data_rev.get()))
         },
         move |(q, _), _| {
             let db = st.db();
@@ -433,97 +519,19 @@ pub fn products(st: AppState, compact: bool) -> View {
     // Stock states as cards with their counts (phones: chips).
     let quick = move |f: Filter, key: &'static str, idx: usize, which: Icon, status: Status| {
         let active = computed(move || filter.get() == f);
-        let base = view()
-            .test_id(&format!("tab-{idx}"))
-            .cursor_pointer()
-            .on_press(move || {
+        crate::ui::filters::stat_tile(
+            &format!("tab-{idx}"),
+            st.t(key),
+            which,
+            status,
+            move || st.fmt().integer(counts.get()[idx]),
+            move || active.get(),
+            Some(Box::new(move || {
                 filter.set(f);
                 selection.clear();
-            });
-        if compact {
-            base.flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .h(px(34.0))
-                .px(px(12.0))
-                .rounded_full()
-                .border_1()
-                .border_color(move || {
-                    if active.get() {
-                        Tone::Primary.color()
-                    } else {
-                        Tone::Border.color()
-                    }
-                })
-                .bg(move || {
-                    if active.get() {
-                        Tone::PrimarySoft.color()
-                    } else {
-                        Tone::Surface.color()
-                    }
-                })
-                .child(label_line(
-                    st.t(key),
-                    ty::SM,
-                    FontWeight::MEDIUM,
-                    Tone::Body,
-                ))
-                .child(figure(
-                    move || st.fmt().integer(counts.get()[idx]),
-                    ty::XS,
-                    FontWeight::SEMIBOLD,
-                    || Tone::Muted,
-                ))
-        } else {
-            base.flex_1()
-                .min_w(px(160.0))
-                .flex_row()
-                .items_center()
-                .gap(px(12.0))
-                .p(px(sp(14.0)))
-                .rounded(px(radius::lg()))
-                .bg(Tone::Surface.color())
-                .border_1()
-                .border_color(move || {
-                    if active.get() {
-                        Tone::Primary.color()
-                    } else {
-                        Tone::Border.color()
-                    }
-                })
-                .shadow_xs()
-                .hover(|s| s.border_color(Tone::BorderStrong.color()))
-                .child(
-                    view()
-                        .w(px(36.0))
-                        .h(px(36.0))
-                        .rounded(px(radius::md()))
-                        .items_center()
-                        .justify_center()
-                        .bg(status.bg().color())
-                        .child(icon(which, 18.0, move || status.fg())),
-                )
-                .child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(label_line(
-                            st.t(key),
-                            ty::SM,
-                            FontWeight::MEDIUM,
-                            Tone::Muted,
-                        ))
-                        .child(figure(
-                            move || st.fmt().integer(counts.get()[idx]),
-                            ty::XL,
-                            FontWeight::BOLD,
-                            || Tone::Ink,
-                        )),
-                )
-                .child(when(active, || {
-                    icon(Icon::CheckCircle, 18.0, || Tone::Primary).into_element()
-                }))
-        }
+            })),
+            compact,
+        )
     };
     let quick_row = view()
         .flex_row()
@@ -611,6 +619,169 @@ pub fn products(st: AppState, compact: bool) -> View {
             .child(item(2, "col.status"))
             .child(item(4, "products.col.stock"))
     };
+    // More filters (owner notes): a menu of kinds, sale, barcode, price,
+    // brand; the chips below say what is on.
+    let more_filters = move || {
+        dynamic(move || {
+            use crate::ui::menu::{Act, menu_on};
+            let e = extra.get();
+            let n = e.count();
+            let tick = |on: bool, label: String, f: Box<dyn Fn(&mut Extra)>| {
+                Act::new(label, move || extra.update(|x| f(x))).checked(on)
+            };
+            let kind = vec![
+                tick(
+                    e.kind.is_none(),
+                    st.tn("filter.any"),
+                    Box::new(|x| x.kind = None),
+                ),
+                tick(
+                    e.kind == Some("goods"),
+                    st.tn("editor.kind.goods"),
+                    Box::new(|x| x.kind = Some("goods")),
+                ),
+                tick(
+                    e.kind == Some("service"),
+                    st.tn("editor.kind.service"),
+                    Box::new(|x| x.kind = Some("service")),
+                ),
+            ];
+            let sale = vec![
+                tick(
+                    e.active.is_none(),
+                    st.tn("filter.any"),
+                    Box::new(|x| x.active = None),
+                ),
+                tick(
+                    e.active == Some(true),
+                    st.tn("filter.on_sale"),
+                    Box::new(|x| x.active = Some(true)),
+                ),
+                tick(
+                    e.active == Some(false),
+                    st.tn("filter.stopped"),
+                    Box::new(|x| x.active = Some(false)),
+                ),
+            ];
+            let code = vec![
+                tick(
+                    e.barcode.is_none(),
+                    st.tn("filter.any"),
+                    Box::new(|x| x.barcode = None),
+                ),
+                tick(
+                    e.barcode == Some(true),
+                    st.tn("filter.with_barcode"),
+                    Box::new(|x| x.barcode = Some(true)),
+                ),
+                tick(
+                    e.barcode == Some(false),
+                    st.tn("filter.without_barcode"),
+                    Box::new(|x| x.barcode = Some(false)),
+                ),
+            ];
+            let mut price = vec![tick(
+                e.price.is_none(),
+                st.tn("filter.any"),
+                Box::new(|x| x.price = None),
+            )];
+            for i in 0..PRICES.len() {
+                price.push(tick(
+                    e.price == Some(i),
+                    price_range_text(st, i),
+                    Box::new(move |x| x.price = Some(i)),
+                ));
+            }
+            let mut brand = vec![tick(
+                e.brand.is_none(),
+                st.tn("filter.any"),
+                Box::new(|x| x.brand = None),
+            )];
+            for b in brands.get().unwrap_or_default() {
+                let on = e.brand.as_ref().is_some_and(|x| x.0 == b.id);
+                let pair = (b.id.clone(), b.name.clone());
+                brand.push(tick(
+                    on,
+                    b.name,
+                    Box::new(move |x| x.brand = Some(pair.clone())),
+                ));
+            }
+            let mut acts = vec![
+                Act::sub(Icon::Package, st.tn("filter.kind"), kind),
+                Act::sub(Icon::CheckCircle, st.tn("filter.sale"), sale),
+                Act::sub(Icon::Barcode, st.tn("products.col.barcode"), code),
+                Act::sub(Icon::Coins, st.tn("products.col.price"), price),
+            ];
+            if brand.len() > 1 {
+                acts.push(Act::sub(Icon::Tags, st.tn("filter.brand"), brand));
+            }
+            acts.push(Act::Line);
+            acts.push(
+                tick(
+                    e.below_cost,
+                    st.tn("filter.below_cost"),
+                    Box::new(|x| x.below_cost = !x.below_cost),
+                )
+                .icon(Icon::Alert),
+            );
+            if n > 0 {
+                acts.push(Act::with(
+                    Icon::Close,
+                    st.tn("table.clear_filters"),
+                    move || extra.set(Extra::default()),
+                ));
+            }
+            let on = n > 0;
+            let trigger = view()
+                .test_id("products-more-filters")
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(control::md()))
+                .px(px(12.0))
+                .rounded(px(radius::md()))
+                .border_1()
+                .border_color(if on {
+                    Tone::Primary.color()
+                } else {
+                    Tone::BorderStrong.color()
+                })
+                .bg(if on {
+                    Tone::PrimarySoft.color()
+                } else {
+                    Tone::Surface.color()
+                })
+                .cursor_pointer()
+                .child(icon(Icon::Filter, 16.0, move || {
+                    if on { Tone::Primary } else { Tone::Muted }
+                }))
+                .child(label_line(
+                    st.t("filter.more"),
+                    ty::SM,
+                    FontWeight::MEDIUM,
+                    Tone::Body,
+                ))
+                .child(if on {
+                    view()
+                        .min_w(px(18.0))
+                        .h(px(18.0))
+                        .px(px(5.0))
+                        .rounded_full()
+                        .items_center()
+                        .justify_center()
+                        .bg(Tone::Primary.color())
+                        .child(label_line(
+                            move || n.to_string(),
+                            ty::XS,
+                            FontWeight::BOLD,
+                            Tone::OnPrimary,
+                        ))
+                } else {
+                    view()
+                });
+            menu_on(trigger, acts).into_element()
+        })
+    };
     let tools = move || {
         view()
             .flex_row()
@@ -680,6 +851,7 @@ pub fn products(st: AppState, compact: bool) -> View {
                         Tone::Body,
                     )),
             )
+            .child(more_filters())
             .child(spacer())
             .child(if compact {
                 view()
@@ -808,7 +980,9 @@ pub fn products(st: AppState, compact: bool) -> View {
             )
     };
     let filtered = computed(move || {
-        filter.get() != Filter::All
+        extra.with(|e| e.count() > 0)
+            || favs_only.get()
+            || filter.get() != Filter::All
             || category.get() != usize::MAX
             || !query.get().trim().is_empty()
     });
@@ -853,6 +1027,75 @@ pub fn products(st: AppState, compact: bool) -> View {
                 Box::new(move || category.set(usize::MAX)),
             ));
         }
+        let e = extra.get();
+        let mut extras: Vec<(String, Clear)> = Vec::new();
+        let mut extra_chip = |text: String, clear: Box<dyn Fn(&mut Extra)>| {
+            extras.push((text, clear));
+        };
+        if let Some(k) = e.kind {
+            extra_chip(
+                format!(
+                    "{}: {}",
+                    st.tn("filter.kind"),
+                    st.tn(&format!("editor.kind.{k}"))
+                ),
+                Box::new(|x| x.kind = None),
+            );
+        }
+        if let Some(a) = e.active {
+            extra_chip(
+                st.tn(if a {
+                    "filter.on_sale"
+                } else {
+                    "filter.stopped"
+                }),
+                Box::new(|x| x.active = None),
+            );
+        }
+        if let Some(b) = e.barcode {
+            extra_chip(
+                st.tn(if b {
+                    "filter.with_barcode"
+                } else {
+                    "filter.without_barcode"
+                }),
+                Box::new(|x| x.barcode = None),
+            );
+        }
+        if let Some(i) = e.price {
+            extra_chip(
+                format!(
+                    "{}: {}",
+                    st.tn("products.col.price"),
+                    price_range_text(st, i)
+                ),
+                Box::new(|x| x.price = None),
+            );
+        }
+        if let Some((_, name)) = &e.brand {
+            extra_chip(
+                format!("{}: {name}", st.tn("filter.brand")),
+                Box::new(|x| x.brand = None),
+            );
+        }
+        if e.below_cost {
+            extra_chip(
+                st.tn("filter.below_cost"),
+                Box::new(|x| x.below_cost = false),
+            );
+        }
+        for (text, clear) in extras {
+            row = row.child(chip(
+                Box::new(move || text.clone()),
+                Box::new(move || extra.update(|x| clear(x))),
+            ));
+        }
+        if favs_only.get() {
+            row = row.child(chip(
+                Box::new(move || st.tn("products.favorites")),
+                Box::new(move || favs_only.set(false)),
+            ));
+        }
         let q = query.get();
         if !q.trim().is_empty() {
             row = row.child(chip(
@@ -869,6 +1112,8 @@ pub fn products(st: AppState, compact: bool) -> View {
                 query.set(String::new());
                 filter.set(Filter::All);
                 category.set(usize::MAX);
+                favs_only.set(false);
+                extra.set(Extra::default());
             },
         ))
         .into_element()
@@ -910,7 +1155,7 @@ pub fn products(st: AppState, compact: bool) -> View {
             .sortable(),
         );
         if !compact {
-            columns.push(Column::new("actions", String::new, Width::Fixed(52.0)));
+            columns.push(Column::new("actions", String::new, Width::Fixed(104.0)));
         }
         columns
     };
@@ -1082,11 +1327,8 @@ pub fn products(st: AppState, compact: bool) -> View {
                 || Tone::Ink,
             )
             .into_element(),
-            _ => {
-                let acts = menu_acts.clone();
-                crate::ui::menu::more_button(st, move || acts(at.index()), "product-more")
-                    .into_element()
-            }
+            _ => crate::ui::menu::row_actions(st, menu_acts(at.index()), "product-more")
+                .into_element(),
         }
     };
 
@@ -1122,6 +1364,8 @@ pub fn products(st: AppState, compact: bool) -> View {
                             query.set(String::new());
                             filter.set(Filter::All);
                             category.set(usize::MAX);
+                            favs_only.set(false);
+                            extra.set(Extra::default());
                         },
                     )),
                 ))
@@ -1154,6 +1398,39 @@ pub fn products(st: AppState, compact: bool) -> View {
                 )
                 .test_id("products-import"),
             )
+            .child(crate::screens::common::export_button(
+                st,
+                "products-export",
+                move || {
+                    let mut q = ProductQuery {
+                        text: query.get_untracked(),
+                        category_id: match category.get_untracked() {
+                            usize::MAX => None,
+                            i => cat_list
+                                .with_untracked(|c: &Vec<Category>| c.get(i).map(|c| c.id.clone())),
+                        },
+                        state: match filter.get_untracked() {
+                            Filter::All => None,
+                            Filter::Only(s) => Some(s.stored()),
+                        },
+                        favorites: favs_only.get_untracked(),
+                        limit: 100_000,
+                        with_counts: false,
+                        ..ProductQuery::default()
+                    };
+                    extra.with_untracked(|e| e.apply(&mut q, currency_now()));
+                    crate::screens::common::export_from_db(
+                        st,
+                        "products.file",
+                        move |s| list_products(s, &q),
+                        move |p: ProductPage| {
+                            let mut out = vec![product_head(st)];
+                            out.extend(p.rows.iter().map(|r| product_cells(st, r)));
+                            out
+                        },
+                    );
+                },
+            ))
             .child(
                 button(
                     Variant::Primary,
@@ -1214,6 +1491,7 @@ pub fn products(st: AppState, compact: bool) -> View {
                     price_minor: p.price_minor,
                     unit: p.units.first().map(|u| u.code.clone()).unwrap_or_default(),
                     barcode: p.barcodes.first().cloned(),
+                    sku: p.sku.clone(),
                 };
                 return crate::screens::printing::label_dialog(st, item, move || {
                     labeling_open.set(false)

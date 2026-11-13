@@ -155,7 +155,7 @@ pub fn list_orders(store: &Store, q: &OrderQuery) -> Result<OrderPage> {
                     q.status,
                     q.supplier_id,
                     search,
-                    q.limit.clamp(1, 500),
+                    q.limit.clamp(1, 100_000),
                     q.offset
                 ],
                 row_of,

@@ -134,6 +134,16 @@ fn overview_and_reservations() -> R {
         (row.rows[0].reserved_milli, row.rows[0].available_milli),
         (4_000, 6_000)
     );
+    // Only what is held for orders.
+    let held = stock_overview(
+        &s,
+        &StockQuery {
+            reserved: true,
+            limit: 10,
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(held.total, 1);
     close_reservation(&mut s, meta(&setup, "reserve.close"), &r1, false)?;
     assert_eq!(available(&s, milk, wh)?.to_string(), "10");
     assert!(matches!(

@@ -29,7 +29,7 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{
     Size, Variant, badge, button, figure, icon_button, label, label_line, segmented,
 };
-use crate::ui::menu::{Act, more_button, tsv, with_menu};
+use crate::ui::menu::{Act, tsv, with_menu};
 use crate::ui::overlay::{dialog_frame, modal, show_toast};
 use crate::ui::popup::dropdown;
 use crate::ui::surface::{card, empty_state};
@@ -248,22 +248,6 @@ pub fn sales_page(st: AppState, compact: bool) -> View {
                 FontWeight::BOLD,
                 || Tone::Ink,
             ));
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let number = r.number.clone();
-                tail = tail.child(
-                    icon_button(
-                        || Icon::Printer,
-                        st.t("action.print"),
-                        Variant::Ghost,
-                        move || {
-                            printing.set(Some(number.clone()));
-                            printing_open.set(true);
-                        },
-                    )
-                    .test_id(&format!("sale-print-{i}")),
-                );
-            }
             // What may be done to it: the "⋯" and a right click.
             let acts = {
                 let r = r.clone();
@@ -302,7 +286,12 @@ pub fn sales_page(st: AppState, compact: bool) -> View {
                     ]
                 }
             };
-            tail = tail.child(more_button(st, acts.clone(), &format!("sale-more-{i}")));
+            // The first two as buttons, the rest in the "⋯".
+            tail = tail.child(crate::ui::menu::row_actions(
+                st,
+                acts(),
+                &format!("sale-more-{i}"),
+            ));
             let number = r.number.clone();
             v = v.child(with_menu(
                 list_row(format!("sale-{i}"), r.number, detail, Icon::Receipt, tail)
@@ -724,11 +713,46 @@ pub fn returns_page(st: AppState, compact: bool) -> View {
         )
         .test_id("returns-till"),
     );
+    let export = crate::screens::common::export_button(st, "returns-export", move || {
+        let q = text.get_untracked();
+        crate::screens::common::export_from_db(
+            st,
+            "returns.file",
+            move |s| list_returns(s, &q, 100_000, 0),
+            move |p: ReturnPage| {
+                let mut out = vec![vec![
+                    st.tn("col.number"),
+                    st.tn("col.date"),
+                    st.tn("returns.col.sale"),
+                    st.tn("returns.col.refund"),
+                    st.tn("returns.col.reason"),
+                    st.tn("returns.restocked"),
+                    st.tn("col.amount"),
+                ]];
+                for r in p.rows {
+                    out.push(vec![
+                        r.number,
+                        date_time(st, r.created_at),
+                        r.sale_number,
+                        method_text(st, &r.refund_method),
+                        r.reason,
+                        st.tn(if r.restocked {
+                            "common.yes"
+                        } else {
+                            "common.no"
+                        }),
+                        Money::from_minor(r.total_minor, currency(st)).to_plain_string(),
+                    ]);
+                }
+                out
+            },
+        );
+    });
     page(
         st,
         Route::Returns,
         "returns.subtitle",
-        actions,
+        crate::screens::common::actions_row(vec![export, actions]),
         body,
         compact,
     )
@@ -908,6 +932,44 @@ pub fn documents_page(st: AppState, compact: bool) -> View {
                 .into_element()
         },
     ));
+    let export = crate::screens::common::export_button(st, "docs-export", move || {
+        let q = DocumentQuery {
+            kind: KINDS[kind.get_untracked()].into(),
+            status: STATES[status.get_untracked()].into(),
+            search: text.get_untracked(),
+            limit: 100_000,
+            offset: 0,
+        };
+        crate::screens::common::export_from_db(
+            st,
+            "doc.file",
+            move |s| list_documents(s, &q),
+            move |p: DocumentPage| {
+                let mut out = vec![vec![
+                    st.tn("col.number"),
+                    st.tn("col.date"),
+                    st.tn("doc.kind.all"),
+                    st.tn("col.customer"),
+                    st.tn("col.status"),
+                    st.tn("doc.col.valid_until"),
+                    st.tn("col.amount"),
+                ]];
+                for d in p.rows {
+                    out.push(vec![
+                        d.number,
+                        date_time(st, d.created_at),
+                        st.tn(&format!("doc.kind.{}", d.kind)),
+                        d.customer_name,
+                        st.tn(&format!("doc.status.{}", d.status)),
+                        d.valid_until.unwrap_or_default(),
+                        Money::from_minor(d.total_minor, currency(st)).to_plain_string(),
+                    ]);
+                }
+                out
+            },
+        );
+    });
+    let actions = crate::screens::common::actions_row(vec![export, actions]);
     view()
         .child(page(
             st,

@@ -142,7 +142,7 @@ pub fn customers_page(st: AppState, compact: bool) -> View {
         }
         let mut v = view();
         for (i, c) in p.rows.into_iter().enumerate() {
-            v = v.child(customer_row(st, i, c, compact, showing));
+            v = v.child(customer_row(st, i, c, compact, showing, editing));
         }
         v.into_element()
     });
@@ -280,6 +280,7 @@ fn customer_row(
     c: CustomerRow,
     compact: bool,
     showing: Signal<Option<String>>,
+    editing: Signal<Option<Option<CustomerRow>>>,
 ) -> View {
     let detail = [
         c.code.clone(),
@@ -350,7 +351,18 @@ fn customer_row(
         let c = c.clone();
         move || {
             use crate::ui::menu::{Act, tsv};
-            let mut v = vec![Act::copy(st.tn("action.copy_name"), c.name.clone())];
+            let (id, edit) = (c.id.clone(), c.clone());
+            let mut v = vec![
+                Act::with(Icon::Eye, st.tn("sales.act.details"), move || {
+                    showing.set(Some(id.clone()))
+                }),
+                Act::with(Icon::Pencil, st.tn("action.edit"), move || {
+                    editing.set(Some(Some(edit.clone())))
+                })
+                .when(st.can("customers.edit")),
+                Act::Line,
+                Act::copy(st.tn("action.copy_name"), c.name.clone()),
+            ];
             if !c.phone.is_empty() {
                 v.push(Act::copy(st.tn("action.copy_phone"), c.phone.clone()));
             }
@@ -370,6 +382,11 @@ fn customer_row(
             v
         }
     };
+    let tail = tail.child(crate::ui::menu::row_actions(
+        st,
+        acts(),
+        &format!("customer-more-{i}"),
+    ));
     let row = view()
         .test_id(&format!("customer-{i}"))
         .flex_row()
@@ -1673,50 +1690,57 @@ pub fn debts_page(st: AppState, compact: bool) -> View {
         "debts.bucket.2",
         "debts.bucket.3",
     ];
-    let tiles = dynamic(move || {
-        let a = ag.get();
-        let tile = |key: &'static str, v: i64, tone: Tone| {
-            view()
-                .flex_1()
-                .min_w(px(140.0))
-                .gap(px(4.0))
-                .p(px(14.0))
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(Tone::Border.color())
-                .bg(Tone::Surface.color())
-                .child(label_line(
-                    st.t(key),
-                    ty::XS,
-                    FontWeight::MEDIUM,
-                    Tone::Muted,
-                ))
-                .child(figure(
-                    move || money(st, v),
-                    ty::XL,
-                    FontWeight::BOLD,
-                    move || tone,
-                ))
-        };
-        let mut row = view()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(10.0))
-            .child(tile("debts.total", a.balance_minor, Tone::Ink))
-            .child(tile(
-                "debts.overdue",
-                a.overdue_minor,
-                if a.overdue_minor > 0 {
-                    Tone::Danger
-                } else {
-                    Tone::Ink
-                },
-            ));
-        for (i, key) in BUCKETS.into_iter().enumerate() {
-            row = row.child(tile(key, a.totals[i], Tone::Body));
-        }
-        row.into_element()
-    });
+    // The same tiles as the products' page (owner notes: one look).
+    let tiles = {
+        use crate::ui::filters::{stat_row, stat_tile};
+        let tile =
+            |id: &str, key: &'static str, which: Icon, status: Status, pick: fn(&Ageing) -> i64| {
+                crate::ui::filters::money_tile(
+                    stat_tile(
+                        id,
+                        st.t(key),
+                        which,
+                        status,
+                        move || money(st, ag.with(pick)),
+                        || false,
+                        None,
+                        compact,
+                    ),
+                    compact,
+                )
+            };
+        stat_row(
+            vec![
+                tile(
+                    "debts-total",
+                    "debts.total",
+                    Icon::Coins,
+                    Status::Accent,
+                    |a| a.balance_minor,
+                ),
+                tile(
+                    "debts-overdue",
+                    "debts.overdue",
+                    Icon::Alert,
+                    Status::Danger,
+                    |a| a.overdue_minor,
+                ),
+                tile("debts-b0", BUCKETS[0], Icon::Clock, Status::Success, |a| {
+                    a.totals[0]
+                }),
+                tile("debts-b1", BUCKETS[1], Icon::Clock, Status::Info, |a| {
+                    a.totals[1]
+                }),
+                tile("debts-b2", BUCKETS[2], Icon::Clock, Status::Warning, |a| {
+                    a.totals[2]
+                }),
+                tile("debts-b3", BUCKETS[3], Icon::Clock, Status::Danger, |a| {
+                    a.totals[3]
+                }),
+            ],
+            compact,
+        )
+    };
     let list = dynamic(move || {
         let a = ag.get();
         if a.rows.is_empty() {
@@ -1833,12 +1857,41 @@ pub fn debts_page(st: AppState, compact: bool) -> View {
         .gap(px(16.0))
         .child(tiles)
         .child(card().child(header).child(list));
+    let export = crate::screens::common::export_button(st, "debts-export", move || {
+        let mut out = vec![vec![
+            st.tn("import.field.sku"),
+            st.tn("import.field.name"),
+            st.tn("import.field.phone"),
+            st.tn(BUCKETS[0]),
+            st.tn(BUCKETS[1]),
+            st.tn(BUCKETS[2]),
+            st.tn(BUCKETS[3]),
+            st.tn("debts.overdue"),
+            st.tn("debts.balance"),
+        ]];
+        let c = currency(st);
+        let m = |v: i64| Money::from_minor(v, c).to_plain_string();
+        for r in ag.get_untracked().rows {
+            out.push(vec![
+                r.code,
+                r.name,
+                r.phone,
+                m(r.buckets[0]),
+                m(r.buckets[1]),
+                m(r.buckets[2]),
+                m(r.buckets[3]),
+                m(r.overdue_minor),
+                m(r.balance_minor),
+            ]);
+        }
+        crate::screens::common::export_rows(st, "debts.file", out);
+    });
     view()
         .child(page(
             st,
             Route::Debts,
             "debts.subtitle",
-            view(),
+            export,
             body,
             compact,
         ))
@@ -2586,53 +2639,42 @@ pub fn installments_page(st: AppState, compact: bool) -> View {
     });
     let (showing, showing_open) = opener::<String>();
     let (editing, editing_open) = opener::<Option<CustomerRow>>();
-    let tiles = dynamic(move || {
-        let r = rows.get();
-        let late: i64 = r
-            .iter()
-            .filter(|d| d.state == "late")
-            .map(|d| d.open_minor)
-            .sum();
-        let soon: i64 = r
-            .iter()
-            .filter(|d| d.state != "late")
-            .map(|d| d.open_minor)
-            .sum();
-        let tile = |key: &'static str, v: i64, tone: Tone| {
-            view()
-                .flex_1()
-                .min_w(px(160.0))
-                .gap(px(4.0))
-                .p(px(14.0))
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(Tone::Border.color())
-                .bg(Tone::Surface.color())
-                .child(label_line(
-                    st.t(key),
-                    ty::XS,
-                    FontWeight::MEDIUM,
-                    Tone::Muted,
-                ))
-                .child(figure(
-                    move || money(st, v),
-                    ty::XL,
-                    FontWeight::BOLD,
-                    move || tone,
-                ))
-        };
-        view()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(10.0))
-            .child(tile(
-                "plans.page.late",
-                late,
-                if late > 0 { Tone::Danger } else { Tone::Ink },
-            ))
-            .child(tile("plans.page.soon", soon, Tone::Ink))
-            .into_element()
-    });
+    let sum = move |late: bool| {
+        rows.with(|r| {
+            r.iter()
+                .filter(|d| (d.state == "late") == late)
+                .map(|d| d.open_minor)
+                .sum::<i64>()
+        })
+    };
+    let tiles = {
+        use crate::ui::filters::{stat_row, stat_tile};
+        stat_row(
+            vec![
+                stat_tile(
+                    "plans-late",
+                    st.t("plans.page.late"),
+                    Icon::Alert,
+                    Status::Danger,
+                    move || money(st, sum(true)),
+                    || false,
+                    None,
+                    compact,
+                ),
+                stat_tile(
+                    "plans-soon",
+                    st.t("plans.page.soon"),
+                    Icon::CalendarClock,
+                    Status::Info,
+                    move || money(st, sum(false)),
+                    || false,
+                    None,
+                    compact,
+                ),
+            ],
+            compact,
+        )
+    };
     let list = dynamic(move || {
         let r = rows.get();
         if r.is_empty() {
@@ -2725,7 +2767,34 @@ pub fn installments_page(st: AppState, compact: bool) -> View {
             st,
             Route::Installments,
             "plans.page.subtitle",
-            view(),
+            crate::screens::common::export_button(st, "installments-export", move || {
+                let mut out = vec![vec![
+                    st.tn("import.field.name"),
+                    st.tn("import.field.phone"),
+                    st.tn("col.number"),
+                    st.tn("plans.col.seq"),
+                    st.tn("plans.col.due"),
+                    st.tn("col.amount"),
+                    st.tn("col.status"),
+                ]];
+                let c = currency(st);
+                for d in rows.get_untracked() {
+                    out.push(vec![
+                        d.customer_name,
+                        d.phone,
+                        d.plan_number,
+                        format!("{}/{}", d.seq, d.count),
+                        d.due_date,
+                        Money::from_minor(d.open_minor, c).to_plain_string(),
+                        st.tn(if d.state == "late" {
+                            "plans.page.late"
+                        } else {
+                            "plans.page.soon"
+                        }),
+                    ]);
+                }
+                crate::screens::common::export_rows(st, "plans.file", out);
+            }),
             body,
             compact,
         ))

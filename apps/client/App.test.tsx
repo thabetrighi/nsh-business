@@ -313,7 +313,7 @@ test("stock levels and a stock count", async () => {
   await app.press("id:nav-inventory");
   await app.waitFor("text:Valeur du stock");
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 2 000"));
-  await app.press("text:Stock faible");
+  await app.press("id:stock-tab-2");
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "1–25 sur 129"));
   // A count: 5 units of the first product found, then closed.
   await app.press("id:tab-stock_counts");
@@ -1273,4 +1273,40 @@ test("the dashboard is arranged; favourites are marked and found; carts on hold 
   await app.press("id:pos-customize");
   await app.press("id:pos-layout-use-0");
   await app.press("id:pos-customize-done");
+});
+
+test("more filters, labels on an A4 sheet, held stock and an export on every list", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const shows = (s: string) => () => app.texts().some((t) => plain(t) === s);
+  await app.waitFor("text:Ventes brutes");
+  // The stock: only what is held for orders (none in the demo).
+  await app.press("text:Stock");
+  await app.press("id:nav-inventory");
+  await app.waitUntil(shows("1–25 sur 2 000"));
+  expect(app.shows("id:stock-export")).toBe(true);
+  await app.press("id:stock-reserved");
+  await app.waitFor("text:Aucun article");
+  await app.press("id:tab-movements");
+  await app.waitFor("id:movements-export");
+  await app.press("text:Catalogue");
+  await app.waitFor("id:nav-products");
+  await app.press("id:nav-products");
+  await app.waitUntil(shows("1–25 sur 2 000"));
+  expect(app.shows("id:products-export")).toBe(true);
+  // A filter from the menu: services only (the demo has none), then cleared.
+  await app.press("id:products-more-filters");
+  await app.press("text:Type");
+  await app.press("text:Service");
+  await app.waitFor("text:Aucun résultat");
+  await app.press("text:Effacer les filtres >> nth=0");
+  await app.waitUntil(shows("1–25 sur 2 000"));
+  // Labels on an A4 sheet of 21.
+  await app.press("id:product-more >> nth=0");
+  await app.press("text:Imprimer l'étiquette");
+  await app.waitFor("id:label-size");
+  await app.press("id:label-size");
+  await app.press("text:A4 · 3 × 7 — 63.5 × 38.1 mm");
+  await app.waitFor("id:label-skip");
+  await app.waitUntil(() => app.texts().some((t) => plain(t).startsWith("21 étiquettes par feuille")));
+  await app.press("id:dialog-close");
 });

@@ -269,21 +269,88 @@ pub fn menu_at(trigger: View, acts: Vec<Act>, placement: Placement, align: Align
     view().child(m)
 }
 
-/// The "⋯" button opening `acts()`.
-pub fn more_button(st: AppState, acts: impl Fn() -> Vec<Act> + 'static, test_id: &str) -> View {
+/// A row's actions (owner notes, every list): the first two as buttons
+/// beside the row, the rest in the "⋯" menu (no menu for two or fewer).
+/// `test_id` names the menu's button; the buttons are `<test_id>-0`, `-1`.
+pub fn row_actions(st: AppState, acts: Vec<Act>, test_id: &str) -> View {
+    row_actions_named(acts, test_id, st.t("action.more"))
+}
+
+/// As [`row_actions`], the "⋯" named by `more`.
+pub fn row_actions_named(
+    acts: Vec<Act>,
+    test_id: &str,
+    more: impl Fn() -> String + 'static,
+) -> View {
     let side = control::sm();
-    let trigger = view()
-        .test_id(test_id)
-        .w(px(side))
-        .h(px(side))
-        .items_center()
-        .justify_center()
-        .rounded(px(radius::md()))
-        .cursor_pointer()
-        .hover(|s| s.bg(Tone::Hover.color()))
-        .label(st.t("action.more"))
-        .child(icon(Icon::More, 16.0, || Tone::Muted));
-    menu_on(trigger, acts())
+    let mut inline = Vec::new();
+    let mut rest = Vec::new();
+    for a in acts {
+        let first = inline.len() < 2
+            && matches!(
+                &a,
+                Act::Do {
+                    icon: Some(_),
+                    danger: false,
+                    checked: None,
+                    ..
+                }
+            );
+        if first {
+            inline.push(a);
+        } else {
+            rest.push(a);
+        }
+    }
+    // Two or fewer: both as buttons; a menu for one more is no menu.
+    let doing = rest
+        .iter()
+        .filter(|a| matches!(a, Act::Do { .. } | Act::Sub { .. }))
+        .count();
+    let mut row = view().flex_row().items_center().gap(px(2.0));
+    for (n, a) in inline.into_iter().enumerate() {
+        if let Act::Do {
+            icon: Some(ic),
+            label,
+            enabled,
+            run,
+            ..
+        } = a
+        {
+            let mut b = view()
+                .test_id(&format!("{test_id}-{n}"))
+                .w(px(side))
+                .h(px(side))
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::md()))
+                .label(move || SharedString::from(label.clone()))
+                .opacity(if enabled { 1.0 } else { 0.4 })
+                .child(icon(ic, 16.0, || Tone::Muted));
+            if enabled {
+                b = b
+                    .cursor_pointer()
+                    .hover(|s| s.bg(Tone::Hover.color()))
+                    .on_press(move || run());
+            }
+            row = row.child(b);
+        }
+    }
+    if doing > 0 {
+        let trigger = view()
+            .test_id(test_id)
+            .w(px(side))
+            .h(px(side))
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::md()))
+            .cursor_pointer()
+            .hover(|s| s.bg(Tone::Hover.color()))
+            .label(move || SharedString::from(more()))
+            .child(icon(Icon::More, 16.0, || Tone::Muted));
+        row = row.child(menu_on(trigger, rest));
+    }
+    row
 }
 
 /// The same menu on a right click on `row` (a held finger on touch

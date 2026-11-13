@@ -155,6 +155,26 @@ pub struct ProductQuery {
     pub with_counts: bool,
     /// The favourites only.
     pub favorites: bool,
+    /// One brand's products.
+    #[serde(default)]
+    pub brand_id: Option<String>,
+    /// `goods` or `service`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// On sale (`true`) or stopped (`false`).
+    #[serde(default)]
+    pub active: Option<bool>,
+    /// With a barcode (`true`) or without (`false`).
+    #[serde(default)]
+    pub barcode: Option<bool>,
+    /// Sold below what they cost (price under the cost).
+    #[serde(default)]
+    pub below_cost: bool,
+    /// Price range, in minor units (inclusive).
+    #[serde(default)]
+    pub price_min: Option<i64>,
+    #[serde(default)]
+    pub price_max: Option<i64>,
 }
 
 impl Default for ProductQuery {
@@ -169,6 +189,13 @@ impl Default for ProductQuery {
             offset: 0,
             favorites: false,
             with_counts: true,
+            brand_id: None,
+            kind: None,
+            active: None,
+            barcode: None,
+            below_cost: false,
+            price_min: None,
+            price_max: None,
         }
     }
 }
@@ -225,6 +252,35 @@ pub fn query(conn: &Connection, org: OrganizationId, q: &ProductQuery) -> Result
     }
     if q.favorites {
         filters.push("p.favorite = 1".into());
+    }
+    if let Some(b) = &q.brand_id {
+        filters.push("p.brand_id = ?".into());
+        args.push(b.clone());
+    }
+    if let Some(k) = q
+        .kind
+        .as_deref()
+        .filter(|k| matches!(*k, "goods" | "service"))
+    {
+        filters.push(format!("p.kind = '{k}'"));
+    }
+    if let Some(a) = q.active {
+        filters.push(format!("p.active = {}", i32::from(a)));
+    }
+    if let Some(b) = q.barcode {
+        filters.push(format!(
+            "{} EXISTS (SELECT 1 FROM product_barcodes pb WHERE pb.product_id = p.id)",
+            if b { "" } else { "NOT" }
+        ));
+    }
+    if q.below_cost {
+        filters.push("p.cost_minor IS NOT NULL AND p.price_minor < p.cost_minor".into());
+    }
+    if let Some(m) = q.price_min {
+        filters.push(format!("p.price_minor >= {m}"));
+    }
+    if let Some(m) = q.price_max {
+        filters.push(format!("p.price_minor <= {m}"));
     }
     let base_where = filters.join(" AND ");
     let state = state_expr();
@@ -287,7 +343,7 @@ pub fn query(conn: &Connection, org: OrganizationId, q: &ProductQuery) -> Result
     };
     // Sorted by a column of the product: the page's rows are chosen
     // first, and only they read their stock.
-    let page = format!("LIMIT {} OFFSET {}", q.limit.min(5_000), q.offset);
+    let page = format!("LIMIT {} OFFSET {}", q.limit.min(100_000), q.offset);
     let by_stock = matches!(q.sort, ProductSort::Stock | ProductSort::Status);
     let (filter, limit) = if by_stock || q.state.is_some() {
         (where_all.clone(), page)

@@ -20,13 +20,13 @@ use crate::nav::Route;
 use crate::screens::common::{date_time, page};
 use crate::screens::forms::error_text;
 use crate::screens::picker::product_picker;
-use crate::state::AppState;
+use crate::state::{AppState, Intent};
 use crate::ui::form::{field, labelled, row_input, search_field};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{Size, Variant, badge, button, figure, icon_button, label, label_line};
 use crate::ui::overlay::{dialog_frame, modal, show_toast};
 use crate::ui::popup::dropdown;
-use crate::ui::surface::{card, card_header_icon, empty_state, kpi};
+use crate::ui::surface::{card, card_header_icon, empty_state};
 use crate::ui::table::{Column, Paging, Sort, Width, pager, table};
 use crate::ui::tokens::{Status, Tone, radius, ty};
 
@@ -110,12 +110,44 @@ pub fn stock_page(st: AppState, compact: bool) -> View {
     let state: Signal<Option<StockState>> = signal(None);
     let sort = signal(None::<Sort>);
     let paging = Paging::new(25);
+    // usize::MAX: every category.
+    let category = signal(usize::MAX);
+    let held_only = signal(false);
     effect(move || {
         chosen.with(|_| ());
         text.with(|_| ());
         state.with(|_| ());
+        category.with(|_| ());
+        held_only.with(|_| ());
         paging.reset();
     });
+    let cats = resource(
+        move || st.session.get().map(|_| st.data_rev.get()),
+        move |_, _| {
+            let db = st.db();
+            async move {
+                db.call(|s| {
+                    s.read(|r| {
+                        let o = nb_store::repo::org::the_org(r.conn())?
+                            .ok_or(nb_store::Error::NotFound("organization"))?;
+                        nb_store::repo::catalog::categories(r.conn(), o.org_id()?)
+                    })
+                })
+                .await
+            }
+        },
+    );
+    let cat_list = computed(move || cats.get().unwrap_or_default());
+    let query_now = move |limit: u32, offset: u32| StockQuery {
+        warehouse_id: whs.with_untracked(|w| w.get(chosen.get_untracked()).map(|w| w.id.clone())),
+        text: text.get_untracked(),
+        state: state.get_untracked(),
+        limit,
+        offset,
+        category_id: cat_list
+            .with_untracked(|c| c.get(category.get_untracked()).map(|c| c.id.clone())),
+        reserved: held_only.get_untracked(),
+    };
     let page_data = resource(
         move || {
             st.session.get()?;
@@ -127,6 +159,8 @@ pub fn stock_page(st: AppState, compact: bool) -> View {
                     state: state.get(),
                     limit: paging.size.get(),
                     offset: paging.offset(),
+                    category_id: cat_list.with(|c| c.get(category.get()).map(|c| c.id.clone())),
+                    reserved: held_only.get(),
                 },
                 st.data_rev.get(),
             ))
@@ -141,69 +175,73 @@ pub fn stock_page(st: AppState, compact: bool) -> View {
             .with(|p: Option<&StockPage>| p.cloned())
             .unwrap_or_default()
     });
+    // The same tiles as the products' page: the stock's value, then the
+    // counts that filter the list.
     let kpis = {
-        let k = move |name: &'static str, value: Box<dyn Fn() -> String>| {
-            kpi(st.t(name), value, None, view(), compact)
+        use crate::ui::filters::{stat_row, stat_tile};
+        let pick = move |s: Option<StockState>| -> Option<Box<dyn Fn()>> {
+            Some(Box::new(move || state.set(s)))
         };
-        let row = view().flex_row().flex_wrap().gap(px(16.0));
-        let cell = move |v: View| {
-            if compact {
-                v.w(relative(0.47))
-            } else {
-                v.flex_1()
-            }
-        };
-        row.child(cell(k(
-            "inventory.value",
-            Box::new(move || money(st, data.get().value_minor)),
-        )))
-        .child(cell(k(
-            "inventory.items",
-            Box::new(move || st.fmt().integer(i64::from(data.get().counts[0]))),
-        )))
-        .child(cell(k(
-            "status.low",
-            Box::new(move || st.fmt().integer(i64::from(data.get().counts[2]))),
-        )))
-        .child(cell(k(
-            "status.out",
-            Box::new(move || st.fmt().integer(i64::from(data.get().counts[3]))),
-        )))
+        let count = move |i: usize| move || st.fmt().integer(i64::from(data.get().counts[i]));
+        stat_row(
+            vec![
+                crate::ui::filters::money_tile(
+                    stat_tile(
+                        "stock-value",
+                        st.t("inventory.value"),
+                        Icon::Coins,
+                        Status::Accent,
+                        move || money(st, data.get().value_minor),
+                        || false,
+                        None,
+                        compact,
+                    ),
+                    compact,
+                ),
+                stat_tile(
+                    "stock-tab-0",
+                    st.t("inventory.items"),
+                    Icon::Package,
+                    Status::Neutral,
+                    count(0),
+                    move || state.get().is_none(),
+                    pick(None),
+                    compact,
+                ),
+                stat_tile(
+                    "stock-tab-1",
+                    st.t("stock.ok"),
+                    Icon::CheckCircle,
+                    Status::Success,
+                    count(1),
+                    move || state.get() == Some(StockState::Ok),
+                    pick(Some(StockState::Ok)),
+                    compact,
+                ),
+                stat_tile(
+                    "stock-tab-2",
+                    st.t("status.low"),
+                    Icon::Alert,
+                    Status::Warning,
+                    count(2),
+                    move || state.get() == Some(StockState::Low),
+                    pick(Some(StockState::Low)),
+                    compact,
+                ),
+                stat_tile(
+                    "stock-tab-3",
+                    st.t("status.out"),
+                    Icon::XCircle,
+                    Status::Danger,
+                    count(3),
+                    move || state.get() == Some(StockState::Out),
+                    pick(Some(StockState::Out)),
+                    compact,
+                ),
+            ],
+            compact,
+        )
     };
-    let mut chips = view().flex_row().flex_wrap().gap(px(8.0));
-    for (s, key) in [
-        (None, "filter.all"),
-        (Some(StockState::Low), "status.low"),
-        (Some(StockState::Out), "status.out"),
-    ] {
-        let active = computed(move || state.get() == s);
-        chips = chips.child(
-            view()
-                .h(px(32.0))
-                .px(px(12.0))
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .border_1()
-                .cursor_pointer()
-                .border_color(move || {
-                    if active.get() {
-                        Tone::Primary.color()
-                    } else {
-                        Tone::Border.color()
-                    }
-                })
-                .bg(move || {
-                    if active.get() {
-                        Tone::PrimarySoft.color()
-                    } else {
-                        Tone::Surface.color()
-                    }
-                })
-                .on_press(move || state.set(s))
-                .child(label_line(st.t(key), ty::SM, FontWeight::MEDIUM, Tone::Ink)),
-        );
-    }
     let toolbar = view()
         .flex_row()
         .flex_wrap()
@@ -220,9 +258,76 @@ pub fn stock_page(st: AppState, compact: bool) -> View {
                 .w(px(if compact { 160.0 } else { 220.0 }))
                 .child(warehouse_filter(st, whs, chosen, "stock-warehouse")),
         )
-        .child(chips);
+        .child(
+            view()
+                .w(px(if compact { 160.0 } else { 210.0 }))
+                .child(dropdown(
+                    move || {
+                        std::iter::once((usize::MAX, st.tn("products.category.all")))
+                            .chain(
+                                cat_list
+                                    .get()
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(i, c)| (i, c.name)),
+                            )
+                            .collect()
+                    },
+                    category,
+                    Some(Icon::Tag),
+                    st.t("products.col.category"),
+                    "stock-category",
+                )),
+        )
+        .child(crate::ui::filters::toggle_filter(
+            "stock-reserved",
+            Icon::Lock,
+            st.t("inventory.held_only"),
+            held_only,
+        ));
     let rows = computed(move || data.get().rows);
+    // What may be done to a row: its buttons, its menu, its right click.
+    let acts: std::rc::Rc<dyn Fn(usize) -> Vec<crate::ui::menu::Act>> =
+        std::rc::Rc::new(move |i: usize| {
+            use crate::ui::menu::{Act, tsv};
+            let Some(r) = rows.with_untracked(|v| v.get(i).cloned()) else {
+                return Vec::new();
+            };
+            let (id, name) = (r.product_id.clone(), r.name.clone());
+            let edit_id = r.product_id.clone();
+            vec![
+                Act::with(Icon::History, st.tn("inventory.act.movements"), move || {
+                    st.intent
+                        .set(Some(Intent::MovementsOf(id.clone(), name.clone())));
+                    st.route.set(Route::Movements);
+                }),
+                Act::with(Icon::Pencil, st.tn("action.edit"), move || {
+                    st.intent.set(Some(Intent::EditProduct(edit_id.clone())));
+                    st.route.set(Route::Products);
+                })
+                .when(st.can("products.edit")),
+                Act::Line,
+                Act::copy(st.tn("action.copy_name"), r.name.clone()),
+                Act::copy(st.tn("action.copy_sku"), r.sku.clone()),
+                Act::copy(
+                    st.tn("action.copy_row"),
+                    tsv(&[vec![
+                        r.sku.clone(),
+                        r.name.clone(),
+                        r.category.clone().unwrap_or_default(),
+                        qty_text(st, r.on_hand_milli, &r.unit),
+                        qty_text(st, r.available_milli, &r.unit),
+                        money(st, r.value_minor),
+                    ]]),
+                ),
+            ]
+        });
+    let row_acts = acts.clone();
     let cell = move |at: Position, key: &'static str| -> AnyElement {
+        if key == "actions" {
+            return crate::ui::menu::row_actions(st, row_acts(at.index()), "stock-more")
+                .into_element();
+        }
         let r = computed(move || rows.with(|v| v.get(at.index()).cloned()));
         let text_cell = move |f: Box<dyn Fn() -> String>, tone: Tone| {
             label_line(f, ty::SM, FontWeight::NORMAL, tone).into_element()
@@ -317,29 +422,9 @@ pub fn stock_page(st: AppState, compact: bool) -> View {
             sort,
             None,
             move |i| Some(i as u64),
-            cell,
+            cell.clone(),
             "stock-table",
-            Some(std::rc::Rc::new(move |i: usize| {
-                use crate::ui::menu::{Act, tsv};
-                let Some(r) = rows.with_untracked(|v| v.get(i).cloned()) else {
-                    return Vec::new();
-                };
-                vec![
-                    Act::copy(st.tn("action.copy_name"), r.name.clone()),
-                    Act::copy(st.tn("action.copy_sku"), r.sku.clone()),
-                    Act::copy(
-                        st.tn("action.copy_row"),
-                        tsv(&[vec![
-                            r.sku.clone(),
-                            r.name.clone(),
-                            r.category.clone().unwrap_or_default(),
-                            qty_text(st, r.on_hand_milli, &r.unit),
-                            qty_text(st, r.available_milli, &r.unit),
-                            money(st, r.value_minor),
-                        ]]),
-                    ),
-                ]
-            })),
+            Some(acts.clone()),
         )
         .into_element()
     });
@@ -358,11 +443,44 @@ pub fn stock_page(st: AppState, compact: bool) -> View {
                 )
                 .child(pager(st, paging, move || data.get().total, compact)),
         );
+    let export = crate::screens::common::export_button(st, "stock-export", move || {
+        let q = query_now(100_000, 0);
+        crate::screens::common::export_from_db(
+            st,
+            "inventory.file",
+            move |s| stock_overview(s, &q),
+            move |p: StockPage| {
+                let mut out = vec![vec![
+                    st.tn("products.col.sku"),
+                    st.tn("products.col.name"),
+                    st.tn("products.col.category"),
+                    st.tn("inventory.on_hand"),
+                    st.tn("inventory.reserved"),
+                    st.tn("inventory.available"),
+                    st.tn("inventory.value"),
+                    st.tn("col.status"),
+                ]];
+                for r in p.rows {
+                    out.push(vec![
+                        r.sku,
+                        r.name,
+                        r.category.unwrap_or_default(),
+                        qty_text(st, r.on_hand_milli, &r.unit),
+                        qty_text(st, r.reserved_milli, &r.unit),
+                        qty_text(st, r.available_milli, &r.unit),
+                        money(st, r.value_minor),
+                        st.tn(state_status(r.state).1),
+                    ]);
+                }
+                out
+            },
+        );
+    });
     page(
         st,
         Route::Inventory,
         "inventory.subtitle",
-        view(),
+        export,
         body,
         compact,
     )
@@ -399,6 +517,9 @@ fn columns_again(st: AppState, compact: bool) -> Vec<Column> {
         st.t("col.status"),
         Width::Fixed(if compact { 96.0 } else { 120.0 }),
     ));
+    if !compact {
+        columns.push(Column::new("actions", String::new, Width::Fixed(104.0)));
+    }
     columns
 }
 
@@ -423,6 +544,14 @@ pub fn movements_page(st: AppState, compact: bool) -> View {
     let whs = warehouses(st);
     let chosen = signal(usize::MAX);
     let kind = signal(usize::MAX);
+    // One product's movements (from the stock's row): its id and name.
+    let product: Signal<Option<(String, String)>> = signal(None);
+    effect(move || {
+        if let Some(Intent::MovementsOf(id, name)) = st.intent.get() {
+            st.intent.set(None);
+            product.set(Some((id, name)));
+        }
+    });
     let list = resource(
         move || {
             st.session.get()?;
@@ -434,7 +563,7 @@ pub fn movements_page(st: AppState, compact: bool) -> View {
             Some((
                 MovementQuery {
                     warehouse_id: wh,
-                    product_id: None,
+                    product_id: product.get().map(|p| p.0),
                     kinds,
                     limit: 500,
                 },
@@ -460,6 +589,33 @@ pub fn movements_page(st: AppState, compact: bool) -> View {
                 .w(px(220.0))
                 .child(warehouse_filter(st, whs, chosen, "movement-warehouse")),
         )
+        .child(dynamic(move || match product.get() {
+            Some((_, name)) => view()
+                .test_id("movement-product")
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(crate::ui::tokens::control::md()))
+                .ps(px(12.0))
+                .pe(px(4.0))
+                .rounded_full()
+                .bg(Tone::PrimarySoft.color())
+                .child(icon(Icon::Package, 14.0, || Tone::Primary))
+                .child(label_line(
+                    move || name.clone(),
+                    ty::SM,
+                    FontWeight::SEMIBOLD,
+                    Tone::Primary,
+                ))
+                .child(icon_button(
+                    || Icon::Close,
+                    st.t("action.clear"),
+                    Variant::Ghost,
+                    move || product.set(None),
+                ))
+                .into_element(),
+            None => view().into_element(),
+        }))
         .child(view().w(px(220.0)).child(dropdown(
             move || {
                 std::iter::once((usize::MAX, st.tn("inventory.all_kinds")))
@@ -555,11 +711,38 @@ pub fn movements_page(st: AppState, compact: bool) -> View {
         v.into_element()
     });
     let body = card().child(filters).child(list_view);
+    let export = crate::screens::common::export_button(st, "movements-export", move || {
+        let mut out = vec![vec![
+            st.tn("col.date"),
+            st.tn("products.col.sku"),
+            st.tn("products.col.name"),
+            st.tn("inventory.kind"),
+            st.tn("inventory.warehouse"),
+            st.tn("col.document"),
+            st.tn("col.quantity"),
+        ]];
+        for m in rows.get_untracked() {
+            out.push(vec![
+                date_time(st, m.created_at),
+                m.sku,
+                m.name,
+                st.tn(&format!("movement.{}", m.kind)),
+                m.warehouse,
+                m.doc_number.unwrap_or_default(),
+                format!(
+                    "{}{}",
+                    if m.qty_milli < 0 { "-" } else { "" },
+                    qty_text(st, m.qty_milli.abs(), &m.unit)
+                ),
+            ]);
+        }
+        crate::screens::common::export_rows(st, "movements.file", out);
+    });
     page(
         st,
         Route::Movements,
         "movements.subtitle",
-        view(),
+        export,
         body,
         compact,
     )
@@ -690,12 +873,51 @@ pub fn transfers_page(st: AppState, compact: bool) -> View {
         }
         c.into_element()
     });
+    let export = crate::screens::common::export_button(st, "transfers-export", move || {
+        let mut out = vec![vec![
+            st.tn("col.number"),
+            st.tn("col.date"),
+            st.tn("transfers.from"),
+            st.tn("transfers.to"),
+            st.tn("col.status"),
+            st.tn("products.col.sku"),
+            st.tn("products.col.name"),
+            st.tn("col.quantity"),
+            st.tn("transfers.received"),
+        ]];
+        let all = list
+            .with(|l: Option<&Vec<TransferRow>>| l.cloned())
+            .unwrap_or_default();
+        for t in all {
+            let status = st.tn(if t.status == "sent" {
+                "transfers.in_transit"
+            } else {
+                "transfers.received"
+            });
+            for l in t.lines {
+                out.push(vec![
+                    t.number.clone(),
+                    date_time(st, t.sent_at),
+                    t.from_name.clone(),
+                    t.to_name.clone(),
+                    status.clone(),
+                    l.sku,
+                    l.name,
+                    qty_text(st, l.sent_milli, &l.unit),
+                    l.received_milli
+                        .map(|q| qty_text(st, q, &l.unit))
+                        .unwrap_or_default(),
+                ]);
+            }
+        }
+        crate::screens::common::export_rows(st, "transfers.file", out);
+    });
     view()
         .child(page(
             st,
             Route::Transfers,
             "transfers.subtitle",
-            add,
+            crate::screens::common::actions_row(vec![export, add]),
             view().child(body),
             compact,
         ))
@@ -1231,11 +1453,52 @@ pub fn counts_page(st: AppState, compact: bool) -> View {
         )
         .into_element()
     };
+    let export = crate::screens::common::export_button(st, "counts-export", move || {
+        let mut out = vec![vec![
+            st.tn("col.number"),
+            st.tn("col.date"),
+            st.tn("inventory.warehouse"),
+            st.tn("col.status"),
+            st.tn("products.col.sku"),
+            st.tn("products.col.name"),
+            st.tn("counts.col.book"),
+            st.tn("counts.col.counted"),
+            st.tn("counts.col.difference"),
+        ]];
+        let all = list
+            .with(|l: Option<&Vec<CountRow>>| l.cloned())
+            .unwrap_or_default();
+        for c in all {
+            let status = st.tn(match c.status.as_str() {
+                "open" => "counts.status.open",
+                "closed" => "counts.status.closed",
+                _ => "counts.status.cancelled",
+            });
+            for l in c.lines {
+                out.push(vec![
+                    c.number.clone(),
+                    date_time(st, c.opened_at),
+                    c.warehouse.clone(),
+                    status.clone(),
+                    l.sku,
+                    l.name,
+                    qty_text(st, l.book_milli, &l.unit),
+                    l.counted_milli
+                        .map(|q| qty_text(st, q, &l.unit))
+                        .unwrap_or_default(),
+                    l.counted_milli
+                        .map(|q| qty_text(st, q - l.book_milli, &l.unit))
+                        .unwrap_or_default(),
+                ]);
+            }
+        }
+        crate::screens::common::export_rows(st, "counts.file", out);
+    });
     let list_page = page(
         st,
         Route::StockCounts,
         "counts.subtitle",
-        start,
+        crate::screens::common::actions_row(vec![export, start]),
         view().child(listing),
         compact,
     );

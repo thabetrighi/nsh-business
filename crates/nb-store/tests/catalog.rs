@@ -189,6 +189,48 @@ fn search_filters_sorts_and_counts() -> R {
     )?;
     assert_eq!(page.rows.len(), 2);
     assert_eq!(page.total, 5);
+    // More filters: price range, kind, on sale, barcode, below cost.
+    let range = list_products(
+        &s,
+        &ProductQuery {
+            price_min: Some(5_000),
+            price_max: Some(20_000),
+            ..ProductQuery::default()
+        },
+    )?;
+    assert_eq!(range.total, 2);
+    let f = |q: ProductQuery| list_products(&s, &q).map(|p| p.total);
+    assert_eq!(
+        f(ProductQuery {
+            kind: Some("service".into()),
+            ..ProductQuery::default()
+        })?,
+        0
+    );
+    assert_eq!(
+        f(ProductQuery {
+            active: Some(true),
+            ..ProductQuery::default()
+        })?,
+        5
+    );
+    assert_eq!(
+        f(ProductQuery {
+            barcode: Some(true),
+            ..ProductQuery::default()
+        })? + f(ProductQuery {
+            barcode: Some(false),
+            ..ProductQuery::default()
+        })?,
+        5
+    );
+    assert_eq!(
+        f(ProductQuery {
+            below_cost: true,
+            ..ProductQuery::default()
+        })?,
+        0
+    );
     Ok(())
 }
 

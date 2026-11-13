@@ -69,6 +69,12 @@ pub struct StockQuery {
     /// Rows of the matching ones to skip (paging).
     #[serde(default)]
     pub offset: u32,
+    /// One category's products.
+    #[serde(default)]
+    pub category_id: Option<String>,
+    /// Only what is held for orders.
+    #[serde(default)]
+    pub reserved: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +103,10 @@ pub fn stock_overview(store: &Store, q: &StockQuery) -> Result<StockPage> {
                 args.len() + 1
             );
             args.push(fts);
+        }
+        if let Some(c) = q.category_id.as_ref().filter(|c| !c.is_empty()) {
+            text_filter.push_str(&format!(" AND p.category_id = ?{}", args.len() + 1));
+            args.push(c.clone());
         }
         let sql = format!(
             "SELECT p.id, p.sku, p.name, (SELECT code FROM product_units u WHERE u.product_id = p.id AND u.position = 0),
@@ -141,6 +151,9 @@ pub fn stock_overview(store: &Store, q: &StockQuery) -> Result<StockPage> {
         let mut page = StockPage::default();
         for row in all {
             let row = row?;
+            if q.reserved && row.reserved_milli <= 0 {
+                continue;
+            }
             page.counts[0] += 1;
             page.counts[match row.state {
                 StockState::Ok => 1,
@@ -150,7 +163,7 @@ pub fn stock_overview(store: &Store, q: &StockQuery) -> Result<StockPage> {
             page.value_minor += row.value_minor.max(0);
             if q.state.is_none_or(|s| s == row.state) {
                 page.total += 1;
-                if page.total > q.offset && page.rows.len() < q.limit.clamp(1, 5_000) as usize {
+                if page.total > q.offset && page.rows.len() < q.limit.clamp(1, 100_000) as usize {
                     page.rows.push(row);
                 }
             }

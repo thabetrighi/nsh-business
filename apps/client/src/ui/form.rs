@@ -65,7 +65,7 @@ fn field_inner(
     let err_shown = error.clone();
     view()
         .gap(px(6.0))
-        .child(label(caption, ty::SM, FontWeight::SEMIBOLD, Tone::Ink))
+        .child(caption_row(caption, is_required(test_id)))
         .child(
             input_box()
                 .border_color(move || {
@@ -243,6 +243,72 @@ pub fn text_area(
                         .text_color(Tone::Ink.color()),
                 ),
         )
+}
+
+/// The fields a form cannot be saved without (by test id): their caption
+/// carries a red star.
+const REQUIRED: &[&str] = &[
+    "account-code",
+    "account-edit-name",
+    "account-name",
+    "adj-amount",
+    "adj-reason",
+    "approval-pin",
+    "cat-name",
+    "category-name",
+    "count-qty",
+    "customer-name",
+    "doc-cancel-reason",
+    "exp-total-input",
+    "free-name",
+    "free-price",
+    "label-count",
+    "line-name",
+    "line-price",
+    "line-qty",
+    "money-name",
+    "order-reason",
+    "plan-amount",
+    "plan-count",
+    "pos-layout-name",
+    "pr-reason",
+    "price-list-name",
+    "printer-name",
+    "product-name",
+    "product-price",
+    "rc-amount",
+    "reopen-reason",
+    "ret-reason",
+    "reverse-reason",
+    "setup-name",
+    "setup-owner",
+    "sp-amount",
+    "till-counted",
+    "tpl-name",
+    "user-login",
+    "user-name",
+];
+
+/// Whether the field `test_id` must be filled.
+pub fn is_required(test_id: &str) -> bool {
+    REQUIRED.contains(&test_id)
+}
+
+/// A field's caption, with a red star when it must be filled.
+pub fn caption_row(caption: impl Fn() -> String + 'static, required: bool) -> View {
+    let mut row = view().flex_row().items_center().gap(px(3.0)).child(label(
+        caption,
+        ty::SM,
+        FontWeight::SEMIBOLD,
+        Tone::Ink,
+    ));
+    if required {
+        row = row.child(
+            label(|| "*".to_owned(), ty::SM, FontWeight::BOLD, Tone::Danger)
+                .test_id("required-mark"),
+        );
+    }
+    row
 }
 
 /// A caption above a control (dropdowns, chips), with an optional help line.

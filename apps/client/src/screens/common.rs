@@ -120,6 +120,55 @@ pub fn page(
         .child(body)
 }
 
+/// The export button of a list page (one look everywhere).
+pub fn export_button(st: AppState, test_id: &'static str, run: impl Fn() + 'static) -> View {
+    crate::ui::kit::button(
+        crate::ui::kit::Variant::Secondary,
+        crate::ui::kit::Size::Md,
+        Some(crate::ui::icon::Icon::Download),
+        st.t("action.export"),
+        run,
+    )
+    .test_id(test_id)
+}
+
+/// Exports `rows` (a header row, then the rows) as `file_key`'s name: one
+/// save dialog offering Excel and CSV; nothing to export says so.
+pub fn export_rows(st: AppState, file_key: &'static str, rows: Vec<Vec<String>>) {
+    if rows.len() <= 1 {
+        crate::ui::overlay::show_toast(st, st.tn("export.nothing"));
+        return;
+    }
+    crate::screens::reports::export(st, st.tn(file_key), rows);
+}
+
+/// Reads what to export (all pages of a list, not only the one shown),
+/// then writes it as rows (on the page's thread: names and formats come
+/// from the session) and exports them.
+pub fn export_from_db<T: Send + 'static>(
+    st: AppState,
+    file_key: &'static str,
+    read: impl FnOnce(&mut nb_store::Store) -> Result<T, nb_store::Error> + Send + 'static,
+    rows: impl FnOnce(T) -> Vec<Vec<String>> + 'static,
+) {
+    let task = spawn(async move {
+        match st.db().call(read).await {
+            Ok(v) => export_rows(st, file_key, rows(v)),
+            Err(_) => crate::ui::overlay::show_toast(st, st.tn("reports.export_failed")),
+        }
+    });
+    drop(task); // runs to completion: tasks end with their owner, not their handle
+}
+
+/// Header actions side by side.
+pub fn actions_row(items: Vec<View>) -> View {
+    let mut v = view().flex_row().flex_wrap().items_center().gap(px(8.0));
+    for i in items {
+        v = v.child(i);
+    }
+    v
+}
+
 /// A date and time from milliseconds, in the store's time zone (UTC+1).
 pub fn date_time(st: AppState, ms: i64) -> String {
     let offset = 60;

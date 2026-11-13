@@ -508,7 +508,7 @@ pub fn list_returns(store: &Store, search: &str, limit: u32, offset: u32) -> Res
                     (SELECT COUNT(*) FROM sale_return_lines l WHERE l.return_id = x.id AND l.restocked)
              {filter} ORDER BY x.created_at DESC, x.number DESC LIMIT ?3 OFFSET ?4"
         ))?;
-        let rows = st.query_map(params![org.to_string(), search, limit.clamp(1, 500), offset], |r| {
+        let rows = st.query_map(params![org.to_string(), search, limit.clamp(1, 100_000), offset], |r| {
             Ok(ReturnRow {
                 id: r.get(0)?,
                 number: r.get(1)?,

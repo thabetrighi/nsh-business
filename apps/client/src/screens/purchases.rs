@@ -243,7 +243,32 @@ pub fn suppliers_page(st: AppState, compact: bool) -> View {
                         move || if balance > 0 { Tone::Ink } else { Tone::Muted },
                     )),
             );
-            v = v.child(
+            let acts = {
+                let (id, edit, name, phone) =
+                    (id.clone(), sp.clone(), sp.name.clone(), sp.phone.clone());
+                move || {
+                    use crate::ui::menu::Act;
+                    let (id, edit) = (id.clone(), edit.clone());
+                    vec![
+                        Act::with(Icon::Eye, st.tn("sales.act.details"), move || {
+                            showing.set(Some(id.clone()))
+                        }),
+                        Act::with(Icon::Pencil, st.tn("action.edit"), move || {
+                            editing.set(Some(Some(edit.clone())))
+                        })
+                        .when(st.can("suppliers.edit")),
+                        Act::Line,
+                        Act::copy(st.tn("action.copy_name"), name.clone()),
+                        Act::copy(st.tn("action.copy_phone"), phone.clone()),
+                    ]
+                }
+            };
+            let tail = tail.child(crate::ui::menu::row_actions(
+                st,
+                acts(),
+                &format!("supplier-more-{i}"),
+            ));
+            v = v.child(crate::ui::menu::with_menu(
                 row_view(
                     format!("supplier-{i}"),
                     Icon::Building,
@@ -252,7 +277,8 @@ pub fn suppliers_page(st: AppState, compact: bool) -> View {
                     tail,
                 )
                 .on_press(move || showing.set(Some(id.clone()))),
-            );
+                acts,
+            ));
         }
         v.into_element()
     });
@@ -345,12 +371,62 @@ pub fn suppliers_page(st: AppState, compact: bool) -> View {
                 .into_element()
         },
     ));
+    let export = crate::screens::common::export_button(st, "suppliers-export", move || {
+        let (q, o) = (text.get_untracked(), owed.get_untracked() == 1);
+        crate::screens::common::export_from_db(
+            st,
+            "suppliers.file",
+            move |s| list_suppliers(s, &q, o, 100_000, 0),
+            move |p: SupplierPage| {
+                let c = st
+                    .session
+                    .get_untracked()
+                    .map_or(nb_core::Currency::DZD, |s| s.currency);
+                let keys = [
+                    "sku",
+                    "name",
+                    "phone",
+                    "email",
+                    "city",
+                    "address",
+                    "nif",
+                    "nis",
+                    "rc",
+                    "ai",
+                    "payment_days",
+                    "balance",
+                ];
+                let mut out = vec![
+                    keys.iter()
+                        .map(|k| st.tn(&format!("import.field.{k}")))
+                        .collect(),
+                ];
+                for sp in p.rows {
+                    out.push(vec![
+                        sp.code,
+                        sp.name,
+                        sp.phone,
+                        sp.email,
+                        sp.city,
+                        sp.address,
+                        sp.nif,
+                        sp.nis,
+                        sp.rc,
+                        sp.ai,
+                        sp.payment_days.to_string(),
+                        Money::from_minor(sp.balance_minor, c).to_plain_string(),
+                    ]);
+                }
+                out
+            },
+        );
+    });
     view()
         .child(page(
             st,
             Route::Suppliers,
             "suppliers.subtitle",
-            actions,
+            crate::screens::common::actions_row(vec![export, actions]),
             body,
             compact,
         ))
@@ -1018,9 +1094,9 @@ pub fn purchases_page(st: AppState, compact: bool) -> View {
                     ]
                 }
             };
-            tail = tail.child(crate::ui::menu::more_button(
+            tail = tail.child(crate::ui::menu::row_actions(
                 st,
-                acts.clone(),
+                acts(),
                 &format!("purchase-more-{i}"),
             ));
             let row = r.clone();
@@ -1883,6 +1959,42 @@ pub fn orders_page(st: AppState, compact: bool) -> View {
             .into_element()
         },
     ));
+    let export = crate::screens::common::export_button(st, "orders-export", move || {
+        let q = OrderQuery {
+            status: ["open", "draft", ""][which.get_untracked().min(2)].into(),
+            search: text.get_untracked(),
+            limit: 100_000,
+            offset: 0,
+            ..Default::default()
+        };
+        crate::screens::common::export_from_db(
+            st,
+            "orders.file",
+            move |s| list_orders(s, &q),
+            move |p: OrderPage| {
+                let mut out = vec![vec![
+                    st.tn("col.number"),
+                    st.tn("col.date"),
+                    st.tn("orders.col.supplier"),
+                    st.tn("col.status"),
+                    st.tn("orders.col.expected"),
+                    st.tn("col.amount"),
+                ]];
+                for o in p.rows {
+                    out.push(vec![
+                        o.number,
+                        date_time(st, o.created_at),
+                        o.supplier,
+                        st.tn(&format!("orders.status.{}", o.status)),
+                        o.expected_date.unwrap_or_default(),
+                        Money::from_minor(o.total_minor, currency(st)).to_plain_string(),
+                    ]);
+                }
+                out
+            },
+        );
+    });
+    let actions = crate::screens::common::actions_row(vec![export, actions]);
     view()
         .child(page(
             st,

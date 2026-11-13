@@ -390,7 +390,7 @@ pub fn list_expenses(store: &Store, q: &ExpenseQuery) -> Result<ExpensePage> {
         let by_category = s
             .query_map(&base[..], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<std::result::Result<_, _>>()?;
-        let limit = q.limit.clamp(1, 500);
+        let limit = q.limit.clamp(1, 100_000);
         let args: [&dyn rusqlite::ToSql; 7] =
             [&o, &q.kind, &q.from_ms, &to, &search, &limit, &q.offset];
         let rows = list(

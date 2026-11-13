@@ -85,12 +85,22 @@ pub fn categories(st: AppState, compact: bool) -> View {
         }
         c.into_element()
     });
+    let export = crate::screens::common::export_button(st, "categories-export", move || {
+        let mut out = vec![vec![
+            st.tn("categories.col.path"),
+            st.tn("categories.col.products"),
+        ]];
+        for r in rows.get_untracked() {
+            out.push(vec![r.path.join(" › "), r.products.to_string()]);
+        }
+        crate::screens::common::export_rows(st, "categories.file", out);
+    });
     view()
         .child(page(
             st,
             Route::Categories,
             "categories.subtitle",
-            add,
+            crate::screens::common::actions_row(vec![export, add]),
             view().child(body),
             compact,
         ))

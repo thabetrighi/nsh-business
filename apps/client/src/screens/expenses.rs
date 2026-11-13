@@ -406,12 +406,66 @@ pub fn expenses_page(st: AppState, compact: bool) -> View {
                 .into_element()
         },
     ));
+    let export = crate::screens::common::export_button(st, "expenses-export", move || {
+        let q = ExpenseQuery {
+            kind: KINDS[kind.get_untracked()].into(),
+            from_ms: if span.get_untracked() == 0 {
+                month_start()
+            } else {
+                0
+            },
+            to_ms: 0,
+            search: text.get_untracked(),
+            limit: 100_000,
+            offset: 0,
+        };
+        crate::screens::common::export_from_db(
+            st,
+            "expenses.file",
+            move |s| list_expenses(s, &q),
+            move |p: ExpensePage| {
+                let c = currency(st);
+                let m = |v: i64| Money::from_minor(v, c).to_plain_string();
+                let mut out = vec![vec![
+                    st.tn("col.number"),
+                    st.tn("col.date"),
+                    st.tn("expenses.kind.all"),
+                    st.tn("expenses.category"),
+                    st.tn("expenses.method"),
+                    st.tn("expenses.payee"),
+                    st.tn("expenses.net"),
+                    st.tn("expenses.vat"),
+                    st.tn("col.amount"),
+                    st.tn("expenses.reference"),
+                ]];
+                for e in p.rows {
+                    out.push(vec![
+                        e.number,
+                        date_time(st, e.created_at),
+                        st.tn(if e.kind == "income" {
+                            "expenses.kind.income"
+                        } else {
+                            "expenses.kind.expense"
+                        }),
+                        e.category,
+                        st.tn(&format!("expenses.method.{}", e.method)),
+                        e.payee,
+                        m(e.net_minor),
+                        m(e.vat_minor),
+                        m(e.total_minor),
+                        e.reference,
+                    ]);
+                }
+                out
+            },
+        );
+    });
     view()
         .child(page(
             st,
             Route::Expenses,
             "expenses.subtitle",
-            actions,
+            crate::screens::common::actions_row(vec![export, actions]),
             body,
             compact,
         ))

@@ -121,18 +121,8 @@ pub fn row_menu(
     actions: impl Fn() -> Vec<Action> + 'static,
     a11y: impl Fn() -> String + 'static,
 ) -> View {
-    let side = control::sm();
-    let trigger = view()
-        .w(px(side))
-        .h(px(side))
-        .items_center()
-        .justify_center()
-        .rounded(px(radius::md()))
-        .cursor_pointer()
-        .hover(|s| s.bg(Tone::Hover.color()))
-        .label(move || SharedString::from(a11y()))
-        .child(icon(Icon::More, 16.0, || Tone::Muted));
-    // The app's one menu look (`menu.rs`).
+    // The app's one look for a row's actions (`menu.rs`): two buttons,
+    // the rest in the "⋯".
     let acts = actions()
         .into_iter()
         .map(|a| {
@@ -141,5 +131,5 @@ pub fn row_menu(
             if a.danger { act.danger() } else { act }
         })
         .collect();
-    super::menu::menu_on(trigger, acts)
+    super::menu::row_actions_named(acts, "row-more", a11y)
 }
