@@ -237,6 +237,9 @@ struct Till {
     full: Signal<bool>,
     /// The last sale made here (its number, total, change).
     last: Signal<Option<nb_store::usecases::sales::SaleResult>>,
+    /// The vehicle whose tour the person signed in drives (name,
+    /// warehouse): the till sells from its stock.
+    van: Memo<Option<(String, String)>>,
 }
 
 /// A sale reopened in the cart: its number, what is left of it, and
@@ -401,7 +404,23 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
     let held = computed(move || {
         held_list.with(|v: Option<&Vec<HeldCart>>| v.cloned().unwrap_or_default())
     });
+    let van_of = resource(
+        move || st.session.get().map(|s| (st.data_rev.get(), s.actor)),
+        move |(_, me), _| {
+            let db = st.db();
+            async move {
+                db.call(move |s| {
+                    nb_store::usecases::distribution::driving_vehicle(s, &me.to_string())
+                        .map(|v| v.map(|v| (v.name, v.warehouse_id)))
+                })
+                .await
+            }
+        },
+    );
+    let van =
+        computed(move || van_of.with(|v: Option<&Option<(String, String)>>| v.cloned().flatten()));
     let t = Till {
+        van,
         register,
         held,
         held_rev,
@@ -479,6 +498,25 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
     // the page (the effect runs again when it clears the request, which
     // would end a task of its own).
     let page_owner = Owner::current();
+    // A customer sent from a stop of a tour: the sale is theirs.
+    effect(move || {
+        let Some(crate::state::Intent::SellTo(id)) = st.intent.get() else {
+            return;
+        };
+        st.intent.set(None);
+        let db = st.db();
+        let task = page_owner.run(|| {
+            spawn(async move {
+                if let Ok(c) = db
+                    .call(move |s| nb_store::usecases::customers::get_customer(s, &id))
+                    .await
+                {
+                    t.customer.set(Some(c));
+                }
+            })
+        });
+        drop(task); // runs to completion under the page
+    });
     // A sale sent from the sales list to be corrected at the till.
     effect(move || {
         let Some(crate::state::Intent::Reopen(number)) = st.intent.get() else {
@@ -2309,7 +2347,11 @@ fn pay_dialog(
     });
     let save = {
         let close = close.clone();
-        let warehouse = session.warehouse().to_string();
+        // On a tour, from the vehicle's stock; otherwise the shop's.
+        let warehouse = t
+            .van
+            .get_untracked()
+            .map_or_else(|| session.warehouse().to_string(), |v| v.1);
         let register = reg.id.clone();
         move || {
             if busy.get_untracked() {

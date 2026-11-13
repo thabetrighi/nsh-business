@@ -18,6 +18,7 @@ pub mod home_layout;
 pub mod import;
 pub mod inventory;
 pub mod lock;
+pub mod my_day;
 pub mod picker;
 pub mod pos;
 pub mod pos_layout;

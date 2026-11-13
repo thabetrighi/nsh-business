@@ -283,6 +283,8 @@ fn a_delivery_day_from_orders_to_settled_cash() -> R {
         Some(120_500),
     )?;
     assert_eq!(t.tour.status, "on_road");
+    // A delivery tour: the till keeps selling from the shop's stock.
+    assert!(driving_vehicle(&s, &driver.id)?.is_none());
     // The next stop is 1.1 km away: about 3 minutes at 40 km/h.
     let next = t.next().cloned().ok_or(Error::NotFound("next"))?;
     assert_eq!(next.customer, "Superette Proche");

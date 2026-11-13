@@ -363,7 +363,7 @@ pub fn seed_distribution(store: &mut Store, setup: &SetupResult, lang: DemoLang)
         m("demo.tour"),
         d::TourInput {
             vehicle_id: truck.id.clone(),
-            kind: "van".into(),
+            kind: "delivery".into(),
             customers: centre,
             optimize: true,
             ..Default::default()

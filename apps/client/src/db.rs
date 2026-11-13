@@ -163,7 +163,9 @@ fn demo_shop(store: &mut Store, lang: DemoLang) -> Result<Session, Error> {
         store,
         SetupInput {
             org_name: name.into(),
-            activity: "grocery".into(),
+            // NB_ACTIVITY (development): another activity's modules, e.g.
+            // `wholesale` for distribution.
+            activity: std::env::var("NB_ACTIVITY").unwrap_or_else(|_| "grocery".into()),
             country: "DZ".into(),
             currency: "DZD".into(),
             currency_exp: 2,

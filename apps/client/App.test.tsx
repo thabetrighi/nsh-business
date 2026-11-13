@@ -1452,3 +1452,30 @@ test("distribution: a customer made at the till, the board, a tour worked and se
   await app.press("text:Zones");
   await app.waitFor("id:zone-1");
 });
+
+test("the driver's day: the next stop in large, reached and delivered, then the one after", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const seen = (re: RegExp) => app.waitUntil(() => app.texts().some((t) => re.test(plain(t))));
+  await app.waitFor("text:Ventes brutes");
+  // A wholesaler's modules; the owner drives the demo truck.
+  await app.press("id:nav-settings");
+  await app.press("id:settings-store");
+  await app.press("id:activity-select");
+  await app.press("text:Commerce de gros");
+  await app.press("id:store-save");
+  await app.waitFor("text:Paramètres enregistrés");
+  await app.press("text:Distribution");
+  await app.press("id:nav-my_day");
+  await app.waitFor("id:myday-next");
+  await seen(/^Boulangerie El Amel$/);
+  await app.press("id:myday-arrived");
+  await seen(/^Sur place$/);
+  await app.press("id:myday-done");
+  await app.type("id:stop-receiver", "M. Karim");
+  await app.press("id:stop-save");
+  await seen(/^Arrêt fait$/);
+  // The next stop comes up; one further down can be chosen first.
+  await app.waitFor("id:myday-stop-0");
+  await app.press("id:myday-stop-0");
+  await app.waitFor("id:myday-fail");
+});

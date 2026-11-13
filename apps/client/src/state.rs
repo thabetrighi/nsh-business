@@ -42,6 +42,8 @@ pub enum Intent {
     TransferWith(Option<String>, Option<String>),
     /// Open this tour on the tours page (its id).
     Tour(String),
+    /// Sell to this customer at the till (its id): from a stop of a tour.
+    SellTo(String),
 }
 
 /// Light, dark, or as the system.

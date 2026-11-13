@@ -526,6 +526,24 @@ pub fn list_vehicles(store: &Store) -> Result<Vec<VehicleRow>> {
     })
 }
 
+/// The vehicle `user` is driving now on a van-sales tour (on the road),
+/// if any: the till sells from its stock. Delivery tours carry orders
+/// invoiced from the shop's stock.
+pub fn driving_vehicle(store: &Store, user: &str) -> Result<Option<VehicleRow>> {
+    store.read(|r| {
+        let id: Option<String> = r
+            .conn()
+            .query_row(
+                "SELECT vehicle_id FROM tours WHERE driver_id = ?1 AND status = 'on_road' AND kind = 'van'
+                   AND deleted_at IS NULL ORDER BY started_at DESC LIMIT 1",
+                [user],
+                |r| r.get(0),
+            )
+            .optional()?;
+        id.map(|id| vehicle(r.conn(), &id)).transpose()
+    })
+}
+
 pub fn get_vehicle(store: &Store, id: &str) -> Result<VehicleRow> {
     store.read(|r| vehicle(r.conn(), id))
 }

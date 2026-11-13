@@ -76,6 +76,7 @@ routes! {
     Ledger => "ledger", Book;
     TrialBalance => "trial_balance", Scale;
     // Distribution
+    MyDay => "my_day", Navigation;
     Tours => "tours", MapPin;
     Vans => "vans", Truck;
     FieldOrders => "field_orders", ClipboardList;
@@ -159,7 +160,7 @@ pub const SECTIONS: &[Section] = &[
     Section {
         key: "nav.sec.distribution",
         icon: Icon::Map,
-        routes: &[Route::Tours, Route::Vans, Route::FieldOrders],
+        routes: &[Route::MyDay, Route::Tours, Route::Vans, Route::FieldOrders],
     },
     Section {
         key: "nav.sec.reports",
@@ -199,7 +200,7 @@ impl Route {
             Route::Installments => F::Installments,
             Route::Cash | Route::Banks | Route::Expenses | Route::Shifts => F::Cash,
             Route::Journal | Route::Accounts | Route::Ledger | Route::TrialBalance => F::Accounting,
-            Route::Tours => F::Routes,
+            Route::Tours | Route::MyDay => F::Routes,
             Route::Vans => F::Vehicles,
             Route::FieldOrders => F::SalesReps,
             Route::Reports | Route::StockReports | Route::FinanceReports | Route::PartyReports => {
@@ -221,6 +222,7 @@ impl Route {
             }
             Route::Purchases | Route::PurchaseOrders => "purchases.order",
             Route::Tours | Route::Vans | Route::FieldOrders => "distribution.view",
+            Route::MyDay => "distribution.drive",
             _ => return None,
         })
     }

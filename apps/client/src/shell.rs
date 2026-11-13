@@ -26,6 +26,18 @@ const SIDEBAR_W: f32 = 248.0;
 
 pub fn shell(st: AppState) -> impl IntoElement {
     let compact = computed(|| window().width.0 < COMPACT_MAX);
+    // A driver who signs in lands on their day (the same app, their account).
+    let landed: Signal<Option<String>> = signal(None);
+    effect(move || {
+        let who = st.user.get().map(|u| u.user_id);
+        if who.is_none() || who == landed.get_untracked() {
+            return;
+        }
+        landed.set(who);
+        if st.can("distribution.drive") && !st.can("distribution.plan") && st.shows(Route::MyDay) {
+            st.route.set(Route::MyDay);
+        }
+    });
     view()
         .flex_1()
         .direction(move || st.direction())
@@ -180,6 +192,10 @@ fn page_of(st: AppState, route: Route, compact: bool) -> AnyElement {
         Route::FieldOrders => scroll()
             .flex_1()
             .child(crate::screens::field::field_page(st, compact))
+            .into_element(),
+        Route::MyDay => scroll()
+            .flex_1()
+            .child(crate::screens::my_day::my_day_page(st, compact))
             .into_element(),
         Route::Tours => scroll()
             .flex_1()
@@ -863,7 +879,7 @@ fn bottom_nav(st: AppState) -> View {
     let in_more = computed(move || {
         !matches!(
             st.route.get(),
-            Route::Home | Route::Sell | Route::Sales | Route::Customers
+            Route::Home | Route::Sell | Route::Sales | Route::Customers | Route::MyDay
         )
     });
     let tab = move |r: Option<Route>, which: Icon, caption: Box<dyn Fn() -> String>| {
@@ -942,11 +958,24 @@ fn bottom_nav(st: AppState) -> View {
                     Icon::Home,
                     Box::new(st.t("nav.home")),
                 ))
-                .child(tab(
-                    Some(Route::Sales),
-                    Icon::Receipt,
-                    Box::new(st.t("nav.sales")),
-                ))
+                // A driver's second tab is their day; others', the sales.
+                .child(view().flex_1().child(dynamic(move || {
+                    if st.can("distribution.drive") && st.shows(Route::MyDay) {
+                        tab(
+                            Some(Route::MyDay),
+                            Icon::Navigation,
+                            Box::new(st.t("nav.my_day")),
+                        )
+                        .into_element()
+                    } else {
+                        tab(
+                            Some(Route::Sales),
+                            Icon::Receipt,
+                            Box::new(st.t("nav.sales")),
+                        )
+                        .into_element()
+                    }
+                })))
                 .child(sell)
                 .child(tab(
                     Some(Route::Customers),

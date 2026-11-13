@@ -1238,6 +1238,14 @@ pub(super) fn bottom_bar(st: AppState, t: Till, p: &Panel) -> View {
 
 /// "Till 1 · shift S-0003" (what the till's chip and bar show).
 fn till_line(st: AppState, t: Till) -> String {
+    let line = till_line_only(st, t);
+    match t.van.get() {
+        Some((van, _)) => tr_args(st.lang(), "pos.van_line", &[("till", &line), ("van", &van)]),
+        None => line,
+    }
+}
+
+fn till_line_only(st: AppState, t: Till) -> String {
     t.till
         .with(|s| {
             s.as_ref().map(|(reg, shift)| {

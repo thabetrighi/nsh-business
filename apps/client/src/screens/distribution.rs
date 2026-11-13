@@ -373,7 +373,7 @@ pub fn route_url(from: Option<Point>, stops: &[Point]) -> Option<String> {
     Some(url)
 }
 
-fn small_stat(st: AppState, which: Icon, key: &'static str, value: String, tone: Tone) -> View {
+pub fn small_stat(st: AppState, which: Icon, key: &'static str, value: String, tone: Tone) -> View {
     view()
         .flex_1()
         .min_w(px(0.0))
@@ -402,7 +402,7 @@ fn small_stat(st: AppState, which: Icon, key: &'static str, value: String, tone:
         ))
 }
 
-fn line(which: Icon, text: String, tone: Tone) -> View {
+pub fn line(which: Icon, text: String, tone: Tone) -> View {
     view()
         .flex_row()
         .items_center()
@@ -1739,7 +1739,12 @@ fn stop_row(
 }
 
 /// Delivered (who received it, what was collected) or failed (why).
-fn stop_form(st: AppState, stop: StopRow, ok: bool, close: impl Fn() + Clone + 'static) -> View {
+pub fn stop_form(
+    st: AppState,
+    stop: StopRow,
+    ok: bool,
+    close: impl Fn() + Clone + 'static,
+) -> View {
     let receiver = signal(String::new());
     let collected = signal(String::new());
     let note = signal(String::new());
@@ -1938,7 +1943,12 @@ fn stop_form(st: AppState, stop: StopRow, ok: bool, close: impl Fn() + Clone + '
 }
 
 /// Ending a tour (its odometer) or settling it (the cash counted).
-fn end_form(st: AppState, d: TourDetail, settle: bool, close: impl Fn() + Clone + 'static) -> View {
+pub fn end_form(
+    st: AppState,
+    d: TourDetail,
+    settle: bool,
+    close: impl Fn() + Clone + 'static,
+) -> View {
     let value = signal(String::new());
     let note = signal(String::new());
     let error = signal(String::new());

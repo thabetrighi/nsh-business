@@ -61,11 +61,14 @@
 - **أرقام داخل نص عربي:** الإشارة داخل منطقة العزل مع الرقم (`Format::money_signed`)؛ فاصل الآلاف U+00A0 (الخط لا يحوي U+202F).
 - **قوالب المستندات:** كل مستند يُرسم بـ `render(apply(قالب, Options), DocData, …)`؛ `apply` يُبقي ما أوقفه المتجر موقوفاً، و`template_for` يعيد القالب الجاهز إن تعذرت قراءة المحفوظ. محرر بقائمة حقول متغيرة: خانة `when` لكل موضع، والصف نفسه في `dynamic` بلا حقول إدخال.
 
+- **البيع من مخزون المركبة فقط في جولات «بيع متنقل»** (`driving_vehicle`, `kind = 'van'`): جولة التوصيل تُفوتر من مخزون المتجر. جولة العرض «توصيل» والمالك سائقها؛ لو صارت «van» لباع الصندوق في كل الاختبارات من شاحنة فارغة.
+- **اختبارات الواجهة بمقاس الهاتف:** القوائم المنسدلة في الإعدادات تُخطئ الهدف؛ غيّر النشاط بمقاس سطح المكتب.
+
 ## الأدوات والأوامر
 - NSH: الإصدار المثبت `0.4.0` (لا ترقية دون ADR).
 - تثبيت NSH في بيئة Claude: nsh.dev محجوب من الشل؛ نزّل `https://github.com/longbridge/nsh/releases/download/v0.4.0/nsh-linux-x86_64.tar.gz` وفكّه في `~/.nsh` ثم اربط `~/.nsh/nsh/bin/nsh`.
 - متطلبات Linux: `apt-get install libgtk-4-dev clang xvfb imagemagick` (GTK ≥ 4.14).
-- متغيرات تطوير للتطبيق: `NB_LANG=ar|fr|en`، `NB_APPEARANCE=light|dark|system`، `NB_WINDOW=1360x860`، `NB_ROUTE=products|settings|design|customers`، `NB_OPEN=add_product|palette|till|printing`، `NB_ACCENT=blurple|ocean|emerald|teal|amber|rose|slate`، `NB_FONT=cairo|tajawal|almarai|readex|plex`، `NB_TEXT=s|m|l|xl`، `NB_DENSITY=compact|comfortable|spacious`. الإعدادات تُحفظ في `~/.local/share/default/storage.json` (احذفه بين اللقطات).
+- متغيرات تطوير للتطبيق: `NB_LANG=ar|fr|en`، `NB_APPEARANCE=light|dark|system`، `NB_WINDOW=1360x860`، `NB_ROUTE=products|settings|design|customers`، `NB_OPEN=add_product|palette|till|printing`، `NB_ACCENT=blurple|ocean|emerald|teal|amber|rose|slate`، `NB_FONT=cairo|tajawal|almarai|readex|plex`، `NB_TEXT=s|m|l|xl`، `NB_DENSITY=compact|comfortable|spacious`، `NB_ACTIVITY=wholesale` (نشاط متجر العرض، لإظهار التوزيع). الإعدادات تُحفظ في `~/.local/share/default/storage.json` (احذفه بين اللقطات).
 - تشغيل واجهة دون شاشة: `Xvfb :99 &` ثم `DISPLAY=:99 GDK_BACKEND=x11 <binary>` ولقطة بـ `import -window root`.
 - اختبارات الواجهة: `nsh test <app-dir>`.
 - الويب يحتاج `rustup target add wasm32-unknown-unknown` + `wasm-bindgen-cli`؛ غير متاح في بيئة Claude (انظر NEEDS_OWNER) — يُبنى عبر GitHub Actions.
