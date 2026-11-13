@@ -45,6 +45,7 @@ routes! {
     Quotes => "quotes", FileText;
     Returns => "returns", Undo;
     Promotions => "promotions", Percent;
+    PriceCheck => "price_check", Tag;
     // Purchases
     Purchases => "purchases", Truck;
     PurchaseOrders => "purchase_orders", ClipboardList;
@@ -106,6 +107,7 @@ pub const SECTIONS: &[Section] = &[
             Route::Quotes,
             Route::Returns,
             Route::Promotions,
+            Route::PriceCheck,
         ],
     },
     Section {
@@ -186,7 +188,7 @@ impl Route {
             Route::Sales | Route::Quotes | Route::Returns => F::Sales,
             Route::Promotions => F::Promotions,
             Route::Purchases | Route::PurchaseOrders | Route::Suppliers => F::Purchasing,
-            Route::Products | Route::Categories | Route::Units => F::Catalog,
+            Route::Products | Route::Categories | Route::Units | Route::PriceCheck => F::Catalog,
             Route::PriceLists => F::PriceLists,
             Route::Inventory | Route::Movements | Route::StockCounts | Route::Warehouses => {
                 F::Inventory

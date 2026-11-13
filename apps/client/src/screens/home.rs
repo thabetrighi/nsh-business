@@ -10,10 +10,10 @@ use nb_core::Money;
 use nb_i18n::tr_args;
 use nb_store::usecases::debts::{Ageing, ageing};
 use nb_store::usecases::reports::{
-    Alerts, Dashboard, PartyRow, Period, alerts, dashboard, payables,
+    Alerts, Dashboard, Insights, PartyRow, Period, alerts, dashboard, insights, payables,
 };
 
-use crate::screens::home_layout::{Card, Home, Item, WIDTHS};
+use crate::screens::home_layout::{Card, Home, Item, PRESETS, WIDTHS};
 use crate::ui::icon::icon;
 use crate::ui::kit::icon_button;
 use crate::ui::menu::{Act, menu_on};
@@ -23,7 +23,9 @@ use nsh_core::prelude::*;
 use crate::nav::Route;
 use crate::screens::common::date_time;
 use crate::state::AppState;
-use crate::ui::chart::{Series, area_chart, bar_list, donut, legend, legend_row, sparkline};
+use crate::ui::chart::{
+    Series, area_chart, bar_list, column_chart, donut, legend, legend_row, progress, sparkline,
+};
 use crate::ui::icon::Icon;
 use crate::ui::kit::{Size, Variant, avatar, badge, button, figure, label, label_line, segmented};
 use crate::ui::surface::{
@@ -96,7 +98,24 @@ pub fn home(st: AppState, compact: bool) -> View {
             async move { db.call(|s| payables(s)).await }
         },
     );
+    // The other cards' figures, read once for all of them.
+    let any_insight = move || {
+        Home::parse(&st.biz.home.get())
+            .items
+            .iter()
+            .any(|i| i.card.needs_insights() && !i.hidden)
+    };
+    let insights_data = resource(
+        move || {
+            (any_insight() && st.session.get().is_some()).then(|| (period.get(), st.data_rev.get()))
+        },
+        move |(p, _), _| {
+            let db = st.db();
+            async move { db.call(move |s| insights(s, p)).await }
+        },
+    );
     let extra = Extra {
+        insights: computed(move || insights_data.with(|a: Option<&Insights>| a.cloned())),
         alerts: computed(move || alerts_data.with(|a: Option<&Alerts>| a.cloned())),
         ageing: computed(move || ageing_data.with(|a: Option<&Ageing>| a.cloned())),
         payables: computed(move || payables_data.with(|a: Option<&Vec<PartyRow>>| a.cloned())),
@@ -208,6 +227,7 @@ pub fn home(st: AppState, compact: bool) -> View {
 /// What some cards read besides the dashboard (each only when shown).
 #[derive(Clone, Copy)]
 struct Extra {
+    insights: Memo<Option<Insights>>,
     alerts: Memo<Option<Alerts>>,
     ageing: Memo<Option<Ageing>>,
     payables: Memo<Option<Vec<PartyRow>>>,
@@ -216,10 +236,11 @@ struct Extra {
 /// A card's content.
 fn card_of(st: AppState, c: Card, d: &Dashboard, p: Period, compact: bool, x: &Extra) -> View {
     match c {
-        Card::Revenue => kpi_tiles(st, d, compact).0,
-        Card::Orders => kpi_tiles(st, d, compact).1,
-        Card::Basket => kpi_tiles(st, d, compact).2,
-        Card::Credit => kpi_tiles(st, d, compact).3,
+        // In a row: a figure grows across, as tall as its content.
+        Card::Revenue => view().flex_row().child(kpi_tiles(st, d, compact).0),
+        Card::Orders => view().flex_row().child(kpi_tiles(st, d, compact).1),
+        Card::Basket => view().flex_row().child(kpi_tiles(st, d, compact).2),
+        Card::Credit => view().flex_row().child(kpi_tiles(st, d, compact).3),
         Card::Sales => sales_card(st, d, p, compact),
         Card::Payments => payments_card(st, d),
         Card::Invoices => invoices_card(st, d, compact),
@@ -229,7 +250,407 @@ fn card_of(st: AppState, c: Card, d: &Dashboard, p: Period, compact: bool, x: &E
         Card::Quick => quick_card(st),
         Card::Debts => debts_card(st, x.ageing),
         Card::Payables => payables_card(st, x.payables),
+        Card::Note => note_card(st),
+        other => {
+            let i = x.insights;
+            view().w_full().child(dynamic(move || match i.get() {
+                Some(i) => insight_card(st, other, &i, p, compact).into_element(),
+                None => card()
+                    .child(card_header_icon(
+                        Some(card_icon(other)),
+                        st.t(card_key(other)),
+                        None,
+                        view(),
+                    ))
+                    .child(card_body().child(label(
+                        st.t("dashboard.loading"),
+                        ty::SM,
+                        FontWeight::NORMAL,
+                        Tone::Muted,
+                    )))
+                    .into_element(),
+            }))
+        }
     }
+}
+
+fn card_key(c: Card) -> &'static str {
+    match c {
+        Card::TopProducts => "home.card.top_products",
+        Card::Hours => "home.card.hours",
+        Card::Weekdays => "home.card.weekdays",
+        Card::Cashiers => "home.card.cashiers",
+        Card::Profit => "home.card.profit",
+        Card::Returns => "home.card.returns",
+        Card::Spending => "home.card.spending",
+        Card::StockValue => "home.card.stock_value",
+        Card::Purchases => "home.card.purchases",
+        Card::Discounts => "home.card.discounts",
+        Card::NewCustomers => "home.card.new_customers",
+        Card::Tax => "home.card.tax",
+        Card::Target => "home.card.target",
+        _ => "home.card.note",
+    }
+}
+
+fn card_icon(c: Card) -> Icon {
+    match c {
+        Card::TopProducts => Icon::Star,
+        Card::Hours => Icon::Clock,
+        Card::Weekdays => Icon::Calendar,
+        Card::Cashiers => Icon::Users,
+        Card::Profit => Icon::TrendingUp,
+        Card::Returns => Icon::Undo,
+        Card::Spending => Icon::Wallet,
+        Card::StockValue => Icon::Package,
+        Card::Purchases => Icon::Truck,
+        Card::Discounts => Icon::Percent,
+        Card::NewCustomers => Icon::UserPlus,
+        Card::Tax => Icon::Receipt,
+        Card::Target => Icon::Target,
+        _ => Icon::FileText,
+    }
+}
+
+/// A figure card: its name, its value, a line under it.
+fn figure_card(
+    st: AppState,
+    c: Card,
+    value: String,
+    under: String,
+    tone: Status,
+    compact: bool,
+) -> View {
+    view().flex_row().child(kpi(
+        st.t(card_key(c)),
+        move || value.clone(),
+        Some(
+            view()
+                .w(px(30.0))
+                .h(px(30.0))
+                .rounded(px(8.0))
+                .items_center()
+                .justify_center()
+                .bg(tone.bg().color())
+                .child(icon(card_icon(c), 16.0, move || tone.fg())),
+        ),
+        view().child(label(
+            move || under.clone(),
+            ty::XS,
+            FontWeight::NORMAL,
+            Tone::Muted,
+        )),
+        compact,
+    ))
+}
+
+/// The cards read from the period's insights.
+fn insight_card(st: AppState, c: Card, i: &Insights, p: Period, compact: bool) -> View {
+    let f = st.fmt();
+    let m = move |v: i64| st.fmt().money_whole(money(st, v));
+    let r = &i.report;
+    let count =
+        |key: &'static str, n: i64| tr_args(st.lang(), key, &[("count", &st.fmt().integer(n))]);
+    match c {
+        Card::Profit => {
+            if !st.can("reports.profit") {
+                return figure_card(
+                    st,
+                    c,
+                    "—".into(),
+                    st.tn("home.no_permission"),
+                    Status::Neutral,
+                    compact,
+                );
+            }
+            figure_card(
+                st,
+                c,
+                m(r.profit_minor()),
+                tr_args(
+                    st.lang(),
+                    "home.margin",
+                    &[("pct", &percent_plain(&f, r.margin_bps()))],
+                ),
+                Status::Success,
+                compact,
+            )
+        }
+        Card::Returns => figure_card(
+            st,
+            c,
+            m(r.returns_total_minor),
+            count("home.returns_count", i64::from(r.returns)),
+            Status::Warning,
+            compact,
+        ),
+        Card::Spending => figure_card(
+            st,
+            c,
+            m(i.expenses_minor),
+            tr_args(st.lang(), "home.income", &[("amount", &m(i.income_minor))]),
+            Status::Danger,
+            compact,
+        ),
+        Card::StockValue => figure_card(
+            st,
+            c,
+            m(i.stock_value_minor),
+            st.tn("home.at_cost"),
+            Status::Info,
+            compact,
+        ),
+        Card::Purchases => figure_card(
+            st,
+            c,
+            m(i.purchases_minor),
+            count("home.purchases_count", i64::from(i.purchases)),
+            Status::Accent,
+            compact,
+        ),
+        Card::Discounts => figure_card(
+            st,
+            c,
+            m(r.discounts_minor),
+            tr_args(
+                st.lang(),
+                "home.of_sales",
+                &[(
+                    "pct",
+                    &percent_plain(
+                        &f,
+                        r.discounts_minor.saturating_mul(10_000)
+                            / (r.total_minor + r.discounts_minor).max(1),
+                    ),
+                )],
+            ),
+            Status::Warning,
+            compact,
+        ),
+        Card::NewCustomers => figure_card(
+            st,
+            c,
+            f.integer(i64::from(i.new_customers)),
+            st.tn(period_key(p)),
+            Status::Success,
+            compact,
+        ),
+        Card::Tax => figure_card(
+            st,
+            c,
+            m(r.tax_minor),
+            st.tn("home.vat_collected"),
+            Status::Info,
+            compact,
+        ),
+        Card::Target => target_card(st, r.total_minor - r.returns_total_minor, p),
+        Card::TopProducts | Card::Cashiers => {
+            let rows = if c == Card::TopProducts {
+                &r.by_product
+            } else {
+                &r.by_cashier
+            };
+            let list: Vec<(String, i64, String)> = rows
+                .iter()
+                .take(6)
+                .map(|g| {
+                    let name = if g.name.is_empty() {
+                        st.tn("home.unknown")
+                    } else {
+                        g.name.clone()
+                    };
+                    (name, g.net_minor, st.fmt().compact(g.net_minor / 100))
+                })
+                .collect();
+            let body = if list.is_empty() {
+                card_body().child(label(
+                    st.t("dashboard.nothing_yet"),
+                    ty::SM,
+                    FontWeight::NORMAL,
+                    Tone::Muted,
+                ))
+            } else {
+                card_body().child(bar_list(
+                    list,
+                    if c == Card::TopProducts {
+                        Tone::Primary
+                    } else {
+                        Tone::Info
+                    },
+                ))
+            };
+            card()
+                .child(card_header_icon(
+                    Some(card_icon(c)),
+                    st.t(card_key(c)),
+                    Some(Box::new(st.t("home.before_tax"))),
+                    view(),
+                ))
+                .child(body)
+        }
+        _ => {
+            // Hours (every third named) or weekdays.
+            let (values, names): (Vec<i64>, Vec<String>) = if c == Card::Hours {
+                (
+                    i.hours.clone(),
+                    (0..24)
+                        .map(|h| {
+                            if h % 3 == 0 {
+                                format!("{h}")
+                            } else {
+                                String::new()
+                            }
+                        })
+                        .collect(),
+                )
+            } else {
+                (
+                    i.weekdays.clone(),
+                    ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+                        .iter()
+                        .map(|d| st.tn(&format!("home.day.{d}")))
+                        .collect(),
+                )
+            };
+            let best = values
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, v)| **v)
+                .filter(|(_, v)| **v > 0)
+                .map(|(k, _)| k);
+            let hint = match best {
+                Some(k) if c == Card::Hours => tr_args(
+                    st.lang(),
+                    "home.best_hour",
+                    &[("hour", &format!("{k:02}:00"))],
+                ),
+                Some(k) => tr_args(
+                    st.lang(),
+                    "home.best_day",
+                    &[(
+                        "day",
+                        &st.tn(&format!(
+                            "home.day.{}",
+                            ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][k.min(6)]
+                        )),
+                    )],
+                ),
+                None => st.tn("dashboard.nothing_yet"),
+            };
+            card()
+                .child(card_header_icon(
+                    Some(card_icon(c)),
+                    st.t(card_key(c)),
+                    Some(Box::new(move || hint.clone())),
+                    view(),
+                ))
+                .child(card_body().child(column_chart(
+                    values,
+                    names,
+                    if compact { 120.0 } else { 160.0 },
+                    Tone::Primary,
+                )))
+        }
+    }
+}
+
+/// A goal for the period (typed on the card, kept on the device) and how
+/// far the sales are.
+fn target_card(st: AppState, done: i64, p: Period) -> View {
+    let key = match p {
+        Period::Week => "nb.home.target.week",
+        Period::Month => "nb.home.target.month",
+        Period::Year => "nb.home.target.year",
+    };
+    let goal_text = crate::state::persisted_text(key);
+    let c = st
+        .session
+        .get_untracked()
+        .map_or(nb_core::Currency::DZD, |s| s.currency);
+    let goal = move || {
+        crate::screens::forms::parse_price(&goal_text.get(), c)
+            .map(|m| m.minor())
+            .unwrap_or(0)
+    };
+    card()
+        .child(card_header_icon(
+            Some(Icon::Target),
+            st.t("home.card.target"),
+            Some(Box::new(st.t(period_key(p)))),
+            view(),
+        ))
+        .child(
+            card_body()
+                .gap(px(10.0))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_end()
+                        .gap(px(8.0))
+                        .child(figure(
+                            move || {
+                                let g = goal();
+                                if g <= 0 {
+                                    "—".into()
+                                } else {
+                                    st.fmt()
+                                        .percent_signed(done.saturating_mul(10_000) / g)
+                                        .trim_start_matches('+')
+                                        .to_owned()
+                                }
+                            },
+                            ty::H2,
+                            FontWeight::BOLD,
+                            || Tone::Ink,
+                        ))
+                        .child(label(
+                            move || st.fmt().money_whole(money(st, done)),
+                            ty::SM,
+                            FontWeight::NORMAL,
+                            Tone::Muted,
+                        )),
+                )
+                .child(dynamic(move || {
+                    let g = goal();
+                    let share = if g <= 0 { 0.0 } else { done as f32 / g as f32 };
+                    progress(
+                        share,
+                        if share >= 1.0 {
+                            Tone::Success
+                        } else {
+                            Tone::Primary
+                        },
+                    )
+                    .into_element()
+                }))
+                .child(crate::ui::form::field(
+                    st.t("home.target.goal"),
+                    goal_text,
+                    || "0".to_owned(),
+                    String::new,
+                    KeyboardType::Decimal,
+                    "home-target",
+                )),
+        )
+}
+
+/// A note kept on this device (what to order, a reminder…).
+fn note_card(st: AppState) -> View {
+    let text = crate::state::persisted_text("nb.home.note");
+    card()
+        .child(card_header_icon(
+            Some(Icon::FileText),
+            st.t("home.card.note"),
+            None,
+            view(),
+        ))
+        .child(card_body().child(crate::ui::form::text_area(
+            String::new,
+            text,
+            st.t("home.note.hint"),
+            140.0,
+            "home-note",
+        )))
 }
 
 /// A card while the dashboard is arranged: dimmed when hidden, its menu
@@ -328,14 +749,39 @@ fn frame(st: AppState, at: usize, item: &Item, editing: bool, content: View) -> 
 /// Arranging the dashboard: add a card, back to the default, done.
 fn edit_bar(st: AppState) -> View {
     let h = Home::parse(&st.biz.home.get_untracked());
-    let adds: Vec<Act> = h
-        .missing()
-        .into_iter()
-        .map(|c| {
-            Act::new(st.tn(&format!("home.card.{}", c.code())), move || {
-                let mut h = Home::parse(&st.biz.home.get_untracked());
-                h.add(c);
-                st.biz.home.set(h.to_json());
+    let add = move |c: Card| {
+        Act::new(st.tn(&format!("home.card.{}", c.code())), move || {
+            let mut h = Home::parse(&st.biz.home.get_untracked());
+            h.add(c);
+            st.biz.home.set(h.to_json());
+        })
+    };
+    let missing = h.missing();
+    let figures: Vec<Act> = missing
+        .iter()
+        .filter(|c| c.is_figure())
+        .map(|c| add(*c))
+        .collect();
+    let others: Vec<Act> = missing
+        .iter()
+        .filter(|c| !c.is_figure())
+        .map(|c| add(*c))
+        .collect();
+    let mut adds = Vec::new();
+    if !figures.is_empty() {
+        adds.push(Act::sub(Icon::Hash, st.tn("home.add.figures"), figures));
+    }
+    if !others.is_empty() {
+        adds.push(Act::sub(Icon::ChartLine, st.tn("home.add.charts"), others));
+    }
+    if adds.is_empty() {
+        adds.push(Act::Title(st.tn("home.add.all_there")));
+    }
+    let presets: Vec<Act> = PRESETS
+        .iter()
+        .map(|&p| {
+            Act::new(st.tn(&format!("home.preset.{p}")), move || {
+                st.biz.home.set(Home::preset(p).to_json())
             })
         })
         .collect();
@@ -367,6 +813,17 @@ fn edit_bar(st: AppState) -> View {
             )
             .test_id("home-add"),
             adds,
+        ))
+        .child(menu_on(
+            button(
+                Variant::Secondary,
+                Size::Md,
+                Some(Icon::LayoutTemplate),
+                st.t("home.presets"),
+                || {},
+            )
+            .test_id("home-presets"),
+            presets,
         ))
         .child(
             button(

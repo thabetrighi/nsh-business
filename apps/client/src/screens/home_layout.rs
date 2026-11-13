@@ -27,10 +27,34 @@ pub enum Card {
     Debts,
     /// The suppliers owed most.
     Payables,
+    /// The products that brought most.
+    TopProducts,
+    /// Sales by hour of the day.
+    Hours,
+    /// Sales by day of the week.
+    Weekdays,
+    /// Sales by cashier.
+    Cashiers,
+    /// Gross profit and margin.
+    Profit,
+    Returns,
+    /// Expenses and other income.
+    Spending,
+    /// The stock at its cost.
+    StockValue,
+    Purchases,
+    Discounts,
+    NewCustomers,
+    /// VAT collected.
+    Tax,
+    /// A goal for the period and how far it is.
+    Target,
+    /// A note kept on the device.
+    Note,
 }
 
 impl Card {
-    pub const ALL: [Card; 13] = [
+    pub const ALL: [Card; 27] = [
         Card::Revenue,
         Card::Orders,
         Card::Basket,
@@ -44,6 +68,20 @@ impl Card {
         Card::Quick,
         Card::Debts,
         Card::Payables,
+        Card::TopProducts,
+        Card::Hours,
+        Card::Weekdays,
+        Card::Cashiers,
+        Card::Profit,
+        Card::Returns,
+        Card::Spending,
+        Card::StockValue,
+        Card::Purchases,
+        Card::Discounts,
+        Card::NewCustomers,
+        Card::Tax,
+        Card::Target,
+        Card::Note,
     ];
 
     pub fn code(self) -> &'static str {
@@ -61,15 +99,69 @@ impl Card {
             Card::Quick => "quick",
             Card::Debts => "debts",
             Card::Payables => "payables",
+            Card::TopProducts => "top_products",
+            Card::Hours => "hours",
+            Card::Weekdays => "weekdays",
+            Card::Cashiers => "cashiers",
+            Card::Profit => "profit",
+            Card::Returns => "returns",
+            Card::Spending => "spending",
+            Card::StockValue => "stock_value",
+            Card::Purchases => "purchases",
+            Card::Discounts => "discounts",
+            Card::NewCustomers => "new_customers",
+            Card::Tax => "tax",
+            Card::Target => "target",
+            Card::Note => "note",
         }
+    }
+
+    /// A figure on its own (its value, a line under it).
+    pub fn is_figure(self) -> bool {
+        matches!(
+            self,
+            Card::Revenue
+                | Card::Orders
+                | Card::Basket
+                | Card::Credit
+                | Card::Profit
+                | Card::Returns
+                | Card::Spending
+                | Card::StockValue
+                | Card::Purchases
+                | Card::Discounts
+                | Card::NewCustomers
+                | Card::Tax
+        )
+    }
+
+    /// Read from the period's insights (not the dashboard itself).
+    pub fn needs_insights(self) -> bool {
+        matches!(
+            self,
+            Card::TopProducts
+                | Card::Hours
+                | Card::Weekdays
+                | Card::Cashiers
+                | Card::Profit
+                | Card::Returns
+                | Card::Spending
+                | Card::StockValue
+                | Card::Purchases
+                | Card::Discounts
+                | Card::NewCustomers
+                | Card::Tax
+                | Card::Target
+        )
     }
 
     /// Its width when added.
     pub fn width(self) -> u8 {
         match self {
-            Card::Revenue | Card::Orders | Card::Basket | Card::Credit => 3,
+            c if c.is_figure() => 3,
             Card::Sales | Card::Invoices => 8,
-            Card::Debts | Card::Payables => 6,
+            Card::Debts | Card::Payables | Card::Hours | Card::Weekdays => 6,
+            Card::TopProducts | Card::Cashiers => 6,
             _ => 4,
         }
     }
@@ -127,7 +219,64 @@ impl Default for Home {
     }
 }
 
+/// Ready-made dashboards to start from (owner notes: flexible).
+pub const PRESETS: [&str; 5] = ["owner", "sales", "stock", "finance", "simple"];
+
 impl Home {
+    /// A ready-made dashboard.
+    pub fn preset(name: &str) -> Self {
+        use Card as C;
+        let cards: Vec<Card> = match name {
+            "sales" => vec![
+                C::Revenue,
+                C::Orders,
+                C::Basket,
+                C::Discounts,
+                C::Sales,
+                C::Hours,
+                C::Weekdays,
+                C::TopProducts,
+                C::Cashiers,
+                C::Payments,
+                C::Categories,
+            ],
+            "stock" => vec![
+                C::StockValue,
+                C::Purchases,
+                C::Returns,
+                C::Revenue,
+                C::LowStock,
+                C::TopProducts,
+                C::Payables,
+                C::Alerts,
+                C::Quick,
+            ],
+            "finance" => vec![
+                C::Revenue,
+                C::Profit,
+                C::Spending,
+                C::Tax,
+                C::Sales,
+                C::Payments,
+                C::Debts,
+                C::Payables,
+                C::Target,
+            ],
+            "simple" => vec![
+                C::Revenue,
+                C::Orders,
+                C::Target,
+                C::Quick,
+                C::Invoices,
+                C::Note,
+            ],
+            _ => return Home::default(),
+        };
+        Home {
+            items: cards.into_iter().map(Item::new).collect(),
+        }
+    }
+
     /// Each card once, widths known.
     pub fn check(&self) -> bool {
         Card::ALL

@@ -161,6 +161,9 @@ icons! {
     Frame => "square-dashed",
     Move => "move",
     Scaling => "scaling",
+    TrendingUp => "trending-up",
+    Target => "target",
+    Phone => "phone",
 }
 
 /// An icon `size` points square, stroked in `tone`.

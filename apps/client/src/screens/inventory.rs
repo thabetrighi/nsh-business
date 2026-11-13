@@ -94,6 +94,22 @@ fn warehouse_filter(
     )
 }
 
+/// Opened from the warehouses page: that warehouse chosen once the list is
+/// read.
+fn pick_warehouse(st: AppState, whs: Memo<Vec<Warehouse>>, chosen: Signal<usize>, moves: bool) {
+    effect(move || {
+        let id = match st.intent.get() {
+            Some(Intent::StockAt(id)) if !moves => id,
+            Some(Intent::MovesAt(id)) if moves => id,
+            _ => return,
+        };
+        if let Some(at) = whs.with(|w| w.iter().position(|w| w.id == id)) {
+            st.intent.set(None);
+            chosen.set(at);
+        }
+    });
+}
+
 fn state_status(s: StockState) -> (Status, &'static str) {
     match s {
         StockState::Ok => (Status::Success, "status.in_stock"),
@@ -107,6 +123,7 @@ fn state_status(s: StockState) -> (Status, &'static str) {
 pub fn stock_page(st: AppState, compact: bool) -> View {
     let whs = warehouses(st);
     let chosen = signal(usize::MAX);
+    pick_warehouse(st, whs, chosen, false);
     let text = signal(String::new());
     let state: Signal<Option<StockState>> = signal(None);
     let sort = signal(None::<Sort>);
@@ -544,6 +561,7 @@ const KINDS: [&str; 12] = [
 pub fn movements_page(st: AppState, compact: bool) -> View {
     let whs = warehouses(st);
     let chosen = signal(usize::MAX);
+    pick_warehouse(st, whs, chosen, true);
     let kind = signal(usize::MAX);
     // One product's movements (from the stock's row): its id and name.
     let product: Signal<Option<(String, String)>> = signal(None);

@@ -30,7 +30,37 @@ pub fn field(
     keyboard: KeyboardType,
     test_id: &'static str,
 ) -> View {
-    field_inner(caption, value, placeholder, error, keyboard, test_id, false)
+    field_inner(
+        caption,
+        value,
+        placeholder,
+        error,
+        keyboard,
+        test_id,
+        false,
+        false,
+    )
+}
+
+/// A [`field`] that takes the keyboard when it shows (what is typed first).
+pub fn focused_field(
+    caption: impl Fn() -> String + 'static,
+    value: Signal<String>,
+    placeholder: impl Fn() -> String + 'static,
+    error: impl Fn() -> String + Clone + 'static,
+    keyboard: KeyboardType,
+    test_id: &'static str,
+) -> View {
+    field_inner(
+        caption,
+        value,
+        placeholder,
+        error,
+        keyboard,
+        test_id,
+        false,
+        true,
+    )
 }
 
 /// A [`field`] whose text is hidden (passwords).
@@ -48,9 +78,11 @@ pub fn secret_field(
         KeyboardType::Default,
         test_id,
         true,
+        false,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // a field's parts, named at each call
 fn field_inner(
     caption: impl Fn() -> String + 'static,
     value: Signal<String>,
@@ -59,6 +91,7 @@ fn field_inner(
     keyboard: KeyboardType,
     test_id: &'static str,
     masked: bool,
+    focus: bool,
 ) -> View {
     let err_for_border = error.clone();
     let err_for_text = error.clone();
@@ -84,6 +117,7 @@ fn field_inner(
                         .placeholder(placeholder)
                         .keyboard_type(keyboard)
                         .masked(masked)
+                        .auto_focus(focus)
                         .text_size(px(fs(ty::MD)))
                         .text_color(Tone::Ink.color()),
                 ),
@@ -287,6 +321,7 @@ const REQUIRED: &[&str] = &[
     "tpl-name",
     "user-login",
     "user-name",
+    "warehouse-name",
 ];
 
 /// Whether the field `test_id` must be filled.

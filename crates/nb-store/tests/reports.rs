@@ -234,6 +234,17 @@ fn sales_profit_and_stock_add_up() -> R {
     assert_eq!(d.orders.iter().sum::<i64>(), 3);
     assert_eq!(d.previous.iter().sum::<i64>(), 0);
     assert_eq!(d.recent.len(), 3);
+    // The other cards: the three sales by hour and weekday, the stock's
+    // worth; nothing spent or bought.
+    let i = insights(&s, Period::Week)?;
+    assert_eq!(i.report.sales, 3);
+    assert_eq!(i.hours.len(), 24);
+    assert_eq!(i.weekdays.len(), 7);
+    assert_eq!(i.hours.iter().sum::<i64>(), 11_900);
+    assert_eq!(i.weekdays.iter().sum::<i64>(), 11_900);
+    assert!(i.stock_value_minor > 0);
+    assert_eq!((i.expenses_minor, i.purchases), (0, 0));
+    assert!(!i.report.by_product.is_empty());
     assert_eq!(
         d.low_stock
             .iter()

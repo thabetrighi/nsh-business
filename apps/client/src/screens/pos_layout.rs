@@ -244,6 +244,13 @@ impl Panel {
         }
     }
 
+    /// Taking the height its column leaves.
+    pub fn filling(mut self) -> Self {
+        self.fill = true;
+        self.height = 0;
+        self
+    }
+
     /// In this style (`Widget::styles`).
     pub fn style_of(mut self, style: u8) -> Self {
         self.style = style;
@@ -1190,6 +1197,326 @@ pub fn builtin() -> Vec<Layout> {
                 vec![
                     col(7, vec![p(W::Search), p(W::Categories), p(W::Products)]),
                     col(5, vec![p(W::Cart), p(W::BigTotal), p(W::Pay)]),
+                ],
+            )
+        },
+        // A grocery: categories down the side, small cards, a keypad for
+        // quantities.
+        Layout {
+            tile: 4,
+            tile_cols: 0,
+            head: false,
+            ..Layout::of(
+                "grocery",
+                vec![
+                    col(2, vec![Panel::sized(W::Categories, 0, 1).filling()]),
+                    col(6, vec![p(W::Search), p(W::Products).filling()]),
+                    col(
+                        4,
+                        vec![
+                            p(W::Cart).filling(),
+                            p(W::Keypad),
+                            p(W::BigTotal),
+                            p(W::Pay),
+                        ],
+                    ),
+                ],
+            )
+        },
+        // Fast food: very large tiles, the order number and total above.
+        Layout {
+            tile: 3,
+            stock: false,
+            head: false,
+            sidebar: false,
+            big_lines: true,
+            top: vec![big(&["label", "count"]).look(2, 0).tint(1).placed(1)],
+            ..Layout::of(
+                "fast_food",
+                vec![
+                    col(
+                        8,
+                        vec![
+                            p(W::Categories).look(2, 0),
+                            Panel::sized(W::Products, 0, 2).filling(),
+                        ],
+                    ),
+                    col(
+                        4,
+                        vec![
+                            p(W::Cart).filling().showing(&["head", "actions"]),
+                            p(W::Pay).look(2, 0),
+                        ],
+                    ),
+                ],
+            )
+        },
+        // Wholesale: the customer and their account first, the cart as a
+        // table, quantities typed.
+        Layout {
+            sku: true,
+            head: false,
+            ..Layout::of(
+                "wholesale",
+                vec![
+                    col(
+                        8,
+                        vec![
+                            p(W::Customer),
+                            p(W::Search),
+                            Panel::sized(W::Cart, 0, 1).filling(),
+                        ],
+                    ),
+                    col(
+                        4,
+                        vec![
+                            p(W::Totals),
+                            p(W::Keypad),
+                            p(W::Actions)
+                                .look(1, 0)
+                                .showing(&["discount", "prebill", "hold", "held"]),
+                            p(W::BigTotal),
+                            p(W::Pay),
+                        ],
+                    ),
+                ],
+            )
+        },
+        // Electronics and phones: references in a list, the last sale and
+        // the customer at hand.
+        Layout {
+            tile: 0,
+            sku: true,
+            ..Layout::of(
+                "electronics",
+                vec![
+                    col(
+                        7,
+                        vec![p(W::Search), Panel::sized(W::Products, 0, 1).filling()],
+                    ),
+                    col(
+                        5,
+                        vec![
+                            p(W::Customer),
+                            p(W::Cart).filling(),
+                            p(W::Totals),
+                            p(W::LastSale),
+                            p(W::Pay),
+                        ],
+                    ),
+                ],
+            )
+        },
+        // A butcher or a vegetable stall: weighed goods, a large keypad.
+        Layout {
+            tile: 2,
+            stock: false,
+            head: false,
+            big_lines: true,
+            ..Layout::of(
+                "butcher",
+                vec![
+                    col(
+                        6,
+                        vec![p(W::Categories), Panel::sized(W::Products, 0, 2).filling()],
+                    ),
+                    col(3, vec![p(W::Keypad).look(3, 0).filling()]),
+                    col(
+                        3,
+                        vec![p(W::Cart).filling(), p(W::BigTotal), p(W::Pay).look(2, 0)],
+                    ),
+                ],
+            )
+        },
+        // A tablet: two columns of cards, the cart bar along the bottom.
+        Layout {
+            tile: 2,
+            tile_cols: 2,
+            head: false,
+            sidebar: false,
+            navbar: false,
+            bottom: vec![bar(&["count", "customer", "total", "pay"]).look(2, 0)],
+            ..Layout::of(
+                "tablet",
+                vec![
+                    col(
+                        7,
+                        vec![p(W::Search), p(W::Categories), p(W::Products).filling()],
+                    ),
+                    col(5, vec![p(W::Cart).filling().showing(&["head", "actions"])]),
+                ],
+            )
+        },
+        // A bookshop or a stationer: names and references in a list.
+        Layout {
+            tile: 0,
+            sku: true,
+            ..Layout::of(
+                "bookshop",
+                vec![
+                    col(
+                        6,
+                        vec![p(W::Search), Panel::sized(W::Products, 0, 1).filling()],
+                    ),
+                    col(
+                        6,
+                        vec![
+                            Panel::sized(W::Cart, 0, 1).filling(),
+                            p(W::Totals),
+                            p(W::Pay),
+                        ],
+                    ),
+                ],
+            )
+        },
+        // A beauty shop: favourites as tiles, the customer and loyalty at
+        // hand.
+        Layout {
+            tile: 1,
+            ..Layout::of(
+                "beauty",
+                vec![
+                    col(
+                        7,
+                        vec![
+                            p(W::Search),
+                            Panel::sized(W::Favorites, 4, 2),
+                            p(W::Products).filling(),
+                        ],
+                    ),
+                    col(
+                        5,
+                        vec![
+                            p(W::Customer),
+                            p(W::Cart).filling(),
+                            p(W::Totals),
+                            p(W::Pay),
+                        ],
+                    ),
+                ],
+            )
+        },
+        // A pro cashier: the search across the top, the cart in the
+        // middle, every button along the bottom.
+        Layout {
+            head: false,
+            stock: false,
+            top: vec![p(W::Search)],
+            bottom: vec![Panel::new(W::Actions).style_of(1).look(0, 0).showing(&[
+                "customer", "discount", "hold", "held", "return", "misc", "prebill", "clear",
+                "sales", "close",
+            ])],
+            ..Layout::of(
+                "pro",
+                vec![
+                    col(8, vec![Panel::sized(W::Cart, 0, 1).filling()]),
+                    col(
+                        4,
+                        vec![
+                            p(W::BigTotal),
+                            p(W::Totals),
+                            p(W::Keypad).filling(),
+                            p(W::Pay).look(2, 0),
+                        ],
+                    ),
+                ],
+            )
+        },
+        // A mini-market: the shop's cards with a bar to pay at once.
+        Layout {
+            tile: 0,
+            bottom: vec![bar(&["count", "held", "customer", "total", "clear", "pay"])],
+            ..Layout::of(
+                "minimarket",
+                vec![
+                    col(
+                        8,
+                        vec![p(W::Search), p(W::Categories), p(W::Products).filling()],
+                    ),
+                    col(4, vec![p(W::Cart).filling(), p(W::Totals)]),
+                ],
+            )
+        },
+        // A wide screen: three columns — categories, products, the cart.
+        Layout {
+            tile: 1,
+            ..Layout::of(
+                "wide",
+                vec![
+                    col(2, vec![Panel::sized(W::Categories, 0, 1).filling()]),
+                    col(6, vec![p(W::Search), p(W::Products).filling()]),
+                    col(
+                        4,
+                        vec![
+                            p(W::Customer),
+                            p(W::Cart).filling(),
+                            p(W::Totals),
+                            p(W::BigTotal),
+                            p(W::Pay),
+                        ],
+                    ),
+                ],
+            )
+        },
+        // A night shift: the clock and the session above, a quick scanner.
+        Layout {
+            head: false,
+            stock: false,
+            top: vec![p(W::Clock).showing(&["time", "till", "cashier"]).tint(4)],
+            ..Layout::of(
+                "night",
+                vec![
+                    col(8, vec![p(W::Search), Panel::sized(W::Cart, 0, 1).filling()]),
+                    col(4, vec![p(W::Session), p(W::BigTotal), p(W::Pay).look(2, 0)]),
+                ],
+            )
+        },
+        // Self-service: very large type and buttons, nothing to arrange.
+        Layout {
+            tile: 3,
+            stock: false,
+            head: false,
+            sidebar: false,
+            navbar: false,
+            big_lines: true,
+            bottom: vec![bar(&["count", "total", "pay"]).look(3, 0)],
+            head_items: vec!["fullscreen".into(), "keys".into()],
+            ..Layout::of(
+                "self_service",
+                vec![
+                    col(
+                        8,
+                        vec![
+                            p(W::Search).look(2, 0),
+                            Panel::sized(W::Products, 0, 2).filling(),
+                        ],
+                    ),
+                    col(4, vec![p(W::Cart).look(2, 0).filling().showing(&["head"])]),
+                ],
+            )
+        },
+        // A delivery desk: the customer first, the carts on hold below.
+        Layout {
+            tile: 0,
+            bottom: vec![p(W::HeldBar)],
+            ..Layout::of(
+                "delivery",
+                vec![
+                    col(
+                        7,
+                        vec![p(W::Search), p(W::Categories), p(W::Products).filling()],
+                    ),
+                    col(
+                        5,
+                        vec![
+                            p(W::Customer),
+                            p(W::Cart).filling(),
+                            p(W::Actions)
+                                .look(1, 0)
+                                .showing(&["hold", "held", "prebill", "discount"]),
+                            p(W::Pay),
+                        ],
+                    ),
                 ],
             )
         },

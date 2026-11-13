@@ -415,6 +415,59 @@ pub fn bar_list(rows: Vec<(String, i64, String)>, tone: Tone) -> View {
     list
 }
 
+/// Upright bars (hours, days of the week): a bar per value, its label
+/// under it (empty labels leave the place blank), the highest in the
+/// accent. Reads from the start side, whichever way the text goes.
+pub fn column_chart(values: Vec<i64>, labels: Vec<String>, h: f32, tone: Tone) -> View {
+    let max = values.iter().copied().max().unwrap_or(0).max(1);
+    let top = values.iter().copied().max().unwrap_or(0);
+    let mut row = view().flex_row().items_end().gap(px(4.0)).h(px(h));
+    let mut names = view().flex_row().gap(px(4.0));
+    for (i, v) in values.iter().copied().enumerate() {
+        let share = ratio(v.max(0), max).max(if v > 0 { 0.03 } else { 0.0 });
+        let strong = v > 0 && v == top;
+        row = row.child(
+            view().flex_1().h_full().justify_end().child(
+                view()
+                    .w_full()
+                    .h(relative(share))
+                    .min_h(px(2.0))
+                    .rounded(px(3.0))
+                    .opacity(if strong || v <= 0 { 1.0 } else { 0.45 })
+                    .bg(if v > 0 {
+                        tone.color()
+                    } else {
+                        Tone::Subtle.color()
+                    }),
+            ),
+        );
+        let name = labels.get(i).cloned().unwrap_or_default();
+        names = names.child(
+            view()
+                .flex_1()
+                .items_center()
+                .child(caption(name, ty::XS, FontWeight::NORMAL, Tone::Muted).number_of_lines(1)),
+        );
+    }
+    view().gap(px(6.0)).child(row).child(names)
+}
+
+/// A progress bar toward a goal (0–100 %).
+pub fn progress(share: f32, tone: Tone) -> View {
+    view()
+        .h(px(10.0))
+        .rounded_full()
+        .bg(Tone::Subtle.color())
+        .flex_row()
+        .child(
+            view()
+                .w(relative(share.clamp(0.0, 1.0)))
+                .h_full()
+                .rounded_full()
+                .bg(tone.color()),
+        )
+}
+
 /// A legend row with a colored dot, a name and a value (for the donut).
 pub fn legend_row(
     tone: Tone,

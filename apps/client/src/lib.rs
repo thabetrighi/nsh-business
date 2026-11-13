@@ -74,6 +74,10 @@ pub fn App() -> impl IntoElement {
     if env("NB_OPEN").as_deref() == Some("palette") {
         st.palette.set(true);
     }
+    // A device kept for showing prices opens on them.
+    if crate::state::stored_flag(crate::screens::price_check::AT_START) {
+        st.route.set(nav::Route::PriceCheck);
+    }
     // NB_OPEN=printing: settings › printing (screenshots).
     if env("NB_OPEN").as_deref() == Some("printing") {
         st.route.set(nav::Route::Settings);

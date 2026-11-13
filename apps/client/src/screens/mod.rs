@@ -18,6 +18,7 @@ pub mod lock;
 pub mod picker;
 pub mod pos;
 pub mod pos_layout;
+pub mod price_check;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod printing;
 pub mod product_editor;
@@ -33,3 +34,4 @@ pub mod setup;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod templates;
 pub mod users;
+pub mod warehouses;

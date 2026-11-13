@@ -763,3 +763,55 @@ fn serial_numbers_enter_and_leave_once() -> R {
     );
     tracked_healthy(&s)
 }
+
+#[test]
+fn warehouses_page_details_and_retiring() -> R {
+    use nb_store::usecases::org::{
+        WarehouseDetails, archive_warehouse, create_warehouse, set_warehouse_details,
+        warehouse_overview,
+    };
+    let (mut s, setup) = store();
+    stocked(&mut s, &setup, "Lait", "10", 1_000)?;
+    let w = warehouse_overview(&s)?;
+    assert_eq!(w.len(), 1);
+    assert_eq!((w[0].products, w[0].value_minor), (1, 10_000));
+    // The only warehouse cannot go, nor one that holds stock.
+    let only: WarehouseId = w[0].id.parse().unwrap_or_default();
+    assert_eq!(
+        err(archive_warehouse(&mut s, meta(&setup, "wh.archive"), only)),
+        ["warehouse.last"]
+    );
+    let back = create_warehouse(
+        &mut s,
+        meta(&setup, "wh.create"),
+        setup.branch,
+        "Réserve",
+        "forbid",
+    )?;
+    let back_id: WarehouseId = back.id.parse().unwrap_or_default();
+    assert_eq!(
+        err(archive_warehouse(&mut s, meta(&setup, "wh.archive2"), only)),
+        ["warehouse.not_empty"]
+    );
+    set_warehouse_details(
+        &mut s,
+        meta(&setup, "wh.details"),
+        back_id,
+        &WarehouseDetails {
+            address: " Zone 2 ".into(),
+            phone: "0550".into(),
+            keeper: "Karim".into(),
+            note: String::new(),
+        },
+    )?;
+    let w = warehouse_overview(&s)?;
+    assert_eq!(w.len(), 2);
+    assert_eq!(
+        (w[1].address.as_str(), w[1].keeper.as_str()),
+        ("Zone 2", "Karim")
+    );
+    // Empty, it goes; its history stays.
+    archive_warehouse(&mut s, meta(&setup, "wh.archive3"), back_id)?;
+    assert_eq!(warehouse_overview(&s)?.len(), 1);
+    healthy(&s)
+}

@@ -414,6 +414,12 @@ test("a cash sale at the till, from opening to closing", async () => {
   await app.waitUntil(() => app.texts().some((t) => plain(t) === "3 × 100,00 DA"));
   // An item not in the catalog.
   await app.press("id:pos-free");
+  // Named already: only the price is needed.
+  await app.type("id:free-price", "15");
+  await app.press("id:free-add");
+  await app.waitFor("text:Article divers 1");
+  await app.press("id:pos-free");
+  await app.clear("id:free-name");
   await app.type("id:free-name", "Sac cabas");
   await app.type("id:free-price", "20");
   await app.press("id:free-add");
@@ -1232,6 +1238,7 @@ test("the dashboard is arranged; favourites are marked and found; carts on hold 
   await app.press("id:home-opts-revenue");
   await app.press("text:Masquer");
   await app.press("id:home-add");
+  await app.press("text:Graphiques et listes");
   await app.press("text:Plus gros débiteurs");
   await app.waitFor("id:home-card-debts");
   await app.press("id:home-arrange");
@@ -1327,4 +1334,42 @@ test("the till's head: quick access to the pages, full screen without the app's 
   await app.press("text:Accueil");
   await app.waitFor("text:Ventes brutes");
   await app.waitFor("id:open-palette");
+});
+
+test("the price display, the warehouses and the dashboard's ready-made cards", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  const shows = (s: string) => () => app.texts().some((t) => plain(t) === s);
+  await app.waitFor("text:Ventes brutes");
+  // The dashboard from a ready-made set: the sales one.
+  await app.press("id:home-arrange");
+  await app.press("id:home-presets");
+  await app.press("text:Axé ventes");
+  await app.waitFor("id:home-card-hours");
+  await app.press("id:home-arrange");
+  await app.waitFor("text:Ventes par heure");
+  // The warehouses: one, with its stock one press away.
+  await app.press("text:Stock");
+  await app.press("id:nav-warehouses");
+  await app.waitFor("id:warehouse-0");
+  expect(app.shows("id:warehouses-export")).toBe(true);
+  await app.press("id:warehouse-add");
+  await app.type("id:warehouse-name", "Réserve");
+  await app.type("id:warehouse-keeper", "Karim");
+  await app.press("id:warehouse-save");
+  await app.waitFor("id:warehouse-1");
+  await app.waitFor("text:Karim");
+  // The price display: the whole screen, a name typed, its price.
+  await app.press("text:Ventes");
+  await app.press("id:nav-price_check");
+  await app.waitFor("id:price-welcome");
+  expect(app.shows("id:open-palette")).toBe(false);
+  await app.type("id:price-search", "Bimo #11");
+  await app.press("id:price-find");
+  await app.waitFor("id:price-pick-0");
+  await app.press("id:price-pick-0");
+  await app.waitFor("id:price-result");
+  await app.press("id:price-exit");
+  await app.press("id:price-exit-confirm");
+  await app.waitFor("text:Ventes brutes");
+  await app.waitUntil(shows("Ventes par heure"));
 });

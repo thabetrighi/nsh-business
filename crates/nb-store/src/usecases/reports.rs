@@ -755,6 +755,110 @@ pub fn dashboard(store: &Store, period: Period) -> Result<Dashboard> {
     Ok(out)
 }
 
+/// What the dashboard's other cards show over the period ending today
+/// (owner notes: more cards): the sales report (products, cashiers,
+/// profit, returns), the hours and weekdays sold, what was spent and
+/// bought, the stock's worth, the customers met.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Insights {
+    pub report: SalesReport,
+    /// Sales with tax by hour of the day (0–23, the store's time).
+    pub hours: Vec<i64>,
+    /// By day of the week, Monday first.
+    pub weekdays: Vec<i64>,
+    pub expenses_minor: i64,
+    pub income_minor: i64,
+    pub purchases_minor: i64,
+    pub purchases: u32,
+    /// On hand at its average cost, all warehouses.
+    pub stock_value_minor: i64,
+    pub new_customers: u32,
+}
+
+/// The first day of the period ending today.
+fn period_start(today: Date, period: Period) -> Date {
+    match period {
+        Period::Week => add_days(today, -6),
+        Period::Month => add_days(today, -29),
+        Period::Year => first_of_month(today, 11),
+    }
+}
+
+pub fn insights(store: &Store, period: Period) -> Result<Insights> {
+    let (y, m, d) = civil_date(store.now_ms(), store.utc_offset_min);
+    let today = Date { y, m, d };
+    let span = Span {
+        from: period_start(today, period).iso(),
+        to: today.iso(),
+    };
+    let report = report_of(store, &span, Parts::All)?;
+    let (from_ms, to_ms) = instants(store, &span)?;
+    store.read(|r| {
+        let conn = r.conn();
+        let (org, _) = the_org(conn)?;
+        let org = org.to_string();
+        let off = r.utc_offset_min;
+        let mut out = Insights {
+            report,
+            hours: vec![0; 24],
+            weekdays: vec![0; 7],
+            ..Default::default()
+        };
+        // Hour and weekday (strftime %w: 0 Sunday) in the store's time.
+        let mut s = conn.prepare(
+            "SELECT CAST(strftime('%H', created_at / 1000 + ?3 * 60, 'unixepoch') AS INTEGER),
+                    CAST(strftime('%w', created_at / 1000 + ?3 * 60, 'unixepoch') AS INTEGER),
+                    SUM(total_minor)
+             FROM sales WHERE org_id = ?4 AND created_at >= ?1 AND created_at < ?2
+             GROUP BY 1, 2",
+        )?;
+        for row in s.query_map(params![from_ms, to_ms, off, org], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })? {
+            let (h, w, v) = row?;
+            if let Some(x) = usize::try_from(h).ok().and_then(|h| out.hours.get_mut(h)) {
+                *x += v;
+            }
+            // Monday first.
+            let w = usize::try_from((w + 6) % 7).unwrap_or(0);
+            if let Some(x) = out.weekdays.get_mut(w) {
+                *x += v;
+            }
+        }
+        (out.expenses_minor, out.income_minor) = conn.query_row(
+            "SELECT COALESCE(SUM(CASE WHEN kind = 'expense' THEN total_minor END), 0),
+                    COALESCE(SUM(CASE WHEN kind = 'income' THEN total_minor END), 0)
+             FROM expenses WHERE org_id = ?3 AND created_at >= ?1 AND created_at < ?2",
+            params![from_ms, to_ms, org],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        (out.purchases, out.purchases_minor) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(total_minor), 0)
+             FROM purchases WHERE org_id = ?3 AND created_at >= ?1 AND created_at < ?2",
+            params![from_ms, to_ms, org],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        out.stock_value_minor = conn.query_row(
+            "SELECT COALESCE(SUM((b.on_hand_milli * b.avg_cost_minor + 500) / 1000), 0)
+             FROM stock_balances b JOIN products p ON p.id = b.product_id
+             WHERE p.org_id = ?1 AND p.deleted_at IS NULL AND b.on_hand_milli > 0",
+            params![org],
+            |r| r.get(0),
+        )?;
+        out.new_customers = conn.query_row(
+            "SELECT COUNT(*) FROM customers
+             WHERE org_id = ?3 AND created_at >= ?1 AND created_at < ?2",
+            params![from_ms, to_ms, org],
+            |r| r.get(0),
+        )?;
+        Ok(out)
+    })
+}
+
 /// The products that ran out first, then those under their minimum.
 fn running_out(store: &Store, limit: u32) -> Result<Vec<StockRow>> {
     store.read(|r| {

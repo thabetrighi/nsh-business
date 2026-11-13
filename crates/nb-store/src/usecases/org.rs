@@ -475,6 +475,141 @@ pub fn update_warehouse(
     })
 }
 
+/// A warehouse as its page shows it: where, who, and what it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WarehouseRow {
+    pub id: String,
+    pub name: String,
+    pub branch_id: String,
+    pub branch: String,
+    pub negative_stock: String,
+    pub address: String,
+    pub phone: String,
+    pub keeper: String,
+    pub note: String,
+    /// Products with something on hand.
+    pub products: u32,
+    /// Products at or under their minimum (or none left).
+    pub low: u32,
+    /// On hand at its average cost.
+    pub value_minor: i64,
+    /// Held for orders.
+    pub reserved_milli: i64,
+    /// Stock movements in or out over the last 30 days.
+    pub moves_30d: u32,
+}
+
+/// The warehouses with what each holds.
+pub fn warehouse_overview(store: &Store) -> Result<Vec<WarehouseRow>> {
+    let since = store.now_ms() - 30 * 86_400_000;
+    store.read(|r| {
+        let conn = r.conn();
+        let Some(o) = org::the_org(conn)? else {
+            return Ok(Vec::new());
+        };
+        let mut s = conn.prepare(
+            "SELECT w.id, w.name, w.branch_id, b.name, w.negative_stock, w.address, w.phone, w.keeper, w.note,
+                    (SELECT COUNT(*) FROM stock_balances x WHERE x.warehouse_id = w.id AND x.on_hand_milli > 0),
+                    (SELECT COUNT(*) FROM stock_balances x JOIN products p ON p.id = x.product_id
+                      WHERE x.warehouse_id = w.id AND p.kind <> 'service' AND p.deleted_at IS NULL
+                        AND (x.on_hand_milli <= 0 OR (p.min_stock_milli IS NOT NULL AND x.on_hand_milli <= p.min_stock_milli))),
+                    (SELECT COALESCE(SUM((x.on_hand_milli * x.avg_cost_minor + 500) / 1000), 0)
+                       FROM stock_balances x WHERE x.warehouse_id = w.id AND x.on_hand_milli > 0),
+                    (SELECT COALESCE(SUM(x.qty_milli), 0) FROM stock_reservations x WHERE x.warehouse_id = w.id AND x.status = 'active'),
+                    (SELECT COUNT(*) FROM stock_movements m WHERE m.warehouse_id = w.id AND m.created_at >= ?2)
+             FROM warehouses w JOIN branches b ON b.id = w.branch_id
+             WHERE w.org_id = ?1 AND w.deleted_at IS NULL ORDER BY w.created_at",
+        )?;
+        let rows = s
+            .query_map(params![o.org_id()?.to_string(), since], |r| {
+                Ok(WarehouseRow {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    branch_id: r.get(2)?,
+                    branch: r.get(3)?,
+                    negative_stock: r.get(4)?,
+                    address: r.get(5)?,
+                    phone: r.get(6)?,
+                    keeper: r.get(7)?,
+                    note: r.get(8)?,
+                    products: r.get(9)?,
+                    low: r.get(10)?,
+                    value_minor: r.get(11)?,
+                    reserved_milli: r.get(12)?,
+                    moves_30d: r.get(13)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    })
+}
+
+/// Where a warehouse is and who keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WarehouseDetails {
+    pub address: String,
+    pub phone: String,
+    pub keeper: String,
+    pub note: String,
+}
+
+pub fn set_warehouse_details(
+    store: &mut Store,
+    meta: OpMeta,
+    warehouse: WarehouseId,
+    d: &WarehouseDetails,
+) -> Result<()> {
+    store.write(meta, |w| {
+        w.require(Permission::SettingsEdit, &Target::org())?;
+        org::warehouse(w.tx(), warehouse)?;
+        w.tx().execute(
+            "UPDATE warehouses SET address = ?2, phone = ?3, keeper = ?4, note = ?5,
+                    updated_at = ?6, version = version + 1 WHERE id = ?1",
+            params![
+                warehouse.to_string(),
+                d.address.trim(),
+                d.phone.trim(),
+                d.keeper.trim(),
+                d.note.trim(),
+                w.now()
+            ],
+        )?;
+        w.event("warehouse.details", "warehouse", &warehouse.to_string(), d)?;
+        w.audit("update", "warehouse", &warehouse.to_string(), d)?;
+        Ok(())
+    })
+}
+
+/// Retires a warehouse: only one left empty (nothing on hand, nothing
+/// held), and never the last one. Its history stays.
+pub fn archive_warehouse(store: &mut Store, meta: OpMeta, warehouse: WarehouseId) -> Result<()> {
+    store.write(meta, |w| {
+        let id = w.org()?;
+        w.require(Permission::SettingsEdit, &Target::org())?;
+        org::warehouse(w.tx(), warehouse)?;
+        let left = org::warehouses(w.tx(), id)?.len();
+        if left <= 1 {
+            return Err(RuleError::on("warehouse", "warehouse.last").into());
+        }
+        let holds: bool = w.tx().query_row(
+            "SELECT EXISTS (SELECT 1 FROM stock_balances WHERE warehouse_id = ?1 AND on_hand_milli <> 0)
+                 OR EXISTS (SELECT 1 FROM stock_reservations WHERE warehouse_id = ?1 AND status = 'active')",
+            [warehouse.to_string()],
+            |r| r.get(0),
+        )?;
+        if holds {
+            return Err(RuleError::on("warehouse", "warehouse.not_empty").into());
+        }
+        w.tx().execute(
+            "UPDATE warehouses SET deleted_at = ?2, updated_at = ?2, version = version + 1 WHERE id = ?1",
+            params![warehouse.to_string(), w.now()],
+        )?;
+        w.event("warehouse.archived", "warehouse", &warehouse.to_string(), &())?;
+        w.audit("archive", "warehouse", &warehouse.to_string(), &())?;
+        Ok(())
+    })
+}
+
 pub fn create_register(
     store: &mut Store,
     meta: OpMeta,

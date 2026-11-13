@@ -33,6 +33,10 @@ pub enum Intent {
     EditProduct(String),
     /// The stock movements of this product (id, name).
     MovementsOf(String, String),
+    /// One warehouse's stock (from the warehouses page).
+    StockAt(String),
+    /// One warehouse's movements.
+    MovesAt(String),
 }
 
 /// Light, dark, or as the system.
@@ -157,6 +161,11 @@ pub fn persisted_text(key: &'static str) -> Signal<String> {
 }
 
 /// An on/off setting saved on the device.
+/// A flag kept on the device, read once (false when never set).
+pub fn stored_flag(key: &str) -> bool {
+    stored(key, |v| v.parse().ok()).unwrap_or(false)
+}
+
 pub fn persisted_flag(key: &'static str, default: bool) -> Signal<bool> {
     let s = signal(stored(key, |v| v.parse().ok()).unwrap_or(default));
     effect(move || save(key, if s.get() { "true" } else { "false" }));
@@ -188,6 +197,8 @@ pub struct BizPrefs {
     pub home: Signal<String>,
     /// The connection's state reads as an icon only (no words).
     pub status_icon_only: Signal<bool>,
+    /// The price display says whether a product is in stock.
+    pub price_stock: Signal<bool>,
 }
 
 /// The till's screen, as this device's cashier arranged it.
@@ -240,6 +251,7 @@ impl BizPrefs {
             sidebar_narrow: persisted_flag("nb.app.sidebar_narrow", false),
             home: persisted_text("nb.home.layout"),
             status_icon_only: persisted_flag("nb.app.status_icon_only", false),
+            price_stock: persisted_flag("nb.price_check.stock", true),
             pos: PosPrefs {
                 tile: persisted_index("nb.pos.tile", 1),
                 cols: signal(0),

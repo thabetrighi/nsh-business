@@ -109,6 +109,10 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0029_product_favorites",
         include_str!("../migrations/0029_product_favorites.sql"),
     ),
+    (
+        "0030_warehouse_details",
+        include_str!("../migrations/0030_warehouse_details.sql"),
+    ),
 ];
 
 pub fn latest() -> u32 {

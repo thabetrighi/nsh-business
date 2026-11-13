@@ -168,6 +168,11 @@ fn page_of(st: AppState, route: Route, compact: bool) -> AnyElement {
             .into_element(),
         // The till fills the window: its parts scroll on their own.
         Route::Sell => crate::screens::pos::pos_page(st, compact).into_element(),
+        Route::Warehouses => scroll()
+            .flex_1()
+            .child(crate::screens::warehouses::warehouses_page(st, compact))
+            .into_element(),
+        Route::PriceCheck => crate::screens::price_check::price_check(st, compact).into_element(),
         Route::Journal => scroll()
             .flex_1()
             .child(crate::screens::accounting::journal_page(st, compact))

@@ -33,7 +33,7 @@ use crate::screens::approval::{Ask, approval_dialog, needs_approval};
 use crate::screens::common::page_head;
 use crate::screens::forms::{error_text, parse_price};
 use crate::state::AppState;
-use crate::ui::form::{field, labelled, row_input};
+use crate::ui::form::{field, focused_field, labelled, row_input};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{
     Size, Variant, badge, button, checkbox, figure, icon_button, kbd, label, label_line, segmented,
@@ -2076,7 +2076,16 @@ fn free_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> Vie
             rate.set(all.iter().position(|r| r.is_default).unwrap_or(0));
         }
     });
-    let name = signal(String::new());
+    // A name of its own already (owner notes: the price is what matters;
+    // the name can be changed): the next of the items typed at the till.
+    let typed = t
+        .cart
+        .with_untracked(|v| v.iter().filter(|i| i.product.is_none()).count());
+    let name = signal(tr_args(
+        st.lang(),
+        "pos.free.default_name",
+        &[("n", &(typed + 1).to_string())],
+    ));
     let price = signal(String::new());
     let qty = signal("1".to_owned());
     let error = signal(String::new());
@@ -2120,21 +2129,14 @@ fn free_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> Vie
         let add = add.clone();
         move |_| add()
     });
+    // The price first, with the keyboard in it; the name is filled in.
     let body = view()
         .gap(px(14.0))
-        .child(field(
-            st.t("pos.line_name"),
-            name,
-            st.t("pos.free.name_hint"),
-            String::new,
-            KeyboardType::Default,
-            "free-name",
-        ))
         .child(
             view()
                 .flex_row()
                 .gap(px(12.0))
-                .child(view().flex_1().child(field(
+                .child(view().flex_1().child(focused_field(
                     st.t("pos.unit_price"),
                     price,
                     || "0,00".to_owned(),
@@ -2151,6 +2153,14 @@ fn free_dialog(st: AppState, t: Till, close: impl Fn() + Clone + 'static) -> Vie
                     "free-qty",
                 ))),
         )
+        .child(field(
+            st.t("pos.line_name"),
+            name,
+            st.t("pos.free.name_hint"),
+            String::new,
+            KeyboardType::Default,
+            "free-name",
+        ))
         .child(labelled(
             st.t("pos.vat"),
             dropdown(
