@@ -363,6 +363,30 @@ impl Db {
         .await
     }
 
+    /// This device joins an organization that already exists (M11/M2):
+    /// its database becomes the server's copy, with its own identity.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn join(
+        &self,
+        snapshot: Vec<u8>,
+        at: nb_store::sync::Position,
+        joined: nb_store::sync::Joined,
+        server_url: String,
+    ) -> Result<Session, DbError> {
+        self.run(move |state| {
+            let store = state.store.as_mut().ok_or_else(stopped)?;
+            store
+                .join_with(&snapshot, at, &joined, &server_url)
+                .map_err(DbError::from)?;
+            let session = read_session(store)
+                .map_err(DbError::from)?
+                .ok_or_else(stopped)?;
+            state.session = Ok(session);
+            Ok(session)
+        })
+        .await
+    }
+
     /// The organization this device works for, once the store is open.
     pub async fn session(&self) -> Result<Session, DbError> {
         self.run(|state| state.session.clone()).await

@@ -14,7 +14,15 @@
 //! - `POST /v1/push`     device token; `{ops: [LoggedOp]}` → what was taken
 //! - `GET  /v1/state`    device token → organization, fingerprint, operations
 //! - `GET  /v1/snapshot` device token → the organization's database (bytes)
-//! - `POST /v1/reseed`   device token; body: the database → replaces the copy
+//! - `POST /v1/reseed?after=` device token; body: the database → replaces the
+//!   copy (only a device that has every other device's operations), and
+//!   starts a new epoch of the log: the other devices take the copy again
+//! - `POST /v1/invite`   device token → a code for a new device (an hour, once)
+//! - `POST /v1/join`     `{code, name}` → the new device's identity and token
+//! - `GET  /v1/pull?after=` device token → the other devices' operations
+//!
+//! `/v1/snapshot` tells the position the copy is at in `x-nb-cursor` and
+//! `x-nb-epoch`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,7 +35,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use nb_store::ops::OpDevice;
-pub use nb_store::sync::{Linked, PushFailure, PushRequest, PushResult, StateInfo};
+pub use nb_store::sync::{
+    CURSOR_HEADER, EPOCH_HEADER, Invite, Joined, Linked, Position, PullResult, PushFailure,
+    PushRequest, PushResult, StateInfo,
+};
 use nb_store::{Store, StoreOptions};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -80,8 +91,12 @@ pub struct Server {
     dir: PathBuf,
     enrollment_key: String,
     control: Mutex<Connection>,
-    tenants: Mutex<HashMap<String, Arc<Mutex<Store>>>>,
+    tenants: Mutex<HashMap<String, Tenant>>,
 }
+
+/// An open organization: `None` once its file was replaced (a reseed), so
+/// a request that waited for it opens the new one.
+type Tenant = Arc<Mutex<Option<Store>>>;
 
 fn hash(token: &str) -> String {
     Sha256::digest(token.as_bytes())
@@ -138,8 +153,26 @@ impl Server {
                  last_seen_at INTEGER,
                  revoked_at   INTEGER,
                  UNIQUE (org_id, prefix)
+             );
+             CREATE TABLE IF NOT EXISTS invites (
+                 code_hash   TEXT PRIMARY KEY,
+                 org_id      TEXT NOT NULL REFERENCES orgs(id),
+                 made_by     TEXT NOT NULL,
+                 expires_at  INTEGER NOT NULL,
+                 used_at     INTEGER
              );",
         )?;
+        let has_epoch: bool = control.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('orgs') WHERE name = 'epoch')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_epoch {
+            control.execute(
+                "ALTER TABLE orgs ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         Ok(Arc::new(Self {
             dir: dir.to_path_buf(),
             enrollment_key: enrollment_key.trim().to_owned(),
@@ -152,15 +185,38 @@ impl Server {
         self.dir.join("tenants").join(format!("{org}.sqlite"))
     }
 
-    fn tenant(&self, org: &str) -> ApiResult<Arc<Mutex<Store>>> {
+    fn tenant(&self, org: &str) -> ApiResult<Tenant> {
         let mut map = lock(&self.tenants)?;
         if let Some(t) = map.get(org) {
             return Ok(t.clone());
         }
         let store = Store::open(&self.tenant_path(org), StoreOptions::default())?;
-        let t = Arc::new(Mutex::new(store));
+        let t = Arc::new(Mutex::new(Some(store)));
         map.insert(org.to_owned(), t.clone());
         Ok(t)
+    }
+
+    /// Runs `f` on `org`'s database, alone (one writer per organization).
+    fn with_tenant<R>(
+        &self,
+        org: &str,
+        f: impl FnOnce(&mut Store) -> ApiResult<R>,
+    ) -> ApiResult<R> {
+        for _ in 0..3 {
+            let tenant = self.tenant(org)?;
+            let mut guard = lock(&tenant)?;
+            if let Some(store) = guard.as_mut() {
+                return f(store);
+            }
+            // Replaced while this waited: the map has the new one.
+        }
+        Err(ApiError::Internal("organization busy".into()))
+    }
+
+    /// Which copy of `org`'s log positions count in.
+    fn epoch(&self, org: &str) -> ApiResult<i64> {
+        Ok(lock(&self.control)?
+            .query_row("SELECT epoch FROM orgs WHERE id = ?1", [org], |r| r.get(0))?)
     }
 
     fn device(&self, headers: &HeaderMap) -> ApiResult<DeviceRow> {
@@ -270,6 +326,9 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/v1/state", get(state))
         .route("/v1/snapshot", get(snapshot))
         .route("/v1/reseed", post(reseed))
+        .route("/v1/invite", post(invite))
+        .route("/v1/join", post(join))
+        .route("/v1/pull", get(pull))
         .layer(DefaultBodyLimit::max(MAX_DB))
         .with_state(server)
 }
@@ -354,8 +413,17 @@ async fn push(
 ) -> ApiResult<axum::Json<PushResult>> {
     let device = server.device(&headers)?;
     blocking(move || {
-        let tenant = server.tenant(&device.org)?;
-        let mut store = lock(&tenant)?;
+        server.with_tenant(&device.org.clone(), |store| push_into(store, &device, req))
+    })
+    .await
+}
+
+fn push_into(
+    store: &mut Store,
+    device: &DeviceRow,
+    req: PushRequest,
+) -> ApiResult<axum::Json<PushResult>> {
+    {
         let me = OpDevice {
             id: device
                 .id
@@ -401,8 +469,7 @@ async fn push(
             failed,
             fingerprint,
         }))
-    })
-    .await
+    }
 }
 
 async fn state(
@@ -411,27 +478,43 @@ async fn state(
 ) -> ApiResult<axum::Json<StateInfo>> {
     let device = server.device(&headers)?;
     blocking(move || {
-        let tenant = server.tenant(&device.org)?;
-        let store = lock(&tenant)?;
-        let operations: i64 =
-            store
-                .connection()
-                .query_row("SELECT COUNT(*) FROM operations", [], |r| r.get(0))?;
-        Ok(axum::Json(StateInfo {
-            org_id: device.org.clone(),
-            fingerprint: store.fingerprint()?,
-            operations,
-        }))
+        let epoch = server.epoch(&device.org)?;
+        server.with_tenant(&device.org, |store| {
+            Ok(axum::Json(state_of(store, &device.org, epoch)?))
+        })
     })
     .await
 }
 
-async fn snapshot(State(server): State<Arc<Server>>, headers: HeaderMap) -> ApiResult<Vec<u8>> {
+fn state_of(store: &Store, org: &str, epoch: i64) -> ApiResult<StateInfo> {
+    let operations: i64 =
+        store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM operations", [], |r| r.get(0))?;
+    Ok(StateInfo {
+        org_id: org.to_owned(),
+        fingerprint: store.fingerprint()?,
+        operations,
+        cursor: store.log_end()?,
+        epoch,
+    })
+}
+
+async fn snapshot(State(server): State<Arc<Server>>, headers: HeaderMap) -> ApiResult<Response> {
     let device = server.device(&headers)?;
     blocking(move || {
-        let tenant = server.tenant(&device.org)?;
-        let store = lock(&tenant)?;
-        Ok(store.snapshot()?)
+        let epoch = server.epoch(&device.org)?;
+        let (db, cursor) = server.with_tenant(&device.org, |store| {
+            Ok((store.snapshot()?, store.log_end()?))
+        })?;
+        Ok((
+            [
+                (CURSOR_HEADER, cursor.to_string()),
+                (EPOCH_HEADER, epoch.to_string()),
+            ],
+            db,
+        )
+            .into_response())
     })
     .await
 }
@@ -439,22 +522,214 @@ async fn snapshot(State(server): State<Arc<Server>>, headers: HeaderMap) -> ApiR
 async fn reseed(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<PullQuery>,
     body: Bytes,
 ) -> ApiResult<axum::Json<StateInfo>> {
     let device = server.device(&headers)?;
     blocking(move || {
-        let (org_id, _, _, _) = server.install(&body, Some(&device.org))?;
-        let tenant = server.tenant(&org_id)?;
-        let store = lock(&tenant)?;
-        let operations: i64 =
-            store
-                .connection()
-                .query_row("SELECT COUNT(*) FROM operations", [], |r| r.get(0))?;
-        Ok(axum::Json(StateInfo {
+        let epoch = server.epoch(&device.org)?;
+        {
+            // Alone on the organization: nothing lands between the check
+            // and the new file.
+            let tenant = server.tenant(&device.org)?;
+            let mut guard = lock(&tenant)?;
+            let store = guard
+                .as_ref()
+                .ok_or_else(|| ApiError::Conflict("busy".into()))?;
+            // Only a device that has what the others sent may replace the
+            // copy (or it would lose it).
+            if q.epoch != epoch {
+                return Err(ApiError::Conflict("behind".into()));
+            }
+            let mut after = q.after;
+            loop {
+                let rows = store.log_after(after, 1_000)?;
+                if rows
+                    .iter()
+                    .any(|r| r.2.as_deref() != Some(device.id.as_str()))
+                {
+                    return Err(ApiError::Conflict("behind".into()));
+                }
+                match rows.last() {
+                    Some(r) if rows.len() == 1_000 => after = r.0,
+                    _ => break,
+                }
+            }
+            // Closed first; who waited for the old file opens the new one.
+            *guard = None;
+            server.install(&body, Some(&device.org))?;
+        }
+        let epoch = epoch + 1;
+        lock(&server.control)?.execute(
+            "UPDATE orgs SET epoch = ?2 WHERE id = ?1",
+            params![device.org, epoch],
+        )?;
+        server.with_tenant(&device.org, |store| {
+            Ok(axum::Json(state_of(store, &device.org, epoch)?))
+        })
+    })
+    .await
+}
+
+/// Codes are short enough to read aloud: no 0/O, 1/I/L.
+const CODE_LETTERS: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+fn new_code() -> ApiResult<String> {
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(b.iter()
+        .map(|x| CODE_LETTERS[usize::from(*x) % CODE_LETTERS.len()] as char)
+        .collect())
+}
+
+/// The first prefix no device of `org` has: A … Z, then AA … ZZ.
+fn free_prefix(control: &Connection, org: &str) -> ApiResult<String> {
+    let used: Vec<String> = {
+        let mut st = control.prepare("SELECT prefix FROM devices WHERE org_id = ?1")?;
+        st.query_map([org], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    let letters: Vec<char> = ('A'..='Z').collect();
+    let singles = letters.iter().map(|c| c.to_string());
+    let doubles = letters
+        .iter()
+        .flat_map(|a| letters.iter().map(move |b| format!("{a}{b}")));
+    singles
+        .chain(doubles)
+        .find(|p| !used.contains(p))
+        .ok_or_else(|| ApiError::Conflict("no prefix left".into()))
+}
+
+/// A linked device makes a code (valid an hour, once) for a new device of
+/// its organization.
+async fn invite(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+) -> ApiResult<axum::Json<Invite>> {
+    let device = server.device(&headers)?;
+    let code = new_code()?;
+    let expires_at = now_ms() + 3_600_000;
+    lock(&server.control)?.execute(
+        "INSERT INTO invites (code_hash, org_id, made_by, expires_at) VALUES (?1, ?2, ?3, ?4)",
+        params![hash(&code), device.org, device.id, expires_at],
+    )?;
+    Ok(axum::Json(Invite { code, expires_at }))
+}
+
+/// What a new device sends to join.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct JoinRequest {
+    pub code: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+async fn join(
+    State(server): State<Arc<Server>>,
+    axum::Json(req): axum::Json<JoinRequest>,
+) -> ApiResult<axum::Json<Joined>> {
+    let code = req.code.trim().to_uppercase().replace([' ', '-'], "");
+    blocking(move || {
+        let (org_id, org_name, device_id, prefix, token) = {
+            let control = lock(&server.control)?;
+            let org: Option<String> = control
+                .query_row(
+                    "SELECT org_id FROM invites WHERE code_hash = ?1 AND used_at IS NULL AND expires_at > ?2",
+                    params![hash(&code), now_ms()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let org = org.ok_or(ApiError::Unauthorized)?;
+            control.execute(
+                "UPDATE invites SET used_at = ?2 WHERE code_hash = ?1",
+                params![hash(&code), now_ms()],
+            )?;
+            let name: String =
+                control.query_row("SELECT name FROM orgs WHERE id = ?1", [&org], |r| r.get(0))?;
+            let prefix = free_prefix(&control, &org)?;
+            let device_id = nb_core::DeviceId::new().to_string();
+            let token = new_token()?;
+            control.execute(
+                "INSERT INTO devices (id, org_id, prefix, name, token_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    device_id,
+                    org,
+                    prefix,
+                    if req.name.trim().is_empty() { "device" } else { req.name.trim() },
+                    hash(&token),
+                    now_ms()
+                ],
+            )?;
+            (org, name, device_id, prefix, token)
+        };
+        let cursor = server.with_tenant(&org_id, |store| Ok(store.log_end()?))?;
+        Ok(axum::Json(Joined {
             org_id,
-            fingerprint: store.fingerprint()?,
-            operations,
+            org_name,
+            device_id,
+            prefix,
+            token,
+            cursor,
         }))
+    })
+    .await
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct PullQuery {
+    #[serde(default)]
+    pub after: i64,
+    #[serde(default)]
+    pub epoch: i64,
+}
+
+/// The operations of the other devices after the device's position.
+async fn pull(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<PullQuery>,
+) -> ApiResult<axum::Json<PullResult>> {
+    let device = server.device(&headers)?;
+    blocking(move || {
+        let prefixes: HashMap<String, String> = {
+            let control = lock(&server.control)?;
+            let mut st = control.prepare("SELECT id, prefix FROM devices WHERE org_id = ?1")?;
+            st.query_map([&device.org], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<_, _>>()?
+        };
+        let epoch = server.epoch(&device.org)?;
+        server.with_tenant(&device.org, |store| {
+            const BATCH: u32 = 500;
+            let rows = store.log_after(q.after, BATCH)?;
+            let more = rows.len() == BATCH as usize;
+            let cursor = rows.last().map_or(q.after.max(0), |r| r.0);
+            let mut ops = Vec::new();
+            for (_, mut op, dev) in rows {
+                // Its own operations the device has already.
+                if dev.as_deref() == Some(device.id.as_str()) {
+                    continue;
+                }
+                op.device = match dev.and_then(|d| prefixes.get(&d).map(|p| (d, p.clone()))) {
+                    Some((d, prefix)) => Some(OpDevice {
+                        id: d
+                            .parse()
+                            .map_err(|_| ApiError::Internal("device id".into()))?,
+                        prefix,
+                    }),
+                    None => None,
+                };
+                ops.push(op);
+            }
+            let end = store.log_end()?;
+            let cursor = if more { cursor } else { end.max(cursor) };
+            Ok(axum::Json(PullResult {
+                ops,
+                cursor,
+                more,
+                fingerprint: store.fingerprint()?,
+                epoch,
+            }))
+        })
     })
     .await
 }

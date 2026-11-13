@@ -298,7 +298,7 @@ pub(crate) fn return_in(
                     MovementKind::SaleReturn,
                     qty,
                     Some(unit_cost),
-                    warehouse.policy(),
+                    w.policy(&warehouse),
                     true,
                 )?;
                 let m = stock::append(

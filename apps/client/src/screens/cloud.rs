@@ -1,6 +1,7 @@
-//! Settings › sync (M11/M1): link this device to a server (its address and
-//! the server's enrollment key), then see what waits, when it last went
-//! well, sync now, check that the server's copy is this one, or unlink.
+//! Settings › sync (M11/M1–M2): link this device to a server (its address
+//! and the server's enrollment key), then see what waits, when it last went
+//! well, sync now, check that the server's copy is this one, invite another
+//! device of the shop (a code it enters on its first screen), or unlink.
 
 use nsh_core::element::{KeyboardType, View};
 use nsh_core::prelude::*;
@@ -28,6 +29,8 @@ pub fn cloud_card(st: AppState, compact: bool) -> View {
     let task = spawn(crate::sync::refresh(st));
     drop(task); // reads the state once; the root keeps it fresh
     let v = computed(move || st.sync.get());
+    // Outside the part drawn again when the state changes.
+    let invite = signal(None::<nb_store::sync::Invite>);
     let state_badge = dynamic(move || {
         let s = v.get();
         let (status, which, key) = if !s.linked {
@@ -46,7 +49,7 @@ pub fn cloud_card(st: AppState, compact: bool) -> View {
     let body = dynamic(move || {
         let s = v.get();
         if s.linked {
-            linked_body(st, s).into_element()
+            linked_body(st, s, invite).into_element()
         } else {
             link_form(st).into_element()
         }
@@ -77,7 +80,11 @@ fn stat(st: AppState, key: &'static str, value: String) -> View {
         ))
 }
 
-fn linked_body(st: AppState, s: crate::sync::SyncView) -> View {
+fn linked_body(
+    st: AppState,
+    s: crate::sync::SyncView,
+    invite: Signal<Option<nb_store::sync::Invite>>,
+) -> View {
     let last = s
         .last_ok_at
         .map(|t| date_time(st, t))
@@ -90,8 +97,48 @@ fn linked_body(st: AppState, s: crate::sync::SyncView) -> View {
             .p(px(20.0))
             .child(stat(st, "sync.server", s.server.clone()))
             .child(stat(st, "sync.pending_ops", st.fmt().integer(s.pending)))
-            .child(stat(st, "sync.last", last)),
+            .child(stat(st, "sync.last", last))
+            .child(stat(st, "sync.reviews", st.fmt().integer(s.reviews))),
     );
+    v = v.child(dynamic(move || match invite.get() {
+        None => view().into_element(),
+        Some(i) => {
+            let hint = nb_i18n::tr_args(
+                st.lang(),
+                "sync.invite_hint",
+                &[("time", &date_time(st, i.expires_at))],
+            );
+            let code = format!(
+                "{} {}",
+                &i.code[..4.min(i.code.len())],
+                &i.code[4.min(i.code.len())..]
+            );
+            view()
+                .mx(px(20.0))
+                .mb(px(14.0))
+                .p(px(16.0))
+                .gap(px(8.0))
+                .rounded(px(crate::ui::tokens::radius::md()))
+                .bg(Tone::PrimarySoft.color())
+                .items_center()
+                .child(
+                    label(
+                        move || code.clone(),
+                        ty::H1,
+                        FontWeight::BOLD,
+                        Tone::Primary,
+                    )
+                    .test_id("sync-invite-code"),
+                )
+                .child(label(
+                    move || hint.clone(),
+                    ty::SM,
+                    FontWeight::NORMAL,
+                    Tone::Body,
+                ))
+                .into_element()
+        }
+    }));
     if !s.error.is_empty() {
         let e = s.error.clone();
         v = v.child(view().px(px(20.0)).pb(px(14.0)).child(label(
@@ -122,6 +169,26 @@ fn linked_body(st: AppState, s: crate::sync::SyncView) -> View {
                     drop(task); // runs to completion
                 },
             ))
+            .child(
+                button(
+                    Variant::Secondary,
+                    Size::Md,
+                    Some(Icon::Key),
+                    st.t("sync.invite"),
+                    move || {
+                        let task = st.root.run(|| {
+                            spawn(async move {
+                                match crate::sync::invite(st).await {
+                                    Ok(i) => invite.set(Some(i)),
+                                    Err(f) => show_failure(st, &f),
+                                }
+                            })
+                        });
+                        drop(task); // runs to completion
+                    },
+                )
+                .test_id("sync-invite"),
+            )
             .child(
                 button(
                     Variant::Secondary,

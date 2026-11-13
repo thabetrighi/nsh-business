@@ -559,7 +559,7 @@ pub fn record_purchase(
             } else {
                 let cost = Money::from_minor(unit_cost, currency);
                 let before = stock::balance(w.tx(), product_id, warehouse_id, currency)?;
-                let after = before.apply(MovementKind::Purchase, *base_qty, Some(cost), warehouse.policy(), true)?;
+                let after = before.apply(MovementKind::Purchase, *base_qty, Some(cost), w.policy(&warehouse), true)?;
                 Some(
                     stock::append(
                         w,
@@ -935,7 +935,7 @@ pub fn return_purchase(
                 MovementKind::PurchaseReturn,
                 base_qty,
                 None,
-                warehouse.policy(),
+                w.policy(&warehouse),
                 may_go_negative,
             )?;
             let (unit_cost, line_value) =

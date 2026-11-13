@@ -395,7 +395,7 @@ pub(crate) fn write_new(
             MovementKind::Opening,
             qty,
             Some(unit_cost),
-            warehouse.policy(),
+            w.policy(&warehouse),
             false,
         )?;
         let movement = stock::append(

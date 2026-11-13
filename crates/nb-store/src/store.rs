@@ -87,6 +87,21 @@ pub struct Store {
     /// (by operation id; a use case that fails before writing leaves one,
     /// dropped when it gets old).
     pub(crate) calls: Vec<(nb_core::OperationId, String)>,
+    /// Inside `replay_log`.
+    pub(crate) replaying: bool,
+}
+
+/// Something running another device's operation here left to look at
+/// (`stock_shortfall`: goods sold on two devices that were not there).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Review {
+    pub id: String,
+    pub kind: String,
+    pub entity: String,
+    pub entity_id: String,
+    /// JSON.
+    pub detail: String,
+    pub created_at: i64,
 }
 
 impl Store {
@@ -161,6 +176,7 @@ impl Store {
             utc_offset_min: opts.utc_offset_min,
             path,
             calls: Vec::new(),
+            replaying: false,
         })
     }
 
@@ -197,9 +213,15 @@ impl Store {
                 org: op.org,
                 actor: op.actor,
             };
+            let below = self.below_zero()?;
+            self.replaying = true;
             let run = nb_core::id::idgen::deterministic(op.id.uuid(), op.at, || {
                 crate::ops::replay(self, meta, op.call)
             });
+            self.replaying = false;
+            if run.is_ok() {
+                self.note_shortfalls(&below, op.id, op.at)?;
+            }
             if let Err(e) = run {
                 self.clock = real;
                 self.device = own;
@@ -208,6 +230,88 @@ impl Store {
         }
         self.clock = real;
         self.device = own;
+        Ok(())
+    }
+
+    /// Stock below zero now: (product, warehouse) → quantity (thousandths).
+    fn below_zero(&self) -> Result<std::collections::BTreeMap<(String, String), i64>> {
+        let mut st = self.conn.prepare(
+            "SELECT product_id, warehouse_id, on_hand_milli FROM stock_balances WHERE on_hand_milli < 0",
+        )?;
+        let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Notes stock that an operation run again took (further) below zero:
+    /// the goods left on another device before this one knew.
+    fn note_shortfalls(
+        &mut self,
+        before: &std::collections::BTreeMap<(String, String), i64>,
+        op: nb_core::OperationId,
+        at: i64,
+    ) -> Result<()> {
+        let after = self.below_zero()?;
+        for ((product, warehouse), qty) in after {
+            let was = before
+                .get(&(product.clone(), warehouse.clone()))
+                .copied()
+                .unwrap_or(0);
+            if qty < was {
+                self.conn.execute(
+                    "INSERT INTO reviews (id, kind, entity, entity_id, detail, operation_id, created_at)
+                     VALUES (?1, 'stock_shortfall', 'product', ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        nb_core::OperationId::new().to_string(),
+                        product,
+                        serde_json::json!({ "warehouse": warehouse, "on_hand_milli": qty, "before_milli": was })
+                            .to_string(),
+                        op.to_string(),
+                        at
+                    ],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Open review items: (id, kind, entity, entity id, detail, time).
+    pub fn open_reviews(&self) -> Result<Vec<Review>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, kind, entity, entity_id, detail, created_at FROM reviews
+             WHERE resolved_at IS NULL ORDER BY created_at DESC LIMIT 500",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(Review {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                entity: r.get(2)?,
+                entity_id: r.get(3)?,
+                detail: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Takes this device's identity in a database that came from elsewhere
+    /// (the server's copy, when a device joins or catches up): its rows and
+    /// numbers from now on carry `id` and `prefix`.
+    pub fn adopt_device(&mut self, id: nb_core::DeviceId, prefix: &str) -> Result<()> {
+        nb_domain::numbering::validate_device_prefix(prefix)?;
+        self.conn.execute(
+            "UPDATE device SET id = ?1, prefix = ?2",
+            rusqlite::params![id.to_string(), prefix],
+        )?;
+        self.device = Device {
+            id,
+            prefix: prefix.to_owned(),
+        };
+        let node = u64::from_be_bytes(
+            id.uuid().as_bytes()[8..16]
+                .try_into()
+                .map_err(|_| Error::Corrupt("device id".into()))?,
+        );
+        self.hlc = Hlc::new(node);
         Ok(())
     }
 
@@ -257,6 +361,63 @@ impl Store {
             [now],
         )?;
         Ok(())
+    }
+
+    /// The log after position `after` (the server's order), at most
+    /// `limit`: (position, operation, the device that ran it). The server
+    /// sends these to the other devices.
+    pub fn log_after(
+        &self,
+        after: i64,
+        limit: u32,
+    ) -> Result<Vec<(i64, crate::ops::LoggedOp, Option<String>)>> {
+        let mut st = self.conn.prepare(
+            "SELECT rowid, id, kind, org_id, actor_id, created_at, call, device_id FROM operations
+             WHERE rowid > ?1 AND call IS NOT NULL ORDER BY rowid LIMIT ?2",
+        )?;
+        let rows = st.query_map(rusqlite::params![after, limit.clamp(1, 5_000)], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, Option<String>>(7)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (pos, id, kind, org, actor, at, call, device) = row?;
+            let bad = |what: &str| Error::Corrupt(format!("operation {id}: {what}"));
+            out.push((
+                pos,
+                crate::ops::LoggedOp {
+                    id: id.parse().map_err(|_| bad("id"))?,
+                    kind,
+                    org: org.map(|o| o.parse()).transpose().map_err(|_| bad("org"))?,
+                    actor: actor
+                        .map(|a| a.parse())
+                        .transpose()
+                        .map_err(|_| bad("actor"))?,
+                    at,
+                    device: None,
+                    call: serde_json::from_str(&call)?,
+                },
+                device,
+            ));
+        }
+        Ok(out)
+    }
+
+    /// The last position in the log.
+    pub fn log_end(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COALESCE(MAX(rowid), 0) FROM operations", [], |r| {
+                r.get(0)
+            })?)
     }
 
     fn logged(&self, tail: &str) -> Result<Vec<crate::ops::LoggedOp>> {
@@ -336,7 +497,8 @@ impl Store {
     pub fn fingerprints(&self) -> Result<Vec<(String, String)>> {
         use sha2::{Digest, Sha256};
         let mut out = Vec::new();
-        const LOCAL: [&str; 10] = [
+        const LOCAL: [&str; 11] = [
+            "reviews",
             "sync_link",
             "device",
             "operations",
@@ -355,7 +517,13 @@ impl Store {
             st.query_map([], |r| r.get(0))?
                 .collect::<std::result::Result<_, _>>()?
         };
-        for t in tables.iter().filter(|t| !LOCAL.contains(&t.as_str())) {
+        // A search index's own tables (`*_fts_data`, …) are laid out by the
+        // order rows arrived in; what it finds is the same.
+        let derived = |t: &str| t.contains("_fts_");
+        for t in tables
+            .iter()
+            .filter(|t| !LOCAL.contains(&t.as_str()) && !derived(t))
+        {
             let mut h = Sha256::new();
             let cols: Vec<String> = {
                 let mut st = self.conn.prepare(&format!("PRAGMA table_info(\"{t}\")"))?;

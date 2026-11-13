@@ -125,6 +125,10 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0033_sync_state",
         include_str!("../migrations/0033_sync_state.sql"),
     ),
+    (
+        "0034_replica_sync",
+        include_str!("../migrations/0034_replica_sync.sql"),
+    ),
 ];
 
 pub fn latest() -> u32 {

@@ -110,7 +110,7 @@ pub fn adjust_stock(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Resu
             None => (before.avg_cost, qty.times_price(before.avg_cost)?),
         };
         // Adjustments in carry a cost but do not change the average unless priced.
-        let after = before.apply(kind, qty, None, warehouse.policy(), may_go_negative)?;
+        let after = before.apply(kind, qty, None, w.policy(&warehouse), may_go_negative)?;
         let number = w.next_number(DocKind::Adjustment, &branch.id, &branch.code)?;
         let movement = stock::append(
             w,

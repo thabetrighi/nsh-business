@@ -1,7 +1,8 @@
 //! The first run (M4.2): a device with no shop yet asks for one — the
 //! language, the shop (name, activity, town, owner, fiscal year), its
-//! legal identity (optional, also in settings later) — or opens the demo
-//! shop to look around. Then the app opens on it.
+//! legal identity (optional, also in settings later) — joins a shop that
+//! already syncs to a server (a code from one of its devices), or opens the
+//! demo shop to look around. Then the app opens on it.
 
 use nb_domain::features::Profiles;
 use nb_i18n::Lang;
@@ -24,6 +25,7 @@ enum Step {
     Welcome,
     Shop,
     Legal,
+    Join,
 }
 
 pub fn setup_wizard(st: AppState) -> View {
@@ -151,6 +153,20 @@ pub fn setup_wizard(st: AppState) -> View {
                 )
                 .w_full()
                 .test_id("setup-create"),
+            )
+            .child(
+                button(
+                    Variant::Secondary,
+                    Size::Lg,
+                    Some(Icon::Link),
+                    st.t("setup.join"),
+                    move || {
+                        error.set(String::new());
+                        step.set(Step::Join);
+                    },
+                )
+                .w_full()
+                .test_id("setup-join"),
             )
             .child(
                 button(
@@ -333,16 +349,106 @@ pub fn setup_wizard(st: AppState) -> View {
             )
             .into_element()
     };
+    let (server, code) = (s(""), s(""));
+    let join = move || {
+        if busy.get_untracked() {
+            return;
+        }
+        busy.set(true);
+        error.set(String::new());
+        let (u, c) = (server.get_untracked(), code.get_untracked());
+        let task = spawn(async move {
+            #[cfg(not(target_arch = "wasm32"))]
+            match crate::sync::join(st, u, c).await {
+                Ok(j) => {
+                    crate::ui::overlay::show_toast(
+                        st,
+                        nb_i18n::tr_args(st.lang(), "sync.joined", &[("org", &j.org_name)]),
+                    );
+                    st.needs_setup.set(false);
+                    st.connect();
+                }
+                Err(f) => {
+                    busy.set(false);
+                    let mut t = st.tn(f.key);
+                    if !f.detail.is_empty() {
+                        t.push_str(" — ");
+                        t.push_str(&f.detail);
+                    }
+                    error.set(t);
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = (u, c);
+                busy.set(false);
+                error.set(st.tn("sync.web_later"));
+            }
+        });
+        drop(task); // runs to completion: tasks end with their owner, not their handle
+    };
+    let joining = move || {
+        view()
+            .gap(px(14.0))
+            .child(label(
+                st.t("setup.join.help"),
+                ty::SM,
+                FontWeight::NORMAL,
+                Tone::Muted,
+            ))
+            .child(field(
+                st.t("sync.server"),
+                server,
+                st.t("sync.server_placeholder"),
+                String::new,
+                KeyboardType::Url,
+                "join-url",
+            ))
+            .child(field(
+                st.t("sync.code"),
+                code,
+                || "ABCD EFGH".to_owned(),
+                String::new,
+                KeyboardType::Default,
+                "join-code",
+            ))
+            .child(
+                view()
+                    .flex_row()
+                    .gap(px(10.0))
+                    .child(button(
+                        Variant::Secondary,
+                        Size::Md,
+                        None,
+                        st.t("setup.back"),
+                        move || step.set(Step::Welcome),
+                    ))
+                    .child(view().flex_1())
+                    .child(
+                        button(
+                            Variant::Primary,
+                            Size::Md,
+                            Some(Icon::Link),
+                            st.t("sync.join"),
+                            join,
+                        )
+                        .test_id("join-go"),
+                    ),
+            )
+            .into_element()
+    };
     // Each step in its own place: an input never carries over what was
     // typed in another step's input.
     let body = view()
         .child(when(move || step.get() == Step::Welcome, welcome))
         .child(when(move || step.get() == Step::Shop, shop))
-        .child(when(move || step.get() == Step::Legal, legal));
+        .child(when(move || step.get() == Step::Legal, legal))
+        .child(when(move || step.get() == Step::Join, joining));
     let titles = move || match step.get() {
         Step::Welcome => (st.tn("setup.title"), st.tn("setup.subtitle")),
         Step::Shop => (st.tn("setup.shop"), st.tn("setup.shop.help")),
         Step::Legal => (st.tn("setup.legal"), st.tn("setup.legal.optional")),
+        Step::Join => (st.tn("setup.join.title"), st.tn("sync.local_first")),
     };
     view()
         .test_id("setup-wizard")

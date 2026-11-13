@@ -766,7 +766,7 @@ pub(crate) fn sale_in(
                 MovementKind::Sale,
                 *base_qty,
                 None,
-                warehouse.policy(),
+                w.policy(&warehouse),
                 may_go_negative,
             )?;
             // What the goods cost: the average, or the oldest layers (FIFO).

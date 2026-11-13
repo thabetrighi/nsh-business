@@ -61,6 +61,9 @@ pub struct Writer<'a> {
     clock: &'a dyn nb_core::Clock,
     utc_offset_min: i32,
     events: u32,
+    /// Running an operation that already happened on a device (a replica,
+    /// the server): facts are taken as they were (ADR-0006, AcceptFacts).
+    replaying: bool,
 }
 
 /// Sortable text of a hybrid timestamp (outbox order across devices).
@@ -88,6 +91,23 @@ impl<'a> Writer<'a> {
     pub fn actor_text(&self) -> Option<String> {
         self.meta.actor.map(|a| a.to_string())
     }
+    /// Whether this runs an operation again (a replica, the server).
+    pub fn replaying(&self) -> bool {
+        self.replaying
+    }
+
+    /// What a warehouse allows below zero. An operation run again already
+    /// happened (the goods left, the receipt was printed): its stock goes
+    /// below zero if it must, and the replica notes the shortfall
+    /// (`Store::replay_log`), instead of refusing it.
+    pub fn policy(&self, wh: &crate::repo::org::Warehouse) -> nb_domain::stock::NegativeStock {
+        if self.replaying {
+            nb_domain::stock::NegativeStock::Allow
+        } else {
+            wh.policy()
+        }
+    }
+
     /// The business date of the operation in the store's time zone.
     pub fn date(&self) -> (i32, u32, u32) {
         civil_date(self.now, self.utc_offset_min)
@@ -173,6 +193,11 @@ impl<'a> Writer<'a> {
         t: &Target,
         approval: Option<ApprovalId>,
     ) -> Result<()> {
+        // Limits the device already let through (selling on credit past
+        // the limit, below zero): run again, the fact stands (ADR-0006).
+        if self.replaying && matches!(p, Permission::CreditExceed | Permission::StockNegative) {
+            return Ok(());
+        }
         match (self.decide(p, t)?, approval) {
             (Decision::Allow, _) => Ok(()),
             (Decision::NeedsApproval, Some(a)) => {
@@ -376,6 +401,7 @@ impl Store {
             clock: clock.as_ref(),
             utc_offset_min,
             events: 0,
+            replaying: self.replaying,
         };
         // Every id the operation makes derives from its id and time, so
         // running it again elsewhere makes the same rows (ADR-0006).

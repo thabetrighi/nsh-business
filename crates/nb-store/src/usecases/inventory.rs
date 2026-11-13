@@ -494,7 +494,7 @@ pub fn send_transfer(store: &mut Store, meta: OpMeta, input: TransferInput) -> R
             }
             let base = p.unit_set()?.to_base(*q, if unit.is_empty() { &p.units[0].code } else { unit })?;
             let before = stock::balance(w.tx(), *product, from, currency)?;
-            let after = before.apply(MovementKind::TransferOut, base, None, src.policy(), may_negative)?;
+            let after = before.apply(MovementKind::TransferOut, base, None, w.policy(&src), may_negative)?;
             let (unit_cost, _) = stock::issue_cost(w.tx(), *product, from, base, before.avg_cost)?;
             let movement = stock::append(w, *product, from, MovementKind::TransferOut, base, Some(unit_cost), Some(&number), None, after)?;
             crate::usecases::tracked::record(w, movement, *product, from, MovementKind::TransferOut, base, tracked, false)?;
@@ -551,7 +551,7 @@ pub fn receive_transfer(
             let cost = Money::from_minor(l.unit_cost_minor, currency);
             if !got.is_zero() {
                 let before = stock::balance(w.tx(), product, to, currency)?;
-                let after = before.apply(MovementKind::TransferIn, got, Some(cost), dst.policy(), true)?;
+                let after = before.apply(MovementKind::TransferIn, got, Some(cost), w.policy(&dst), true)?;
                 let movement = stock::append(w, product, to, MovementKind::TransferIn, got, Some(cost), Some(&t.number), None, after)?;
                 let sent_by: Option<String> = w.tx().query_row(
                     "SELECT out_movement_id FROM transfer_lines WHERE transfer_id = ?1 AND position = ?2",
@@ -823,7 +823,7 @@ pub fn close_count(
             let Some((kind, q)) = rules::count_difference(before.on_hand, from_milli(counted))? else {
                 continue;
             };
-            let after = before.apply(kind, q, None, warehouse.policy(), true)?;
+            let after = before.apply(kind, q, None, w.policy(&warehouse), true)?;
             // A loss is costed as any issue; a gain at the average.
             let (unit_cost, value) = if kind == MovementKind::CountGain {
                 (before.avg_cost, q.times_price(before.avg_cost)?)
