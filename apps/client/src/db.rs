@@ -19,18 +19,27 @@ use nb_store::{Error, OpMeta, Store, StoreOptions};
 /// Where the database lives (set once, before the first call).
 static PATH: OnceLock<PathBuf> = OnceLock::new();
 
-/// The database of an app packaged by NSH for Windows or macOS, whose
+/// The database of an app packaged by NSH for Windows, macOS or Android, whose
 /// launcher is NSH's and not `main.rs`: in the user's data folder (or
 /// `NB_DATA_DIR`). Linux runs `main.rs`, which configures it, and the
 /// headless tests keep their database in memory.
 fn packaged_path() -> Option<PathBuf> {
-    if !cfg!(any(target_os = "windows", target_os = "macos")) {
+    if !cfg!(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android"
+    )) {
         return None;
     }
     let base = std::env::var_os("NB_DATA_DIR")
         .map(PathBuf::from)
         .or_else(|| {
-            if cfg!(target_os = "windows") {
+            if cfg!(target_os = "android") {
+                // The app's private files (NSH gives Rust no data-dir call).
+                let dir = PathBuf::from("/data/data/dz.nshbusiness.app/files");
+                std::fs::create_dir_all(&dir).ok()?;
+                Some(dir)
+            } else if cfg!(target_os = "windows") {
                 std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("dz.nshbusiness.app"))
             } else {
                 std::env::var_os("HOME").map(|h| {

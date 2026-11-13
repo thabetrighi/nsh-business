@@ -1,0 +1,71 @@
+name: client-android
+
+# Packages the NSH Business client as an Android APK (drivers, sales reps
+# and the owner use the same app on their phones) and publishes it as the
+# `android-latest` pre-release.
+
+on:
+  push:
+    branches: [main]
+    paths: ["apps/client/**", "crates/**", ".github/workflows/client-android.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NSH_VERSION: v0.4.0
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Rust Android targets and host libraries
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-4-dev clang
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+      - name: Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "platform-tools" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "NDK: $ANDROID_NDK_LATEST_HOME"
+
+      - name: Install NSH CLI
+        run: |
+          curl -fsSL -o nsh.tar.gz "https://github.com/longbridge/nsh/releases/download/${NSH_VERSION}/nsh-linux-x86_64.tar.gz"
+          mkdir -p ~/.nsh && tar -xzf nsh.tar.gz -C ~/.nsh
+          echo "$HOME/.nsh/nsh/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/client
+
+      - name: Package APK
+        working-directory: apps/client
+        run: |
+          set -o pipefail
+          nsh --verbose package --target android 2>&1 | tail -120
+          find . -name '*.apk' -not -path './target/*' | head
+
+      - name: Publish pre-release
+        working-directory: apps/client
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=$(find . -name '*.apk' -not -path './target/*' | head -1)
+          cp "$APK" nsh-business.apk
+          gh release delete android-latest -y --cleanup-tag 2>/dev/null || true
+          gh release create android-latest nsh-business.apk --prerelease \
+            --title "NSH Business — Android" \
+            --notes "آخر نسخة من التطبيق للهاتف (البيع، المخزون، الزبائن، التوزيع ووضع السائق). Commit ${GITHUB_SHA::7}."
