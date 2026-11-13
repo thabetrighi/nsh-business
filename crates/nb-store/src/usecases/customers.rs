@@ -222,13 +222,20 @@ pub fn customer_groups(store: &Store) -> Result<Vec<CustomerGroup>> {
 }
 
 pub fn create_group(store: &mut Store, meta: OpMeta, name: &str) -> Result<CustomerGroup> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CustomersCreateGroup {
+            name: name.to_owned(),
+        },
+    )?;
     let name = name.trim().to_owned();
     if name.is_empty() {
         return Err(RuleError::on("name", "required").into());
     }
     store.write(meta, |w| {
         w.require(Permission::CustomersEdit, &Target::org())?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         let taken: i64 = w.tx().query_row(
             "SELECT COUNT(*) FROM customer_groups WHERE org_id = ?1 AND lower(name) = lower(?2)",
             params![w.org()?.to_string(), name],
@@ -335,17 +342,8 @@ pub(crate) fn save_customer_in(w: &mut Writer<'_>, input: &CustomerInput) -> Res
             b.id
         }
         None => {
-            w.tx().execute(
-                "INSERT INTO customer_counters (org_id, last) VALUES (?1, 1)
-                 ON CONFLICT (org_id) DO UPDATE SET last = last + 1",
-                [&org],
-            )?;
-            let n: i64 = w.tx().query_row(
-                "SELECT last FROM customer_counters WHERE org_id = ?1",
-                [&org],
-                |r| r.get(0),
-            )?;
-            let id = nb_core::uuid::Uuid::now_v7().to_string();
+            let code = w.next_code("customer", "C")?;
+            let id = nb_core::id::idgen::uuid().to_string();
             w.tx().execute(
                 "INSERT INTO customers (id, org_id, code, kind, name, group_id, phone, email, address, city, nif, nis,
                         rc, ai, credit_limit_minor, payment_days, status, note, created_at, created_by, updated_at,
@@ -355,7 +353,7 @@ pub(crate) fn save_customer_in(w: &mut Writer<'_>, input: &CustomerInput) -> Res
                 params![
                     id,
                     org,
-                    format!("C-{n:05}"),
+                    code,
                     input.kind,
                     t(&input.name),
                     group,
@@ -388,6 +386,13 @@ pub(crate) fn save_customer_in(w: &mut Writer<'_>, input: &CustomerInput) -> Res
 /// Creates a customer (numbered C-00001…) or changes one. Setting or
 /// raising a credit limit needs `credit.limits`.
 pub fn save_customer(store: &mut Store, meta: OpMeta, input: CustomerInput) -> Result<CustomerRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CustomersSaveCustomer {
+            input: input.clone(),
+        },
+    )?;
     check(&input)?;
     let id = store.write(meta, |w| save_customer_in(w, &input))?;
     get_customer(store, &id)

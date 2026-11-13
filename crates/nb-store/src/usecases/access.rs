@@ -120,6 +120,13 @@ fn hash_opt(s: Option<&str>) -> Result<Option<String>> {
 }
 
 pub fn create_user(store: &mut Store, meta: OpMeta, input: UserInput) -> Result<UserRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::Opaque {
+            name: "access::create_user".into(),
+        },
+    )?;
     let mut errors = Vec::new();
     if input.name.trim().is_empty() {
         errors.push(RuleError::on("name", "required"));
@@ -183,6 +190,13 @@ pub fn create_user(store: &mut Store, meta: OpMeta, input: UserInput) -> Result<
 }
 
 pub fn update_user(store: &mut Store, meta: OpMeta, input: UserUpdate) -> Result<UserRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::Opaque {
+            name: "access::update_user".into(),
+        },
+    )?;
     let id: UserId = parse_id(&input.id)?;
     if input.name.trim().is_empty() {
         return Err(RuleError::on("name", "required").into());
@@ -247,6 +261,13 @@ pub fn set_secret(
     kind: Secret,
     value: Option<String>,
 ) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::Opaque {
+            name: "access::set_secret".into(),
+        },
+    )?;
     if let Some(v) = value.as_deref() {
         match kind {
             Secret::Password => check_password(v)?,
@@ -300,6 +321,13 @@ pub struct RoleInput {
 }
 
 pub fn save_role(store: &mut Store, meta: OpMeta, input: RoleInput) -> Result<RoleRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::AccessSaveRole {
+            input: input.clone(),
+        },
+    )?;
     let name = input.name.trim().to_owned();
     if name.is_empty() {
         return Err(RuleError::on("name", "required").into());
@@ -366,6 +394,11 @@ fn unique_violation<T>(r: &std::result::Result<T, rusqlite::Error>) -> bool {
 
 /// Deletes a custom role nobody holds.
 pub fn delete_role(store: &mut Store, meta: OpMeta, id: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::AccessDeleteRole { id: id.to_owned() },
+    )?;
     if BuiltinRole::from_code(id).is_some() {
         return Err(RuleError::on("role", "access.builtin_role").into());
     }
@@ -602,6 +635,13 @@ pub enum ApprovalOutcome {
 /// A supervisor approves, with their PIN, a sensitive action for the user
 /// running `meta` (the requester).
 pub fn approve(store: &mut Store, meta: OpMeta, input: ApproveInput) -> Result<ApprovalOutcome> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::AccessApprove {
+            input: input.clone(),
+        },
+    )?;
     let p = Permission::from_code(&input.permission)
         .filter(|p| p.is_sensitive())
         .ok_or(Error::from(RuleError::on("permission", "invalid_value")))?;

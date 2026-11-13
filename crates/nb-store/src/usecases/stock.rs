@@ -58,6 +58,13 @@ fn operation(kind: MovementKind, value: Money) -> Option<Operation> {
 }
 
 pub fn adjust_stock(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Result<AdjustResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::StockAdjustStock {
+            input: input.clone(),
+        },
+    )?;
     let kind = MovementKind::from_code(&input.kind)
         .filter(|k| operation(*k, Money::zero(nb_core::Currency::DZD)).is_some())
         .ok_or(RuleError::on("kind", "invalid_value"))?;

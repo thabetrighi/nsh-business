@@ -286,6 +286,16 @@ pub fn reserve(
     quantity: &str,
     source: &str,
 ) -> Result<String> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::InventoryReserve {
+            product: product.clone(),
+            wh: wh.clone(),
+            quantity: quantity.to_owned(),
+            source: source.to_owned(),
+        },
+    )?;
     let q = qty("quantity", quantity)?;
     if q.is_negative() || q.is_zero() {
         return Err(RuleError::on("quantity", "stock.quantity_positive").into());
@@ -313,6 +323,14 @@ pub fn reserve(
 
 /// Ends a reservation: `consumed` when the goods left, else `released`.
 pub fn close_reservation(store: &mut Store, meta: OpMeta, id: &str, consumed: bool) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::InventoryCloseReservation {
+            id: id.to_owned(),
+            consumed: consumed.clone(),
+        },
+    )?;
     store.write(meta, |w| {
         let n = w.tx().execute(
             "UPDATE stock_reservations SET status = ?2, closed_at = ?3 WHERE id = ?1 AND status = 'active'",
@@ -428,6 +446,13 @@ fn transfer_of(conn: &Connection, id: &str) -> Result<TransferRow> {
 /// Sends goods from one warehouse to another: they leave the source now
 /// (in transit) at its average cost.
 pub fn send_transfer(store: &mut Store, meta: OpMeta, input: TransferInput) -> Result<TransferRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::InventorySendTransfer {
+            input: input.clone(),
+        },
+    )?;
     let from: WarehouseId = parse_id(&input.from_warehouse)?;
     let to: WarehouseId = parse_id(&input.to_warehouse)?;
     if from == to {
@@ -495,6 +520,14 @@ pub fn receive_transfer(
     id: &str,
     received: Vec<(i64, String)>,
 ) -> Result<TransferRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::InventoryReceiveTransfer {
+            id: id.to_owned(),
+            received: received.clone(),
+        },
+    )?;
     let mut given = std::collections::BTreeMap::new();
     for (pos, q) in &received {
         given.insert(*pos, qty("received", q)?);
@@ -649,6 +682,14 @@ pub fn open_count(
     warehouse: WarehouseId,
     category: Option<CategoryId>,
 ) -> Result<CountRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::InventoryOpenCount {
+            warehouse: warehouse.clone(),
+            category: category.clone(),
+        },
+    )?;
     store.write(meta, |w| {
         let (wh, branch, target) = place(w.tx(), warehouse)?;
         w.require(Permission::StockCount, &target)?;
@@ -683,6 +724,16 @@ pub fn record_count(
     quantity: &str,
     unit: &str,
 ) -> Result<CountLine> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::InventoryRecordCount {
+            count: count.to_owned(),
+            product: product.clone(),
+            quantity: quantity.to_owned(),
+            unit: unit.to_owned(),
+        },
+    )?;
     let q = qty("counted", quantity)?;
     store.write(meta, |w| {
         let c = count_of(w.tx(), count, false)?;
@@ -736,6 +787,14 @@ pub fn close_count(
     count: &str,
     approval: Option<String>,
 ) -> Result<CountResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::InventoryCloseCount {
+            count: count.to_owned(),
+            approval: approval.clone(),
+        },
+    )?;
     let offset = store.read(|r| Ok(r.utc_offset_min))?;
     store.write(meta, |w| {
         let c = count_of(w.tx(), count, false)?;
@@ -748,7 +807,7 @@ pub fn close_count(
         w.require_approved(Permission::StockAdjust, &target, approval)?;
         let (_, currency) = the_org(w.tx())?;
         let lines: Vec<(String, i64)> = {
-            let mut s = w.tx().prepare("SELECT product_id, counted_milli FROM stock_count_lines WHERE count_id = ?1")?;
+            let mut s = w.tx().prepare("SELECT product_id, counted_milli FROM stock_count_lines WHERE count_id = ?1 ORDER BY counted_at, rowid")?;
             let rows = s.query_map([count], |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
@@ -799,6 +858,13 @@ pub fn close_count(
 }
 
 pub fn cancel_count(store: &mut Store, meta: OpMeta, count: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::InventoryCancelCount {
+            count: count.to_owned(),
+        },
+    )?;
     store.write(meta, |w| {
         let c = count_of(w.tx(), count, false)?;
         if c.status != "open" {

@@ -93,6 +93,8 @@ pub fn check_settings(s: &OrgSettings) -> std::result::Result<(), Vec<RuleError>
 }
 
 pub fn update_settings(store: &mut Store, meta: OpMeta, s: OrgSettings) -> Result<OrgSettings> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(meta, &crate::ops::Call::OrgUpdateSettings { s: s.clone() })?;
     check_settings(&s)?;
     let before = settings(store)?;
     store.write(meta, |w| {
@@ -194,6 +196,11 @@ pub fn update_business_profile(
     meta: OpMeta,
     p: BusinessProfile,
 ) -> Result<BusinessProfile> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::OrgUpdateBusinessProfile { p: p.clone() },
+    )?;
     let p = BusinessProfile {
         legal_name: p.legal_name.trim().into(),
         nif: p.nif.trim().into(),
@@ -240,6 +247,14 @@ pub fn set_feature(
     code: &str,
     on: Option<bool>,
 ) -> Result<FeatureSet> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::OrgSetFeature {
+            code: code.to_owned(),
+            on: on.clone(),
+        },
+    )?;
     let f =
         Feature::from_code(code).ok_or(Error::from(RuleError::on("feature", "invalid_value")))?;
     if on == Some(false) && Profiles::builtin().is_core(f) {
@@ -364,6 +379,13 @@ fn required(field: &'static str, v: &str) -> Result<()> {
 
 /// A new branch, with its first warehouse and cash register.
 pub fn create_branch(store: &mut Store, meta: OpMeta, name: &str) -> Result<BranchTree> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::OrgCreateBranch {
+            name: name.to_owned(),
+        },
+    )?;
     required("name", name)?;
     store.write(meta, |w| {
         let id = w.org()?;
@@ -399,6 +421,14 @@ pub fn create_branch(store: &mut Store, meta: OpMeta, name: &str) -> Result<Bran
 }
 
 pub fn rename_branch(store: &mut Store, meta: OpMeta, branch: BranchId, name: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::OrgRenameBranch {
+            branch: branch.clone(),
+            name: name.to_owned(),
+        },
+    )?;
     required("name", name)?;
     store.write(meta, |w| {
         let id = w.org()?;
@@ -423,6 +453,15 @@ pub fn create_warehouse(
     name: &str,
     negative_stock: &str,
 ) -> Result<Warehouse> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::OrgCreateWarehouse {
+            branch: branch.clone(),
+            name: name.to_owned(),
+            negative_stock: negative_stock.to_owned(),
+        },
+    )?;
     required("name", name)?;
     if !["forbid", "permission", "allow"].contains(&negative_stock) {
         return Err(RuleError::on("negative_stock", "invalid_value").into());
@@ -452,6 +491,15 @@ pub fn update_warehouse(
     name: &str,
     negative_stock: &str,
 ) -> Result<Warehouse> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::OrgUpdateWarehouse {
+            warehouse: warehouse.clone(),
+            name: name.to_owned(),
+            negative_stock: negative_stock.to_owned(),
+        },
+    )?;
     required("name", name)?;
     if !["forbid", "permission", "allow"].contains(&negative_stock) {
         return Err(RuleError::on("negative_stock", "invalid_value").into());
@@ -559,6 +607,14 @@ pub fn set_warehouse_details(
     warehouse: WarehouseId,
     d: &WarehouseDetails,
 ) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::OrgSetWarehouseDetails {
+            warehouse: warehouse.clone(),
+            d: d.clone(),
+        },
+    )?;
     store.write(meta, |w| {
         w.require(Permission::SettingsEdit, &Target::org())?;
         org::warehouse(w.tx(), warehouse)?;
@@ -583,6 +639,13 @@ pub fn set_warehouse_details(
 /// Retires a warehouse: only one left empty (nothing on hand, nothing
 /// held), and never the last one. Its history stays.
 pub fn archive_warehouse(store: &mut Store, meta: OpMeta, warehouse: WarehouseId) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::OrgArchiveWarehouse {
+            warehouse: warehouse.clone(),
+        },
+    )?;
     store.write(meta, |w| {
         let id = w.org()?;
         w.require(Permission::SettingsEdit, &Target::org())?;
@@ -616,6 +679,14 @@ pub fn create_register(
     branch: BranchId,
     name: &str,
 ) -> Result<Register> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::OrgCreateRegister {
+            branch: branch.clone(),
+            name: name.to_owned(),
+        },
+    )?;
     required("name", name)?;
     store.write(meta, |w| {
         let id = w.org()?;
@@ -630,6 +701,13 @@ pub fn create_register(
 
 /// Retires a cash register (its history stays).
 pub fn archive_register(store: &mut Store, meta: OpMeta, register: RegisterId) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::OrgArchiveRegister {
+            register: register.clone(),
+        },
+    )?;
     store.write(meta, |w| {
         let id = w.org()?;
         w.require(Permission::SettingsEdit, &Target::org())?;
@@ -668,6 +746,13 @@ pub fn valuation(store: &Store) -> Result<String> {
 /// Changes the valuation method: what goes out from now on is costed by
 /// it. The FIFO layers are always kept, so either works at once.
 pub fn set_valuation(store: &mut Store, meta: OpMeta, code: &str) -> Result<String> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::OrgSetValuation {
+            code: code.to_owned(),
+        },
+    )?;
     let m = nb_domain::valuation::Method::from_code(code)?;
     store.write(meta, |w| {
         let id = the_org(w.tx())?;

@@ -457,7 +457,7 @@ pub fn setup_organization(store: &mut Store, input: SetupInput) -> Result<SetupR
                     "INSERT INTO expense_categories (id, org_id, kind, name, account_code, created_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     rusqlite::params![
-                        nb_core::uuid::Uuid::now_v7().to_string(),
+                        nb_core::id::idgen::uuid().to_string(),
                         org.to_string(),
                         kind,
                         if input.language == "ar" { ar } else { fr },

@@ -168,16 +168,24 @@ pub struct CategoryInput {
 }
 
 pub fn save_category(store: &mut Store, meta: OpMeta, input: CategoryInput) -> Result<CategoryRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogSaveCategory {
+            input: input.clone(),
+        },
+    )?;
     let name = clean(&input.name);
     if name.is_empty() {
         return Err(RuleError::on("name", "required").into());
     }
-    let id = input
-        .id
-        .clone()
-        .unwrap_or_else(|| CategoryId::new().to_string());
     let parent = input.parent_id.clone().filter(|p| !p.is_empty());
     store.write(meta, |w| {
+        // Made inside the operation, so a replay makes the same id.
+        let id = input
+            .id
+            .clone()
+            .unwrap_or_else(|| CategoryId::new().to_string());
         w.require(Permission::ProductsEdit, &Target::org())?;
         let org = w.org()?;
         let (parents, names) = tree(w.tx(), org)?;
@@ -231,6 +239,11 @@ pub fn save_category(store: &mut Store, meta: OpMeta, input: CategoryInput) -> R
 
 /// Archives an empty category (no products, no sub-categories).
 pub fn archive_category(store: &mut Store, meta: OpMeta, id: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogArchiveCategory { id: id.to_owned() },
+    )?;
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
         let busy: i64 = w.tx().query_row(
@@ -281,6 +294,14 @@ pub fn save_brand(
     id: Option<String>,
     name: &str,
 ) -> Result<Named> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogSaveBrand {
+            id: id.clone(),
+            name: name.to_owned(),
+        },
+    )?;
     let name = clean(name);
     if name.is_empty() {
         return Err(RuleError::on("name", "required").into());
@@ -350,6 +371,11 @@ pub fn list_tax_classes(store: &Store) -> Result<Vec<TaxClass>> {
 /// Saves a tax class. Changing a rate re-rates its products from now on
 /// (documents already issued keep their own rate).
 pub fn save_tax_class(store: &mut Store, meta: OpMeta, c: TaxClass) -> Result<TaxClass> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogSaveTaxClass { c: c.clone() },
+    )?;
     let name = clean(&c.name);
     if name.is_empty() {
         return Err(RuleError::on("name", "required").into());
@@ -414,6 +440,13 @@ pub fn list_price_lists(store: &Store) -> Result<Vec<PriceListRow>> {
 
 /// Adds a list of the organization's own (semi-wholesale, distributors…).
 pub fn create_price_list(store: &mut Store, meta: OpMeta, name: &str) -> Result<PriceListRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogCreatePriceList {
+            name: name.to_owned(),
+        },
+    )?;
     let name = clean(name);
     if name.is_empty() {
         return Err(RuleError::on("name", "required").into());
@@ -596,6 +629,14 @@ pub fn set_product_prices(
     product: ProductId,
     prices: Vec<PriceInput>,
 ) -> Result<Vec<PriceInput>> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogSetProductPrices {
+            product: product.clone(),
+            prices: prices.clone(),
+        },
+    )?;
     let parsed = parse_prices(&prices)?;
     store.write(meta, |w| write_prices(w, product, &parsed))
 }
@@ -714,6 +755,13 @@ pub fn set_scale_formats(
     meta: OpMeta,
     formats: Vec<ScaleFormatRow>,
 ) -> Result<Vec<ScaleFormatRow>> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogSetScaleFormats {
+            formats: formats.clone(),
+        },
+    )?;
     for f in &formats {
         f.rule()?;
     }
@@ -835,6 +883,15 @@ pub fn link_barcode(
     code: &str,
     unit: &str,
 ) -> Result<ProductRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogLinkBarcode {
+            product: product.clone(),
+            code: code.to_owned(),
+            unit: unit.to_owned(),
+        },
+    )?;
     let code = nb_domain::barcode::normalize(code)?;
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
@@ -983,6 +1040,14 @@ pub fn create_variants(
     parent: ProductId,
     attrs: Vec<AttributeInput>,
 ) -> Result<Vec<ProductRow>> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogCreateVariants {
+            parent: parent.clone(),
+            attrs: attrs.clone(),
+        },
+    )?;
     let (_, currency) = store.read(|r| the_org(r.conn()))?;
     let offset = store.read(|r| Ok(r.utc_offset_min))?;
     let p = store.read(|r| catalog::get(r.conn(), parent))?;
@@ -1091,6 +1156,14 @@ pub fn add_image(
     product: ProductId,
     bytes: Vec<u8>,
 ) -> Result<ImageRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogAddImage {
+            product: product.clone(),
+            bytes: bytes.clone(),
+        },
+    )?;
     let (mime, sha) = check_image(&bytes)?;
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
@@ -1122,6 +1195,11 @@ pub fn image_bytes(store: &Store, id: &str) -> Result<Vec<u8>> {
 }
 
 pub fn remove_image(store: &mut Store, meta: OpMeta, id: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogRemoveImage { id: id.to_owned() },
+    )?;
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
         let n = w.tx().execute(
@@ -1176,6 +1254,14 @@ pub fn import_products(
     text: &str,
     warehouse: nb_domain::WarehouseId,
 ) -> Result<ImportReport> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogImportProducts {
+            text: text.to_owned(),
+            warehouse: warehouse.clone(),
+        },
+    )?;
     products_import(store, Some(meta), text, warehouse)
 }
 
@@ -1246,8 +1332,10 @@ fn products_import(
                 Err(_) => -1,
             },
         };
+        let auto = row.get("sku").is_empty();
         let sku = match row.get("sku") {
             "" => {
+                // A preview; the operation takes the device's next codes.
                 let s = format!("P-{next:05}");
                 next += 1;
                 s
@@ -1288,7 +1376,10 @@ fn products_import(
             ..Default::default()
         };
         match prepare(input, sku, currency) {
-            Ok(p) => prepared.push((row.line, row.get("category").to_owned(), p)),
+            Ok(mut p) => {
+                p.auto_sku = auto;
+                prepared.push((row.line, row.get("category").to_owned(), p))
+            }
             Err(e) => {
                 for (f, c) in e.rule_codes() {
                     err(f, c);
@@ -1385,6 +1476,11 @@ pub struct ProductSave {
 /// Saves the product editor's work in one operation: all of it or nothing,
 /// once (a second tap returns the first result).
 pub fn save_product(store: &mut Store, meta: OpMeta, save: ProductSave) -> Result<ProductRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::CatalogSaveProduct { save: save.clone() },
+    )?;
     let (_, currency) = store.read(|r| the_org(r.conn()))?;
     let offset = store.read(|r| Ok(r.utc_offset_min))?;
     let existing = match &save.existing {
@@ -1394,12 +1490,15 @@ pub fn save_product(store: &mut Store, meta: OpMeta, save: ProductSave) -> Resul
     let mut prepared = match existing {
         Some(_) => crate::usecases::products::prepare_update(save.input.clone(), currency)?,
         None => {
-            let sku = if save.input.sku.trim().is_empty() {
+            let auto = save.input.sku.trim().is_empty();
+            let sku = if auto {
                 next_sku(store)?
             } else {
                 save.input.sku.clone()
             };
-            prepare(save.input.clone(), sku, currency)?
+            let mut p = prepare(save.input.clone(), sku, currency)?;
+            p.auto_sku = auto;
+            p
         }
     };
     let prices = parse_prices(&save.prices)?;

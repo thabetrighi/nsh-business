@@ -241,15 +241,42 @@ fn draft(
 }
 
 /// The next free product code: `P-` and one more than the highest number.
+/// The next automatic product code of this device (a preview: the code is
+/// taken when the product is written).
 pub fn next_sku(store: &Store) -> Result<String> {
+    let prefix = store.device().prefix.clone();
     store.read(|r| {
-        let max: Option<i64> = r.conn().query_row(
-            "SELECT MAX(CAST(substr(sku, 3) AS INTEGER)) FROM products WHERE sku GLOB 'P-[0-9]*'",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(format!("P-{:05}", max.unwrap_or(0) + 1))
+        let last: i64 = r
+            .conn()
+            .query_row(
+                "SELECT last FROM counters WHERE name = 'product' AND device_prefix = ?1",
+                [&prefix],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(sku_code(&prefix, last + 1))
     })
+}
+
+fn sku_code(prefix: &str, n: i64) -> String {
+    if prefix == "A" {
+        format!("P-{n:05}")
+    } else {
+        format!("P-{prefix}{n:04}")
+    }
+}
+
+/// Takes this device's next free automatic product code.
+fn take_sku(w: &mut Writer<'_>) -> Result<String> {
+    let org = w.org()?;
+    for _ in 0..10_000 {
+        let code = w.next_code("product", "P")?;
+        if !catalog::sku_taken(w.tx(), org, &code, None)? {
+            return Ok(code);
+        }
+    }
+    Err(RuleError::on("sku", "product.sku_taken").into())
 }
 
 fn check_unique(w: &Writer<'_>, p: &ValidProduct, except: Option<ProductId>) -> Result<()> {
@@ -276,6 +303,9 @@ pub(crate) struct Prepared {
     /// Opening stock: warehouse, base quantity, unit cost.
     pub opening: Option<(WarehouseId, Quantity, i64)>,
     pub opening_tracked: crate::usecases::tracked::Tracked,
+    /// The code is to be taken from this device's counter when written
+    /// (the one shown before is a preview).
+    pub auto_sku: bool,
 }
 
 /// Checks a product input with the rules that need no database.
@@ -319,6 +349,7 @@ pub(crate) fn prepare(
         valid,
         opening,
         opening_tracked,
+        auto_sku: false,
     })
 }
 
@@ -334,6 +365,12 @@ pub(crate) fn write_new(
     parent: Option<(String, String)>,
     journal: bool,
 ) -> Result<(ProductRow, Money)> {
+    if p.auto_sku {
+        let code = take_sku(w)?;
+        p.valid.0.sku = code.clone();
+        p.input.sku = code;
+        p.auto_sku = false;
+    }
     check_unique(w, &p.valid, None)?;
     resolve_refs(w, &p.input, &mut p.valid)?;
     let org = w.org()?;
@@ -420,21 +457,29 @@ pub(crate) fn post_opening(
 
 /// Creates a product, with its opening stock if given.
 pub fn create_product(store: &mut Store, meta: OpMeta, input: ProductInput) -> Result<ProductRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ProductsCreateProduct {
+            input: input.clone(),
+        },
+    )?;
     let org_row = store
         .read(|r| org::the_org(r.conn()))?
         .ok_or(Error::NotFound("organization"))?;
     let currency = org_row.currency()?;
     let offset = store.read(|r| Ok(r.utc_offset_min))?;
-    let sku = if input.sku.trim().is_empty() {
+    let auto = input.sku.trim().is_empty();
+    let sku = if auto {
         next_sku(store)?
     } else {
         input.sku.clone()
     };
     let mut p = prepare(input, sku, currency)?;
-    let id = ProductId::new();
+    p.auto_sku = auto;
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
-        Ok(write_new(w, id, &mut p, currency, offset, None, true)?.0)
+        Ok(write_new(w, ProductId::new(), &mut p, currency, offset, None, true)?.0)
     })
 }
 
@@ -446,6 +491,15 @@ pub fn update_product(
     version: i64,
     input: ProductInput,
 ) -> Result<ProductRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ProductsUpdateProduct {
+            id: id.clone(),
+            version: version.clone(),
+            input: input.clone(),
+        },
+    )?;
     let currency = store
         .read(|r| org::the_org(r.conn()))?
         .ok_or(Error::NotFound("organization"))?
@@ -526,6 +580,11 @@ pub(crate) fn write_update(
 
 /// Archives products (they stay in past documents).
 pub fn archive_products(store: &mut Store, meta: OpMeta, ids: &[ProductId]) -> Result<u32> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ProductsArchiveProducts { ids: ids.to_vec() },
+    )?;
     store.write(meta, |w| {
         w.require(Permission::ProductsArchive, &Target::org())?;
         for id in ids {
@@ -554,6 +613,14 @@ pub fn set_products_category(
     ids: &[ProductId],
     category_id: Option<&str>,
 ) -> Result<u32> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ProductsSetProductsCategory {
+            ids: ids.to_vec(),
+            category_id: category_id.map(str::to_owned),
+        },
+    )?;
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
         let org = w.org()?.to_string();
@@ -590,6 +657,14 @@ pub fn set_products_category(
 
 /// Marks products as favourites or not (offered first at the till).
 pub fn set_favorite(store: &mut Store, meta: OpMeta, ids: &[ProductId], on: bool) -> Result<u32> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ProductsSetFavorite {
+            ids: ids.to_vec(),
+            on: on.clone(),
+        },
+    )?;
     store.write(meta, |w| {
         w.require(Permission::ProductsEdit, &Target::org())?;
         let org = w.org()?.to_string();

@@ -191,6 +191,13 @@ fn line_facts(conn: &Connection, sale: &str, position: u32) -> Result<LineFacts>
 /// Returns goods of a sale: the refund, the stock, the entry, the event and
 /// the audit, at once and once per operation.
 pub fn return_sale(store: &mut Store, meta: OpMeta, input: ReturnInput) -> Result<ReturnResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ReturnsReturnSale {
+            input: input.clone(),
+        },
+    )?;
     let offset = store.read(|r| Ok(r.utc_offset_min))?;
     store.write(meta, |w| return_in(w, &input, offset, false))
 }
@@ -239,7 +246,7 @@ pub(crate) fn return_in(
             return Err(RuleError::on("register", "shift.none_open").into());
         }
         let number = w.next_number(DocKind::SaleReturn, &branch.id, &branch.code)?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
 
         let mut lines = Vec::with_capacity(input.lines.len());
         let (mut net, mut tax, mut cost_back) = (0i64, 0i64, 0i64);
@@ -419,6 +426,13 @@ pub struct ExchangeResult {
 /// customer pays the difference or gets it back in cash (out of the
 /// drawer, never more than it holds).
 pub fn exchange(store: &mut Store, meta: OpMeta, input: ExchangeInput) -> Result<ExchangeResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ReturnsExchange {
+            input: input.clone(),
+        },
+    )?;
     if input.back.register_id != input.sale.register_id {
         return Err(RuleError::on("register", "invalid_value").into());
     }
@@ -439,7 +453,7 @@ pub fn exchange(store: &mut Store, meta: OpMeta, input: ExchangeInput) -> Result
         if crate::usecases::sales::shift_of(w.tx(), &shift)?.expected_minor < 0 {
             return Err(RuleError::on("refund", "shift.not_enough_cash").into());
         }
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         w.tx().execute(
             "INSERT INTO sale_exchanges (id, org_id, return_id, sale_id, shift_id, returned_minor, used_minor,
                     operation_id, created_at)
@@ -553,6 +567,17 @@ pub fn hold_cart(
     total_minor: i64,
     payload: &str,
 ) -> Result<HeldCart> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ReturnsHoldCart {
+            register_id: register_id.to_owned(),
+            label: label.to_owned(),
+            lines: lines.clone(),
+            total_minor: total_minor.clone(),
+            payload: payload.to_owned(),
+        },
+    )?;
     let register: RegisterId = parse_id(register_id)?;
     if lines == 0 {
         return Err(RuleError::on("lines", "sale.empty").into());
@@ -560,7 +585,7 @@ pub fn hold_cart(
     store.write(meta, |w| {
         let (branch, _, _) = till(w, register)?;
         w.require(Permission::SalesSell, &Target::register(parse_id(&branch.id)?, register))?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         let n: i64 = w.tx().query_row(
             "SELECT COUNT(*) FROM held_carts WHERE register_id = ?1",
             [register_id],
@@ -612,6 +637,11 @@ pub fn held_carts(store: &Store, register_id: &str) -> Result<Vec<HeldCart>> {
 
 /// Takes a cart back (it leaves the list).
 pub fn take_held(store: &mut Store, meta: OpMeta, id: &str) -> Result<HeldCart> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ReturnsTakeHeld { id: id.to_owned() },
+    )?;
     store.write(meta, |w| {
         let held = w
             .tx()
@@ -773,6 +803,13 @@ pub struct EditResult {
 ///   account and the new sale goes on as usual, so the debt moves by the
 ///   difference only.
 pub fn edit_sale(store: &mut Store, meta: OpMeta, input: EditInput) -> Result<EditResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ReturnsEditSale {
+            input: input.clone(),
+        },
+    )?;
     let offset = store.read(|r| Ok(r.utc_offset_min))?;
     store.write(meta, |w| {
         let original = sale_detail(w.tx(), &input.original)?;
@@ -838,7 +875,7 @@ pub fn edit_sale(store: &mut Store, meta: OpMeta, input: EditInput) -> Result<Ed
             }
             (back, sale)
         };
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         w.tx().execute(
             "INSERT INTO sale_edits (id, org_id, original_id, return_id, sale_id, reason, operation_id, created_at, created_by)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",

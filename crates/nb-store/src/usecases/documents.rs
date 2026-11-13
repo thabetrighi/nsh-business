@@ -328,6 +328,13 @@ fn check(input: &DocumentInput) -> Result<()> {
 
 /// Creates a draft quote or order, or changes a draft.
 pub fn save_document(store: &mut Store, meta: OpMeta, input: DocumentInput) -> Result<Document> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DocumentsSaveDocument {
+            input: input.clone(),
+        },
+    )?;
     let kind = kind_of(&input.kind)?;
     check(&input)?;
     let id = store.write(meta, |w| {
@@ -377,7 +384,7 @@ pub fn save_document(store: &mut Store, meta: OpMeta, input: DocumentInput) -> R
                 id.to_owned()
             }
             None => {
-                let id = nb_core::uuid::Uuid::now_v7().to_string();
+                let id = nb_core::id::idgen::uuid().to_string();
                 let number = w.next_number(kind, &branch.id, &branch.code)?;
                 // The row first (its lines refer to it), its figures next.
                 w.tx().execute(
@@ -459,6 +466,11 @@ fn transition(
 }
 
 pub fn approve_document(store: &mut Store, meta: OpMeta, id: &str) -> Result<Document> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DocumentsApproveDocument { id: id.to_owned() },
+    )?;
     transition(store, meta, id, &["draft"], "approved", "")
 }
 
@@ -469,6 +481,14 @@ pub fn cancel_document(
     id: &str,
     reason: &str,
 ) -> Result<Document> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DocumentsCancelDocument {
+            id: id.to_owned(),
+            reason: reason.to_owned(),
+        },
+    )?;
     if reason.trim().is_empty() {
         return Err(RuleError::on("reason", "required").into());
     }
@@ -478,6 +498,13 @@ pub fn cancel_document(
 /// An approved quote becomes an order (a draft, to adjust if needed); the
 /// quote is then converted and stays as it was.
 pub fn convert_to_order(store: &mut Store, meta: OpMeta, quote_id: &str) -> Result<Document> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DocumentsConvertToOrder {
+            quote_id: quote_id.to_owned(),
+        },
+    )?;
     let id = store.write(meta, |w| {
         let quote = load(w.tx(), quote_id)?;
         if quote.row.kind != "quote" || quote.row.status != "approved" {
@@ -485,7 +512,7 @@ pub fn convert_to_order(store: &mut Store, meta: OpMeta, quote_id: &str) -> Resu
         }
         let (branch, at) = target_of(w, &quote.warehouse_id)?;
         w.require(Permission::SalesSell, &at)?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         let number = w.next_number(DocKind::Order, &branch.id, &branch.code)?;
         w.tx().execute(
             "INSERT INTO sales_documents (id, org_id, branch_id, warehouse_id, kind, number, status, customer_id,

@@ -146,6 +146,13 @@ fn name_of(input: &TemplateInput) -> std::result::Result<String, Vec<RuleError>>
 
 /// Keeps a template (checked first). Returns its id.
 pub fn save_template(store: &mut Store, meta: OpMeta, input: TemplateInput) -> Result<String> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::TemplatesSaveTemplate {
+            input: input.clone(),
+        },
+    )?;
     let name = name_of(&input)?;
     store.write(meta, |w| {
         let org = w.org()?.to_string();
@@ -177,7 +184,7 @@ pub fn save_template(store: &mut Store, meta: OpMeta, input: TemplateInput) -> R
                 id.to_owned()
             }
             None => {
-                let id = nb_core::uuid::Uuid::now_v7().to_string();
+                let id = nb_core::id::idgen::uuid().to_string();
                 w.tx().execute(
                     "INSERT INTO document_templates (id, org_id, kind, name, body, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
@@ -196,6 +203,11 @@ pub fn save_template(store: &mut Store, meta: OpMeta, input: TemplateInput) -> R
 /// Removes one of the shop's templates; if documents printed with it,
 /// they go back to the built-in layout.
 pub fn delete_template(store: &mut Store, meta: OpMeta, id: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::TemplatesDeleteTemplate { id: id.to_owned() },
+    )?;
     store.write(meta, |w| {
         let org = w.org()?.to_string();
         w.require(Permission::SettingsEdit, &Target::org())?;
@@ -220,6 +232,14 @@ pub fn delete_template(store: &mut Store, meta: OpMeta, id: &str) -> Result<()> 
 /// Which template a kind of document prints with (`builtin:<code>` or one
 /// of the shop's).
 pub fn choose_template(store: &mut Store, meta: OpMeta, kind: DocKind, id: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::TemplatesChooseTemplate {
+            kind: kind.clone(),
+            id: id.to_owned(),
+        },
+    )?;
     store.write(meta, |w| {
         let org = w.org()?.to_string();
         w.require(Permission::SettingsEdit, &Target::org())?;

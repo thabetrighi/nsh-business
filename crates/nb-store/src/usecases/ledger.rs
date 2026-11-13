@@ -43,6 +43,14 @@ pub fn post_entry(
     memo: &str,
     lines: Vec<EntryLineInput>,
 ) -> Result<PostedEntry> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::LedgerPostEntry {
+            memo: memo.to_owned(),
+            lines: lines.clone(),
+        },
+    )?;
     if memo.trim().is_empty() {
         return Err(RuleError::on("memo", "required").into());
     }
@@ -92,6 +100,14 @@ pub fn reverse_entry(
     id: &str,
     reason: &str,
 ) -> Result<PostedEntry> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::LedgerReverseEntry {
+            id: id.to_owned(),
+            reason: reason.to_owned(),
+        },
+    )?;
     if reason.trim().is_empty() {
         return Err(RuleError::on("reason", "required").into());
     }

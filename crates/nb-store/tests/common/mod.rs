@@ -16,6 +16,7 @@ pub fn options(prefix: &str) -> StoreOptions {
         device_prefix: prefix.into(),
         device_name: "test".into(),
         utc_offset_min: 60,
+        device_id: None,
     }
 }
 

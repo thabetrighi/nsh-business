@@ -275,6 +275,13 @@ fn write_lines(w: &mut Writer<'_>, id: &str, input: &OrderInput) -> Result<(i64,
 
 /// Creates a draft order, or changes a draft.
 pub fn save_order(store: &mut Store, meta: OpMeta, input: OrderInput) -> Result<Order> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::PurchaseOrdersSaveOrder {
+            input: input.clone(),
+        },
+    )?;
     if input.lines.is_empty() {
         return Err(RuleError::on("lines", "sale.empty").into());
     }
@@ -323,7 +330,7 @@ pub fn save_order(store: &mut Store, meta: OpMeta, input: OrderInput) -> Result<
                 id.to_owned()
             }
             None => {
-                let id = nb_core::uuid::Uuid::now_v7().to_string();
+                let id = nb_core::id::idgen::uuid().to_string();
                 let number = w.next_number(DocKind::PurchaseOrder, &branch.id, &branch.code)?;
                 w.tx().execute(
                     "INSERT INTO purchase_orders (id, org_id, branch_id, warehouse_id, supplier_id, number, status,
@@ -417,11 +424,27 @@ pub fn approve_order(
     id: &str,
     approval: Option<&str>,
 ) -> Result<Order> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::PurchaseOrdersApproveOrder {
+            id: id.to_owned(),
+            approval: approval.map(str::to_owned),
+        },
+    )?;
     transition(store, meta, id, OrderStatus::Approved, "", approval)
 }
 
 /// Cancels an order nothing was received against (why, for the record).
 pub fn cancel_order(store: &mut Store, meta: OpMeta, id: &str, reason: &str) -> Result<Order> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::PurchaseOrdersCancelOrder {
+            id: id.to_owned(),
+            reason: reason.to_owned(),
+        },
+    )?;
     if reason.trim().is_empty() {
         return Err(RuleError::on("reason", "required").into());
     }
@@ -430,6 +453,14 @@ pub fn cancel_order(store: &mut Store, meta: OpMeta, id: &str, reason: &str) -> 
 
 /// Closes a partly received order: the rest will not come.
 pub fn close_order(store: &mut Store, meta: OpMeta, id: &str, reason: &str) -> Result<Order> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::PurchaseOrdersCloseOrder {
+            id: id.to_owned(),
+            reason: reason.to_owned(),
+        },
+    )?;
     if reason.trim().is_empty() {
         return Err(RuleError::on("reason", "required").into());
     }

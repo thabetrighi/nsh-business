@@ -12,6 +12,7 @@ pub mod backup;
 pub mod demo;
 pub mod error;
 pub mod migrate;
+pub mod ops;
 pub mod repo;
 pub mod secret;
 pub mod store;

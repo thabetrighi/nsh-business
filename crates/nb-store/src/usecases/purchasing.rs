@@ -208,17 +208,8 @@ pub(crate) fn save_supplier_in(w: &mut Writer<'_>, input: &SupplierInput) -> Res
             id.to_owned()
         }
         None => {
-            w.tx().execute(
-                "INSERT INTO supplier_counters (org_id, last) VALUES (?1, 1)
-                 ON CONFLICT (org_id) DO UPDATE SET last = last + 1",
-                [&org],
-            )?;
-            let n: i64 = w.tx().query_row(
-                "SELECT last FROM supplier_counters WHERE org_id = ?1",
-                [&org],
-                |r| r.get(0),
-            )?;
-            let id = nb_core::uuid::Uuid::now_v7().to_string();
+            let code = w.next_code("supplier", "F")?;
+            let id = nb_core::id::idgen::uuid().to_string();
             w.tx().execute(
                 "INSERT INTO suppliers (id, org_id, code, kind, name, phone, email, address, city, nif, nis, rc, ai,
                         payment_days, status, note, created_at, created_by, updated_at, device_id)
@@ -226,7 +217,7 @@ pub(crate) fn save_supplier_in(w: &mut Writer<'_>, input: &SupplierInput) -> Res
                 params![
                     id,
                     org,
-                    format!("F-{n:05}"),
+                    code,
                     input.kind,
                     t(&input.name),
                     t(&input.phone),
@@ -255,6 +246,13 @@ pub(crate) fn save_supplier_in(w: &mut Writer<'_>, input: &SupplierInput) -> Res
 }
 
 pub fn save_supplier(store: &mut Store, meta: OpMeta, input: SupplierInput) -> Result<SupplierRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::PurchasingSaveSupplier {
+            input: input.clone(),
+        },
+    )?;
     check_supplier(&input)?;
     let id = store.write(meta, |w| save_supplier_in(w, &input))?;
     get_supplier(store, &id)
@@ -438,6 +436,13 @@ pub fn record_purchase(
     meta: OpMeta,
     input: PurchaseInput,
 ) -> Result<PurchaseResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::PurchasingRecordPurchase {
+            input: input.clone(),
+        },
+    )?;
     if input.lines.is_empty() {
         return Err(RuleError::on("lines", "sale.empty").into());
     }
@@ -537,7 +542,7 @@ pub fn record_purchase(
             }
         };
         let number = w.next_number(DocKind::Purchase, &branch.id, &branch.code)?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         let mut landed = Vec::with_capacity(products.len());
         let mut moves = Vec::with_capacity(products.len());
         for (i, (p, _, _, base_qty, _)) in products.iter().enumerate() {
@@ -847,6 +852,13 @@ pub fn return_purchase(
     meta: OpMeta,
     input: PurchaseReturnInput,
 ) -> Result<PurchaseReturnResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::PurchasingReturnPurchase {
+            input: input.clone(),
+        },
+    )?;
     if input.reason.trim().is_empty() {
         return Err(RuleError::on("reason", "required").into());
     }
@@ -881,7 +893,7 @@ pub fn return_purchase(
             return Err(RuleError::on("register", "shift.none_open").into());
         }
         let number = w.next_number(DocKind::PurchaseReturn, &branch.id, &branch.code)?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         let may_go_negative = w.allowed(Permission::StockNegative, &at)?;
         let (mut net, mut tax, mut value) = (0i64, 0i64, 0i64);
         let mut rows = Vec::new();
@@ -1050,6 +1062,13 @@ pub fn pay_supplier(
     meta: OpMeta,
     input: SupplierPaymentInput,
 ) -> Result<SupplierPaymentResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::PurchasingPaySupplier {
+            input: input.clone(),
+        },
+    )?;
     if input.amount_minor <= 0 {
         return Err(RuleError::on("amount", "receipt.amount_positive").into());
     }
@@ -1111,7 +1130,7 @@ pub fn pay_supplier(
             }
         }
         let number = w.next_number(DocKind::Payment, &branch.id, &branch.code)?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         let (register, shift) = match (&till_of, from_bank) {
             (Some((s, _)), false) => (input.register_id.clone(), Some(s.clone())),
             _ => (None, None),
@@ -1274,6 +1293,15 @@ pub fn supplier_opening(
     owed_minor: i64,
     reason: &str,
 ) -> Result<i64> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::PurchasingSupplierOpening {
+            supplier: supplier.to_owned(),
+            owed_minor: owed_minor.clone(),
+            reason: reason.to_owned(),
+        },
+    )?;
     if owed_minor <= 0 {
         return Err(RuleError::on("amount", "receipt.amount_positive").into());
     }

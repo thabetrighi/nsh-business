@@ -33,7 +33,7 @@ pub const SILENT_MS: i64 = 15 * 60_000;
 pub const STOP_MIN: u32 = 5;
 
 fn new_id() -> String {
-    nb_core::uuid::Uuid::now_v7().to_string()
+    nb_core::id::idgen::uuid().to_string()
 }
 
 fn rule(field: &'static str, code: &'static str) -> Error {
@@ -97,6 +97,13 @@ pub fn list_zones(store: &Store) -> Result<Vec<Zone>> {
 
 /// Creates a zone or renames one.
 pub fn save_zone(store: &mut Store, meta: OpMeta, input: ZoneInput) -> Result<Zone> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionSaveZone {
+            input: input.clone(),
+        },
+    )?;
     let name = input.name.trim().to_owned();
     if name.is_empty() {
         return Err(rule("name", "required"));
@@ -159,6 +166,11 @@ pub fn save_zone(store: &mut Store, meta: OpMeta, input: ZoneInput) -> Result<Zo
 
 /// Removes a zone; its customers keep their place and lose the zone.
 pub fn archive_zone(store: &mut Store, meta: OpMeta, id: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionArchiveZone { id: id.to_owned() },
+    )?;
     store.write(meta, |w| {
         w.require(Permission::DistributionPlan, &Target::org())?;
         let n = w.tx().execute(
@@ -204,6 +216,14 @@ pub fn set_customer_place(
     customer: &str,
     place: CustomerPlace,
 ) -> Result<RouteCustomer> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionSetCustomerPlace {
+            customer: customer.to_owned(),
+            place: place.clone(),
+        },
+    )?;
     let point = match place.position.trim() {
         "" => None,
         t => Some(geo::parse_point(t)?),
@@ -563,6 +583,13 @@ fn check_user(w: &Writer<'_>, user: &str) -> Result<()> {
 /// Adds a vehicle (with a warehouse of its own for what it carries) or
 /// changes one (`distribution.fleet`).
 pub fn save_vehicle(store: &mut Store, meta: OpMeta, input: VehicleInput) -> Result<VehicleRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionSaveVehicle {
+            input: input.clone(),
+        },
+    )?;
     let mut errors = Vec::new();
     if input.name.trim().is_empty() {
         errors.push(RuleError::on("name", "required"));
@@ -637,7 +664,7 @@ pub fn save_vehicle(store: &mut Store, meta: OpMeta, input: VehicleInput) -> Res
                 };
                 let b = org::branch(w.tx(), branch.parse().map_err(|_| rule("branch", "invalid_value"))?)?;
                 let wh = Warehouse {
-                    id: nb_core::uuid::Uuid::now_v7().to_string(),
+                    id: nb_core::id::idgen::uuid().to_string(),
                     branch_id: b.id.clone(),
                     name: name.clone(),
                     negative_stock: "forbid".into(),
@@ -678,6 +705,11 @@ pub fn save_vehicle(store: &mut Store, meta: OpMeta, input: VehicleInput) -> Res
 
 /// Retires a vehicle: it must carry nothing and have no tour left to do.
 pub fn archive_vehicle(store: &mut Store, meta: OpMeta, id: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionArchiveVehicle { id: id.to_owned() },
+    )?;
     store.write(meta, |w| {
         w.require(Permission::DistributionFleet, &Target::org())?;
         let v = vehicle(w.tx(), id)?;
@@ -716,6 +748,15 @@ pub fn record_position(
     position: &str,
     speed_kmh: Option<i64>,
 ) -> Result<Point> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionRecordPosition {
+            vehicle_id: vehicle_id.to_owned(),
+            position: position.to_owned(),
+            speed_kmh: speed_kmh.clone(),
+        },
+    )?;
     let p = geo::parse_point(position)?;
     store.write(meta, |w| {
         w.require(Permission::DistributionDrive, &Target::org())?;
@@ -1212,6 +1253,13 @@ fn optimize_in(w: &mut Writer<'_>, tour_id: &str) -> Result<()> {
 
 /// Plans a tour (`distribution.plan`): a vehicle, a day and its stops.
 pub fn create_tour(store: &mut Store, meta: OpMeta, input: TourInput) -> Result<TourDetail> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionCreateTour {
+            input: input.clone(),
+        },
+    )?;
     if !TOUR_KINDS.contains(&input.kind.as_str()) {
         return Err(rule("kind", "invalid_value"));
     }
@@ -1300,6 +1348,15 @@ pub fn add_stops(
     customers: Vec<String>,
     orders: Vec<String>,
 ) -> Result<TourDetail> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionAddStops {
+            tour_id: tour_id.to_owned(),
+            customers: customers.clone(),
+            orders: orders.clone(),
+        },
+    )?;
     store.write(meta, |w| {
         w.require(Permission::DistributionPlan, &Target::org())?;
         live_tour(w, tour_id)?;
@@ -1328,6 +1385,13 @@ fn stop_tour(w: &Writer<'_>, stop: &str) -> Result<(String, String)> {
 
 /// Takes a stop not yet reached off its tour.
 pub fn remove_stop(store: &mut Store, meta: OpMeta, stop: &str) -> Result<TourDetail> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionRemoveStop {
+            stop: stop.to_owned(),
+        },
+    )?;
     let tour_id = store.write(meta, |w| {
         w.require(Permission::DistributionPlan, &Target::org())?;
         let (tour_id, status) = stop_tour(w, stop)?;
@@ -1346,6 +1410,14 @@ pub fn remove_stop(store: &mut Store, meta: OpMeta, stop: &str) -> Result<TourDe
 
 /// Moves a stop to `index` (0-based) among the tour's stops.
 pub fn move_stop(store: &mut Store, meta: OpMeta, stop: &str, index: usize) -> Result<TourDetail> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionMoveStop {
+            stop: stop.to_owned(),
+            index: index.clone(),
+        },
+    )?;
     let tour_id = store.write(meta, |w| {
         let (tour_id, _) = stop_tour(w, stop)?;
         let t = live_tour(w, &tour_id)?;
@@ -1377,6 +1449,13 @@ pub fn move_stop(store: &mut Store, meta: OpMeta, stop: &str, index: usize) -> R
 
 /// Reorders the stops still to do for the shortest drive (nearest next).
 pub fn optimize_tour(store: &mut Store, meta: OpMeta, tour_id: &str) -> Result<TourDetail> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionOptimizeTour {
+            tour_id: tour_id.to_owned(),
+        },
+    )?;
     store.write(meta, |w| {
         let t = live_tour(w, tour_id)?;
         if !w.allowed(Permission::DistributionPlan, &Target::org())? {
@@ -1392,6 +1471,14 @@ pub fn optimize_tour(store: &mut Store, meta: OpMeta, tour_id: &str) -> Result<T
 
 /// Cancels a tour not yet started; its orders wait for another.
 pub fn cancel_tour(store: &mut Store, meta: OpMeta, tour_id: &str, reason: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionCancelTour {
+            tour_id: tour_id.to_owned(),
+            reason: reason.to_owned(),
+        },
+    )?;
     store.write(meta, |w| {
         w.require(Permission::DistributionPlan, &Target::org())?;
         let t = tour(w.tx(), tour_id)?;
@@ -1416,6 +1503,14 @@ pub fn start_tour(
     tour_id: &str,
     km_start: Option<i64>,
 ) -> Result<TourDetail> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionStartTour {
+            tour_id: tour_id.to_owned(),
+            km_start: km_start.clone(),
+        },
+    )?;
     if km_start.is_some_and(|k| k < 0) {
         return Err(rule("km", "invalid_value"));
     }
@@ -1458,6 +1553,13 @@ fn driving_stop(w: &mut Writer<'_>, stop: &str) -> Result<(TourRow, String)> {
 
 /// The vehicle is at the customer.
 pub fn arrive_stop(store: &mut Store, meta: OpMeta, stop: &str) -> Result<TourDetail> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionArriveStop {
+            stop: stop.to_owned(),
+        },
+    )?;
     let tour_id = store.write(meta, |w| {
         let (t, status) = driving_stop(w, stop)?;
         if status != "pending" {
@@ -1502,6 +1604,14 @@ pub fn complete_stop(
     stop: &str,
     done: StopDone,
 ) -> Result<TourDetail> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionCompleteStop {
+            stop: stop.to_owned(),
+            done: done.clone(),
+        },
+    )?;
     if done.collected_minor < 0 {
         return Err(rule("collected", "ledger.negative"));
     }
@@ -1567,6 +1677,15 @@ pub fn fail_stop(
     reason: &str,
     skip: bool,
 ) -> Result<TourDetail> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionFailStop {
+            stop: stop.to_owned(),
+            reason: reason.to_owned(),
+            skip: skip.clone(),
+        },
+    )?;
     if !skip && reason.trim().is_empty() {
         return Err(rule("reason", "required"));
     }
@@ -1600,6 +1719,13 @@ pub fn fail_stop(
 
 /// Notes that the customer was told the vehicle is coming.
 pub fn mark_notified(store: &mut Store, meta: OpMeta, stop: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionMarkNotified {
+            stop: stop.to_owned(),
+        },
+    )?;
     store.write(meta, |w| {
         let (tour_id, _) = stop_tour(w, stop)?;
         let t = tour(w.tx(), &tour_id)?;
@@ -1623,6 +1749,14 @@ pub fn end_tour(
     tour_id: &str,
     km_end: Option<i64>,
 ) -> Result<TourDetail> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionEndTour {
+            tour_id: tour_id.to_owned(),
+            km_end: km_end.clone(),
+        },
+    )?;
     store.write(meta, |w| {
         let t = tour(w.tx(), tour_id)?;
         require_driver(w, &t)?;
@@ -1665,6 +1799,15 @@ pub fn settle_tour(
     counted_minor: i64,
     note: &str,
 ) -> Result<TourDetail> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DistributionSettleTour {
+            tour_id: tour_id.to_owned(),
+            counted_minor: counted_minor.clone(),
+            note: note.to_owned(),
+        },
+    )?;
     if counted_minor < 0 {
         return Err(rule("counted", "ledger.negative"));
     }

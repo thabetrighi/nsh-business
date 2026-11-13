@@ -237,6 +237,14 @@ pub fn open_shift(
     register_id: &str,
     opening_minor: i64,
 ) -> Result<ShiftRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::SalesOpenShift {
+            register_id: register_id.to_owned(),
+            opening_minor: opening_minor.clone(),
+        },
+    )?;
     let register: RegisterId = parse_id(register_id)?;
     money_field("opening", opening_minor)?;
     let id = store.write(meta, |w| {
@@ -258,7 +266,7 @@ pub fn open_shift(
             [register_id],
             |r| r.get(0),
         )?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         let number = format!("{}-{}-{:04}", branch.code, code, n + 1);
         w.tx().execute(
             "INSERT INTO shifts (id, org_id, branch_id, register_id, account_code, number, opening_minor, opened_at, opened_by, device_id)
@@ -283,6 +291,16 @@ pub fn cash_movement(
     amount_minor: i64,
     reason: &str,
 ) -> Result<ShiftRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::SalesCashMovement {
+            shift_id: shift_id.to_owned(),
+            into_till: into_till.clone(),
+            amount_minor: amount_minor.clone(),
+            reason: reason.to_owned(),
+        },
+    )?;
     if amount_minor <= 0 {
         return Err(RuleError::on("amount", "sale.amount_positive").into());
     }
@@ -305,7 +323,7 @@ pub fn cash_movement(
             return Err(RuleError::on("amount", "shift.not_enough_cash").into());
         }
         let (_, currency) = the_org(w.tx())?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         w.tx().execute(
             "INSERT INTO cash_movements (id, org_id, shift_id, direction, amount_minor, reason, created_at, created_by, device_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -340,6 +358,15 @@ pub fn close_shift(
     counted_minor: i64,
     note: &str,
 ) -> Result<ShiftRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::SalesCloseShift {
+            shift_id: shift_id.to_owned(),
+            counted_minor: counted_minor.clone(),
+            note: note.to_owned(),
+        },
+    )?;
     money_field("counted", counted_minor)?;
     let offset = store.read(|r| Ok(r.utc_offset_min))?;
     store.write(meta, |w| {
@@ -603,6 +630,13 @@ pub(crate) fn discount(bps: Option<i64>, minor: Option<i64>, c: nb_core::Currenc
 /// entry (sale and its cost), the event and the audit. The same operation
 /// sent again returns the same sale.
 pub fn complete_sale(store: &mut Store, meta: OpMeta, input: SaleInput) -> Result<SaleResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::SalesCompleteSale {
+            input: input.clone(),
+        },
+    )?;
     let offset = store.read(|r| Ok(r.utc_offset_min))?;
     store.write(meta, |w| sale_in(w, &input, offset, 0))
 }
@@ -707,7 +741,7 @@ pub(crate) fn sale_in(
         }
 
         let number = w.next_number(DocKind::Invoice, &branch.id, &branch.code)?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
 
         // Stock leaves at its average cost.
         let may_go_negative = w.allowed(Permission::StockNegative, &at_store)?;
@@ -805,7 +839,7 @@ pub(crate) fn sale_in(
             w.tx().execute(
                 "INSERT INTO payments (id, org_id, sale_id, shift_id, method, amount_minor, account_code, created_at, device_id)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![nb_core::uuid::Uuid::now_v7().to_string(), w.org()?.to_string(), id, shift, method, amount.minor(), account, w.now(), w.device().id.to_string()],
+                params![nb_core::id::idgen::uuid().to_string(), w.org()?.to_string(), id, shift, method, amount.minor(), account, w.now(), w.device().id.to_string()],
             )?;
         }
         crate::usecases::accounting::post_operations_for(

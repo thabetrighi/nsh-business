@@ -131,6 +131,7 @@ impl<'a> Writer<'a> {
     ) -> Result<()> {
         append_audit(
             &self.tx,
+            &self.device.id.to_string(),
             &self.meta,
             self.now,
             action,
@@ -186,6 +187,31 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// The next value of counter `name` in `scope`, for this device: two
+    /// devices offline never get the same one (ADR-0006).
+    pub fn next_counter(&mut self, name: &str, scope: &str) -> Result<i64> {
+        Ok(self.tx.query_row(
+            "INSERT INTO counters (name, scope, device_prefix, last) VALUES (?1, ?2, ?3, 1)
+             ON CONFLICT (name, scope, device_prefix) DO UPDATE SET last = last + 1
+             RETURNING last",
+            params![name, scope, self.device.prefix],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// A short code (`C-00012`) from counter `name`: the first device ("A")
+    /// keeps the plain form, another puts its prefix in (`C-B0012`), so
+    /// codes from different devices never meet.
+    pub fn next_code(&mut self, name: &str, letter: &str) -> Result<String> {
+        let org = self.org()?.to_string();
+        let n = self.next_counter(name, &org)?;
+        Ok(if self.device.prefix == "A" {
+            format!("{letter}-{n:05}")
+        } else {
+            format!("{letter}-{}{n:04}", self.device.prefix)
+        })
+    }
+
     /// The next document number for this device (M2.8).
     pub fn next_number(
         &mut self,
@@ -194,12 +220,9 @@ impl<'a> Writer<'a> {
         branch_code: &str,
     ) -> Result<String> {
         let (year, _, _) = self.date();
-        let last: i64 = self.tx.query_row(
-            "INSERT INTO doc_counters (kind, branch_id, year, last) VALUES (?1, ?2, ?3, 1)
-             ON CONFLICT (kind, branch_id, year) DO UPDATE SET last = last + 1
-             RETURNING last",
-            params![kind.code(), branch_id, year],
-            |r| r.get(0),
+        let last = self.next_counter(
+            &format!("doc:{}", kind.code()),
+            &format!("{branch_id}:{year}"),
         )?;
         Ok(numbering::format(
             kind,
@@ -213,8 +236,11 @@ impl<'a> Writer<'a> {
 
 const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
+// The record's parts, as written; a struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 fn append_audit(
     tx: &rusqlite::Connection,
+    device: &str,
     meta: &OpMeta,
     now: i64,
     action: &str,
@@ -224,8 +250,8 @@ fn append_audit(
 ) -> Result<()> {
     let prev: String = tx
         .query_row(
-            "SELECT hash FROM audit_log ORDER BY seq DESC LIMIT 1",
-            [],
+            "SELECT hash FROM audit_log WHERE device_id = ?1 ORDER BY seq DESC LIMIT 1",
+            [device],
             |r| r.get(0),
         )
         .optional()?
@@ -242,8 +268,9 @@ fn append_audit(
     };
     let hash = rec.hash(&prev);
     tx.execute(
-        "INSERT INTO audit_log (operation_id, org_id, actor_id, action, entity, entity_id, detail, created_at, prev_hash, hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO audit_log (operation_id, org_id, actor_id, action, entity, entity_id, detail, created_at, prev_hash, hash,
+                device_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             rec.operation_id,
             rec.org_id,
@@ -254,7 +281,8 @@ fn append_audit(
             rec.detail,
             rec.created_at,
             prev,
-            hash
+            hash,
+            device
         ],
     )?;
     Ok(())
@@ -320,14 +348,23 @@ impl Store {
         let clock = self.clock.clone();
         let tx = self.conn.transaction()?;
         // The operation row first, so events can reference it.
+        // The call that makes it (recorded by the use case), for replicas.
+        let call = self
+            .calls
+            .iter()
+            .position(|(id, _)| *id == meta.id)
+            .map(|k| self.calls.remove(k).1);
         tx.execute(
-            "INSERT INTO operations (id, kind, org_id, actor_id, result, created_at) VALUES (?1, ?2, ?3, ?4, '', ?5)",
+            "INSERT INTO operations (id, kind, org_id, actor_id, result, created_at, call, device_id)
+             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7)",
             params![
                 meta.id.to_string(),
                 meta.kind,
                 meta.org.map(|o| o.to_string()),
                 meta.actor.map(|a| a.to_string()),
-                now
+                now,
+                call,
+                device.id.to_string()
             ],
         )?;
         let mut w = Writer {
@@ -340,7 +377,9 @@ impl Store {
             utc_offset_min,
             events: 0,
         };
-        let out = match f(&mut w) {
+        // Every id the operation makes derives from its id and time, so
+        // running it again elsewhere makes the same rows (ADR-0006).
+        let out = match nb_core::id::idgen::deterministic(meta.id.uuid(), now, || f(&mut w)) {
             Ok(out) => out,
             Err(e) => {
                 drop(w); // rolls back
@@ -350,6 +389,7 @@ impl Store {
                     let tx = self.conn.transaction()?;
                     append_audit(
                         &tx,
+                        &self.device.id.to_string(),
                         &meta,
                         now,
                         "denied",
@@ -381,16 +421,24 @@ impl Store {
         })
     }
 
-    /// Checks the audit chain; returns the first broken record's sequence.
+    /// Checks the audit chains (one per device that wrote records here);
+    /// returns the first broken record's sequence.
     pub fn verify_audit_chain(&self) -> Result<Option<i64>> {
         let mut stmt = self.conn.prepare(
-            "SELECT seq, operation_id, org_id, actor_id, action, entity, entity_id, detail, created_at, prev_hash, hash
-             FROM audit_log ORDER BY seq",
+            "SELECT seq, operation_id, org_id, actor_id, action, entity, entity_id, detail, created_at, prev_hash, hash,
+                    device_id
+             FROM audit_log ORDER BY device_id, seq",
         )?;
         let mut rows = stmt.query([])?;
         let mut prev = GENESIS.to_owned();
+        let mut chain: Option<String> = None;
         while let Some(r) = rows.next()? {
             let seq: i64 = r.get(0)?;
+            let device: String = r.get(11)?;
+            if chain.as_deref() != Some(device.as_str()) {
+                chain = Some(device);
+                prev = GENESIS.to_owned();
+            }
             let rec = AuditRecord {
                 operation_id: r.get(1)?,
                 org_id: r.get(2)?,

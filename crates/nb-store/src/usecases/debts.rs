@@ -143,6 +143,13 @@ pub struct ReceiptResult {
 /// invoices, the entry (cash or bank against the receivable) — at once and
 /// once per operation.
 pub fn collect(store: &mut Store, meta: OpMeta, input: ReceiptInput) -> Result<ReceiptResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DebtsCollect {
+            input: input.clone(),
+        },
+    )?;
     let (_, currency) = store.read(|r| the_org(r.conn()))?;
     let offset = store.read(|r| Ok(r.utc_offset_min))?;
     store.write(meta, |w| collect_in(w, &input, currency, offset))
@@ -238,7 +245,7 @@ pub(crate) fn collect_in(
         }
 
         let number = w.next_number(DocKind::Receipt, &branch.id, &branch.code)?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         w.tx().execute(
             "INSERT INTO receipts (id, org_id, branch_id, customer_id, number, method, register_id, shift_id,
                     amount_minor, unallocated_minor, reference, note, operation_id, created_at, created_by, device_id)
@@ -354,7 +361,7 @@ pub(crate) fn adjust_in(
         .into_iter()
         .next()
         .ok_or(Error::NotFound("branch"))?;
-    let id = nb_core::uuid::Uuid::now_v7().to_string();
+    let id = nb_core::id::idgen::uuid().to_string();
     let m = |v: i64| Money::from_minor(v, currency);
     let op = match input.kind.as_str() {
         "write_off" => Operation::WriteOff {
@@ -432,6 +439,13 @@ pub(crate) fn adjust_in(
 }
 
 pub fn adjust_debt(store: &mut Store, meta: OpMeta, input: AdjustInput) -> Result<AdjustResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::DebtsAdjustDebt {
+            input: input.clone(),
+        },
+    )?;
     if input.reason.trim().is_empty() {
         return Err(RuleError::on("reason", "required").into());
     }

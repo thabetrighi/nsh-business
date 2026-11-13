@@ -18,6 +18,9 @@ pub struct StoreOptions {
     pub device_name: String,
     /// The store's offset from UTC, in minutes (Algeria: 60): business dates.
     pub utc_offset_min: i32,
+    /// This device's id when the database is new (default: a new one). A
+    /// replica of a device's data (the server's, a test's) takes its id.
+    pub device_id: Option<DeviceId>,
 }
 
 impl Default for StoreOptions {
@@ -27,6 +30,7 @@ impl Default for StoreOptions {
             device_prefix: "A".into(),
             device_name: "device".into(),
             utc_offset_min: 60,
+            device_id: None,
         }
     }
 }
@@ -79,6 +83,10 @@ pub struct Store {
     pub(crate) device: Device,
     pub(crate) utc_offset_min: i32,
     path: Option<PathBuf>,
+    /// Calls recorded by use cases, waiting for their operation's write
+    /// (by operation id; a use case that fails before writing leaves one,
+    /// dropped when it gets old).
+    pub(crate) calls: Vec<(nb_core::OperationId, String)>,
 }
 
 impl Store {
@@ -124,7 +132,7 @@ impl Store {
             },
             None => {
                 let d = Device {
-                    id: DeviceId::new(),
+                    id: opts.device_id.unwrap_or_default(),
                     prefix: opts.device_prefix.clone(),
                 };
                 conn.execute(
@@ -152,7 +160,80 @@ impl Store {
             device,
             utc_offset_min: opts.utc_offset_min,
             path,
+            calls: Vec::new(),
         })
+    }
+
+    /// Records the call operation `meta` is about to write (kept with the
+    /// operation for replicas, ADR-0006).
+    pub fn record(&mut self, meta: crate::OpMeta, call: &crate::ops::Call) -> Result<()> {
+        let text = serde_json::to_string(call)?;
+        self.calls.retain(|(id, _)| *id != meta.id);
+        self.calls.push((meta.id, text));
+        if self.calls.len() > 16 {
+            self.calls.remove(0);
+        }
+        Ok(())
+    }
+
+    /// Runs the operations of `log` again here, in order: (operation id,
+    /// kind, organization, actor, time, call). Operations already here are
+    /// skipped (their stored result comes back).
+    pub fn replay_log(&mut self, log: Vec<crate::ops::LoggedOp>) -> Result<()> {
+        let real = self.clock.clone();
+        for op in log {
+            self.clock = std::sync::Arc::new(nb_core::FixedClock::new(op.at));
+            let meta = crate::OpMeta {
+                id: op.id,
+                kind: crate::ops::intern(&op.kind),
+                org: op.org,
+                actor: op.actor,
+            };
+            let run = nb_core::id::idgen::deterministic(op.id.uuid(), op.at, || {
+                crate::ops::replay(self, meta, op.call)
+            });
+            if let Err(e) = run {
+                self.clock = real;
+                return Err(e);
+            }
+        }
+        self.clock = real;
+        Ok(())
+    }
+
+    /// The operations recorded here with their calls, oldest first.
+    pub fn operation_log(&self) -> Result<Vec<crate::ops::LoggedOp>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, kind, org_id, actor_id, created_at, call FROM operations
+             WHERE call IS NOT NULL ORDER BY created_at, rowid",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, kind, org, actor, at, call) = row?;
+            let bad = |what: &str| Error::Corrupt(format!("operation {id}: {what}"));
+            out.push(crate::ops::LoggedOp {
+                id: id.parse().map_err(|_| bad("id"))?,
+                kind,
+                org: org.map(|o| o.parse()).transpose().map_err(|_| bad("org"))?,
+                actor: actor
+                    .map(|a| a.parse())
+                    .transpose()
+                    .map_err(|_| bad("actor"))?,
+                at,
+                call: serde_json::from_str(&call)?,
+            });
+        }
+        Ok(out)
     }
 
     pub fn device(&self) -> &Device {
@@ -165,6 +246,105 @@ impl Store {
 
     pub fn now_ms(&self) -> i64 {
         self.clock.now_ms()
+    }
+
+    /// The state of the business data as one hash (ADR-0006): two replicas
+    /// that went through the same operations have the same fingerprint.
+    /// Left out: what belongs to this device only (its identity, its
+    /// operation log, outbox, audit chain, parked carts, backups, password
+    /// hashes with their random salts) and the local insertion order
+    /// (`seq` columns).
+    pub fn fingerprint(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for (t, part) in self.fingerprints()? {
+            h.update(t.as_bytes());
+            h.update(part.as_bytes());
+        }
+        Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// [`Store::fingerprint`] table by table (to find where two replicas
+    /// differ).
+    pub fn fingerprints(&self) -> Result<Vec<(String, String)>> {
+        use sha2::{Digest, Sha256};
+        let mut out = Vec::new();
+        const LOCAL: [&str; 9] = [
+            "device",
+            "operations",
+            "outbox_events",
+            "audit_log",
+            "held_carts",
+            "backup_settings",
+            "backup_log",
+            "user_credentials",
+            "sqlite_sequence",
+        ];
+        let tables: Vec<String> = {
+            let mut st = self.conn.prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )?;
+            st.query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for t in tables.iter().filter(|t| !LOCAL.contains(&t.as_str())) {
+            let mut h = Sha256::new();
+            let cols: Vec<String> = {
+                let mut st = self.conn.prepare(&format!("PRAGMA table_info(\"{t}\")"))?;
+                st.query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .filter(|c| c != "seq" && !c.ends_with("_seq"))
+                    .collect()
+            };
+            if cols.is_empty() {
+                continue;
+            }
+            let list = cols
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut st = self.conn.prepare(&format!("SELECT {list} FROM \"{t}\""))?;
+            let n = cols.len();
+            let mut rows: Vec<String> = st
+                .query_map([], |r| {
+                    let mut line = String::new();
+                    for k in 0..n {
+                        use rusqlite::types::ValueRef;
+                        match r.get_ref(k)? {
+                            ValueRef::Null => line.push_str("N|"),
+                            ValueRef::Integer(i) => line.push_str(&format!("I{i}|")),
+                            ValueRef::Real(f) => line.push_str(&format!("R{f:?}|")),
+                            ValueRef::Text(b) => {
+                                line.push_str(&format!("T{}:", b.len()));
+                                line.push_str(&String::from_utf8_lossy(b));
+                                line.push('|');
+                            }
+                            ValueRef::Blob(b) => {
+                                line.push_str(&format!("B{}:", b.len()));
+                                for x in b {
+                                    line.push_str(&format!("{x:02x}"));
+                                }
+                                line.push('|');
+                            }
+                        }
+                    }
+                    Ok(line)
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            rows.sort_unstable();
+            h.update((rows.len() as u64).to_be_bytes());
+            for r in rows {
+                h.update((r.len() as u64).to_be_bytes());
+                h.update(r.as_bytes());
+            }
+            out.push((
+                t.clone(),
+                h.finalize().iter().map(|b| format!("{b:02x}")).collect(),
+            ));
+        }
+        Ok(out)
     }
 
     /// The raw connection, for tests and maintenance tools only.

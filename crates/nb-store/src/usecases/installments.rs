@@ -294,7 +294,7 @@ fn write_plan(
 ) -> Result<String> {
     let (f, first) = check(input)?;
     let dues = installment::schedule(Money::from_minor(financed, currency), input.count, f, first)?;
-    let id = nb_core::uuid::Uuid::now_v7().to_string();
+    let id = nb_core::id::idgen::uuid().to_string();
     w.tx().execute(
         "INSERT INTO installment_plans (id, org_id, customer_id, sale_id, number, version, previous_id, total_minor,
                 down_minor, financed_minor, count, frequency, first_due, reason, approval_id, created_at, created_by,
@@ -332,6 +332,13 @@ fn write_plan(
 
 /// Splits what an invoice on account still owes into instalments.
 pub fn create_plan(store: &mut Store, meta: OpMeta, input: PlanInput) -> Result<Plan> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::InstallmentsCreatePlan {
+            input: input.clone(),
+        },
+    )?;
     check(&input)?;
     let (_, currency) = store.read(|r| the_org(r.conn()))?;
     let now = store.clock.now_ms();
@@ -368,18 +375,7 @@ pub fn create_plan(store: &mut Store, meta: OpMeta, input: PlanInput) -> Result<
         if taken > 0 {
             return Err(RuleError::on("sale", "plan.already").into());
         }
-        let org = w.org()?.to_string();
-        w.tx().execute(
-            "INSERT INTO plan_counters (org_id, last) VALUES (?1, 1)
-             ON CONFLICT (org_id) DO UPDATE SET last = last + 1",
-            [&org],
-        )?;
-        let n: i64 = w.tx().query_row(
-            "SELECT last FROM plan_counters WHERE org_id = ?1",
-            [&org],
-            |r| r.get(0),
-        )?;
-        let number = format!("TQ-{n:05}");
+        let number = w.next_code("plan", "TQ")?;
         let id = write_plan(
             w,
             &customer,
@@ -421,6 +417,14 @@ pub fn reschedule(
     plan_id: &str,
     input: RescheduleInput,
 ) -> Result<Plan> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::InstallmentsReschedule {
+            plan_id: plan_id.to_owned(),
+            input: input.clone(),
+        },
+    )?;
     if input.reason.trim().is_empty() {
         return Err(RuleError::on("reason", "required").into());
     }
@@ -542,6 +546,16 @@ pub fn pay_installments(
     method: &str,
     register_id: Option<String>,
 ) -> Result<ReceiptResult> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::InstallmentsPayInstallments {
+            plan_id: plan_id.to_owned(),
+            amount_minor: amount_minor.clone(),
+            method: method.to_owned(),
+            register_id: register_id.clone(),
+        },
+    )?;
     let (_, currency) = store.read(|r| the_org(r.conn()))?;
     let offset = store.utc_offset_min;
     let plan = get_plan(store, plan_id)?;

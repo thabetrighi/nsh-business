@@ -59,6 +59,15 @@ pub fn create_category(
     name: &str,
     account_code: &str,
 ) -> Result<ExpenseCategory> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ExpensesCreateCategory {
+            kind: kind.to_owned(),
+            name: name.to_owned(),
+            account_code: account_code.to_owned(),
+        },
+    )?;
     let name = name.trim().to_owned();
     if name.is_empty() {
         return Err(RuleError::on("name", "required").into());
@@ -91,7 +100,7 @@ pub fn create_category(
         if taken > 0 {
             return Err(Error::Duplicate("name"));
         }
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         w.tx().execute(
             "INSERT INTO expense_categories (id, org_id, kind, name, account_code, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -151,6 +160,13 @@ pub struct ExpenseRow {
 /// Records an expense or an income: the document, its entry, its event and
 /// its audit, once per operation.
 pub fn record_expense(store: &mut Store, meta: OpMeta, input: ExpenseInput) -> Result<ExpenseRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::ExpensesRecordExpense {
+            input: input.clone(),
+        },
+    )?;
     if input.total_minor <= 0 {
         return Err(RuleError::on("amount", "receipt.amount_positive").into());
     }
@@ -265,7 +281,7 @@ pub fn record_expense(store: &mut Store, meta: OpMeta, input: ExpenseInput) -> R
             },
             &entry,
         )?;
-        let id = nb_core::uuid::Uuid::now_v7().to_string();
+        let id = nb_core::id::idgen::uuid().to_string();
         w.tx().execute(
             "INSERT INTO expenses (id, org_id, branch_id, category_id, kind, number, method, register_id, shift_id,
                     net_minor, vat_minor, total_minor, payee, reference, note, entry_number, operation_id,

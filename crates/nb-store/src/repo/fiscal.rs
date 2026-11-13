@@ -61,7 +61,7 @@ pub fn ensure_period(w: &Writer<'_>, org: OrganizationId, date: &str) -> Result<
         |r| r.get(0),
     )?;
     let year = year_of(Date::parse(date)?, start_month)?;
-    let year_id = nb_core::uuid::Uuid::now_v7().to_string();
+    let year_id = nb_core::id::idgen::uuid().to_string();
     w.tx().execute(
         "INSERT INTO fiscal_years (id, org_id, name, start_date, end_date, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![year_id, org.to_string(), year.name, year.start.iso(), year.end.iso(), w.now()],
@@ -70,7 +70,7 @@ pub fn ensure_period(w: &Writer<'_>, org: OrganizationId, date: &str) -> Result<
         w.tx().execute(
             "INSERT INTO fiscal_periods (id, org_id, year_id, number, start_date, end_date) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
-                nb_core::uuid::Uuid::now_v7().to_string(),
+                nb_core::id::idgen::uuid().to_string(),
                 org.to_string(),
                 year_id,
                 p.number,

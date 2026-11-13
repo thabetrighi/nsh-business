@@ -245,6 +245,13 @@ const KINDS: [&str; 5] = ["asset", "liability", "equity", "income", "expense"];
 /// Adds an account (or a group) to the chart, under a group whose code
 /// starts its own (SCF numbering).
 pub fn create_account(store: &mut Store, meta: OpMeta, input: AccountInput) -> Result<Account> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::AccountingCreateAccount {
+            input: input.clone(),
+        },
+    )?;
     let code = input.code.trim().to_owned();
     let mut errors = Vec::new();
     if code.is_empty() || code.len() > 10 || !code.bytes().all(|b| b.is_ascii_digit()) {
@@ -310,6 +317,15 @@ pub fn update_account(
     name: &str,
     active: bool,
 ) -> Result<Account> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::AccountingUpdateAccount {
+            code: code.to_owned(),
+            name: name.to_owned(),
+            active: active.clone(),
+        },
+    )?;
     if name.trim().is_empty() {
         return Err(RuleError::on("name", "required").into());
     }
@@ -396,6 +412,14 @@ pub fn account_roles(store: &Store) -> Result<Vec<RoleRow>> {
 /// Points a role of the entry matrix at another account (active, not a
 /// group). Entries already posted keep their accounts.
 pub fn set_account_role(store: &mut Store, meta: OpMeta, role: &str, code: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::AccountingSetAccountRole {
+            role: role.to_owned(),
+            code: code.to_owned(),
+        },
+    )?;
     let role = Role::from_code(role).ok_or(RuleError::on("role", "invalid_value"))?;
     store.write(meta, |w| {
         w.require(Permission::AccountingChart, &Target::org())?;
@@ -446,7 +470,7 @@ pub(crate) fn insert_money_account(
     name: &str,
     code: &str,
 ) -> Result<String> {
-    let id = nb_core::uuid::Uuid::now_v7().to_string();
+    let id = nb_core::id::idgen::uuid().to_string();
     w.tx().execute(
         "INSERT INTO money_accounts (id, org_id, branch_id, kind, name, account_code, created_at, updated_at, created_by, device_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9)",
@@ -489,6 +513,15 @@ pub fn create_money_account(
     name: &str,
     branch_id: Option<String>,
 ) -> Result<MoneyAccountRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::AccountingCreateMoneyAccount {
+            kind: kind.to_owned(),
+            name: name.to_owned(),
+            branch_id: branch_id.clone(),
+        },
+    )?;
     let group = match kind {
         "cash" => "53",
         "bank" => "512",
@@ -552,6 +585,13 @@ pub fn fiscal_years(store: &Store) -> Result<Vec<YearRow>> {
 /// Closes a period (after the ones before it): no entry is posted in it
 /// any more, from any device.
 pub fn close_period(store: &mut Store, meta: OpMeta, period: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::AccountingClosePeriod {
+            period: period.to_owned(),
+        },
+    )?;
     store.write(meta, |w| {
         w.require(Permission::AccountingClosePeriod, &Target::org())?;
         let (_, number, states) =
@@ -566,6 +606,14 @@ pub fn close_period(store: &mut Store, meta: OpMeta, period: &str) -> Result<()>
 
 /// Reopens the last closed period, with a reason kept in the audit trail.
 pub fn reopen_period(store: &mut Store, meta: OpMeta, period: &str, reason: &str) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::AccountingReopenPeriod {
+            period: period.to_owned(),
+            reason: reason.to_owned(),
+        },
+    )?;
     if reason.trim().is_empty() {
         return Err(RuleError::on("reason", "required").into());
     }

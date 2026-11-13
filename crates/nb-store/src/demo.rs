@@ -224,7 +224,7 @@ pub fn seed(store: &mut Store, setup: &SetupResult, lang: DemoLang, n: usize) ->
                         created_at, updated_at, device_id)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)",
                 rusqlite::params![
-                    nb_core::uuid::Uuid::now_v7().to_string(),
+                    nb_core::id::idgen::uuid().to_string(),
                     org_id.to_string(),
                     format!("C-{:05}", i + 1),
                     kind,
@@ -239,8 +239,12 @@ pub fn seed(store: &mut Store, setup: &SetupResult, lang: DemoLang, n: usize) ->
             )?;
         }
         w.tx().execute(
-            "INSERT INTO customer_counters (org_id, last) VALUES (?1, ?2)",
-            rusqlite::params![org_id.to_string(), i64::try_from(CUSTOMERS.len()).unwrap_or(0)],
+            "INSERT INTO counters (name, scope, device_prefix, last) VALUES ('customer', ?1, ?2, ?3)",
+            rusqlite::params![
+                org_id.to_string(),
+                w.device().prefix,
+                i64::try_from(CUSTOMERS.len()).unwrap_or(0)
+            ],
         )?;
         w.event("demo.seeded", "organization", &org_id.to_string(), &n)?;
         w.audit("seed", "organization", &org_id.to_string(), &n)?;
