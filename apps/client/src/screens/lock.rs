@@ -43,13 +43,22 @@ pub fn lock_screen(st: AppState) -> View {
         move |_, _| {
             let db = st.db();
             async move {
-                db.call(|s| {
-                    Ok(list_users(s)?
-                        .into_iter()
-                        .filter(|u| u.active && u.has_pin)
-                        .collect::<Vec<_>>())
-                })
-                .await
+                let (device, mut list) = db
+                    .call(move |s| {
+                        let list: Vec<UserRow> = list_users(s)?
+                            .into_iter()
+                            .filter(|u| u.active && u.has_pin)
+                            .collect();
+                        Ok((s.device().id.to_string(), list))
+                    })
+                    .await?;
+                // An employee's own phone (signed in with their account)
+                // offers that person only.
+                let personal = crate::screens::setup::personal_user(&device);
+                if !personal.is_empty() && list.iter().any(|u| u.id == personal) {
+                    list.retain(|u| u.id == personal);
+                }
+                Ok::<_, crate::db::DbError>(list)
             }
         },
     );

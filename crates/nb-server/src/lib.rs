@@ -30,6 +30,7 @@
 
 mod accounts;
 pub mod admin;
+mod staff;
 mod ws;
 pub use accounts::{
     LoginRequest, NewDevice, OrgInfo, RecoverRequest, Session, SignupRequest, normalize_phone,
@@ -198,6 +199,28 @@ pub(crate) struct DeviceRow {
     id: String,
     org: String,
     prefix: String,
+}
+
+impl Server {
+    /// A device of the shop's managers (its owner's, or one linked or
+    /// invited without an account), not an employee's own phone (ADR-0009):
+    /// only those invite devices, stop them, or give access.
+    pub(crate) fn managing_device(&self, headers: &HeaderMap) -> ApiResult<DeviceRow> {
+        let device = self.device(headers)?;
+        let role: Option<String> = lock(&self.control)?
+            .query_row(
+                "SELECT m.role FROM devices d
+                 JOIN memberships m ON m.account_id = d.added_by AND m.org_id = d.org_id
+                 WHERE d.id = ?1",
+                [&device.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if role.as_deref() == Some("staff") {
+            return Err(ApiError::Forbidden("staff.device".into()));
+        }
+        Ok(device)
+    }
 }
 
 impl Server {
@@ -575,6 +598,8 @@ pub fn router(server: Arc<Server>) -> Router {
             post(accounts::add_device).get(accounts::org_devices),
         )
         .route("/v1/devices", get(devices))
+        .route("/v1/staff", get(staff::list).put(staff::grant))
+        .route("/v1/staff/{user_id}", axum::routing::delete(staff::revoke))
         .route("/v1/devices/{id}/revoke", post(revoke))
         .merge(guarded)
         .layer(DefaultBodyLimit::max(MAX_SMALL))
@@ -937,7 +962,11 @@ async fn reseed(
         .map(str::trim)
         .and_then(|t| server.account_of(t).ok().flatten())
         .ok_or(ApiError::Unauthorized)?;
-    if !server.member(&account.id, &device.org)? {
+    // An owner of the shop: an employee's account cannot repair it.
+    if server
+        .membership(&account.id, &device.org)?
+        .is_none_or(|(role, _)| role != "owner")
+    {
         return Err(ApiError::Unauthorized);
     }
     blocking(move || {
@@ -1021,7 +1050,7 @@ async fn invite(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
 ) -> ApiResult<axum::Json<Invite>> {
-    let device = server.device(&headers)?;
+    let device = server.managing_device(&headers)?;
     let code = new_code()?;
     let expires_at = now_ms() + 3_600_000;
     lock(&server.control)?.execute(
@@ -1126,6 +1155,7 @@ impl Server {
             prefix,
             token,
             cursor,
+            user_id: None,
         }))
     }
 }
@@ -1263,6 +1293,7 @@ impl Server {
             prefix,
             token,
             cursor,
+            user_id: None,
         }))
     }
 }
@@ -1274,7 +1305,7 @@ async fn revoke(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<StatusCode> {
-    let me = server.device(&headers)?;
+    let me = server.managing_device(&headers)?;
     let changed = lock(&server.control)?.execute(
         "UPDATE devices SET revoked_at = ?3 WHERE id = ?1 AND org_id = ?2 AND revoked_at IS NULL",
         params![id, me.org, now_ms()],

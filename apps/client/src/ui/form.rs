@@ -39,6 +39,27 @@ pub fn field(
         test_id,
         false,
         false,
+        false,
+    )
+}
+
+/// A phone number: digits and spaces stay left to right in an Arabic
+/// interface (else `0550 12 34 56` shows as `56 34 12 0550`).
+pub fn phone_field(
+    caption: impl Fn() -> String + 'static,
+    value: Signal<String>,
+    test_id: &'static str,
+) -> View {
+    field_inner(
+        caption,
+        value,
+        || "0550 12 34 56".to_owned(),
+        String::new,
+        KeyboardType::Phone,
+        test_id,
+        false,
+        false,
+        true,
     )
 }
 
@@ -60,6 +81,7 @@ pub fn focused_field(
         test_id,
         false,
         true,
+        false,
     )
 }
 
@@ -79,7 +101,85 @@ pub fn secret_field(
         test_id,
         true,
         false,
+        false,
     )
+}
+
+/// A password field with an eye that shows or hides what is typed, as the
+/// well-known apps do. `on_submit`: the keyboard's return (sign in).
+pub fn password_field(
+    caption: impl Fn() -> String + 'static,
+    value: Signal<String>,
+    error: impl Fn() -> String + Clone + 'static,
+    keyboard: KeyboardType,
+    test_id: &'static str,
+    show_a11y: impl Fn() -> String + 'static,
+) -> View {
+    let shown = signal(false);
+    let err_for_border = error.clone();
+    let err_for_text = error.clone();
+    let err_shown = error.clone();
+    view()
+        .gap(px(6.0))
+        .child(caption_row(caption, is_required(test_id)))
+        .child(
+            input_box()
+                .pe(px(2.0))
+                .border_color(move || {
+                    if err_for_border().is_empty() {
+                        Tone::BorderStrong.color()
+                    } else {
+                        Tone::Danger.color()
+                    }
+                })
+                .child(
+                    input()
+                        .test_id(test_id)
+                        .flex_1()
+                        .value(move || value.get())
+                        .on_change(move |t: &str| value.set(t.to_owned()))
+                        .keyboard_type(keyboard)
+                        .masked(move || !shown.get())
+                        .text_size(px(fs(ty::MD)))
+                        .text_color(Tone::Ink.color()),
+                )
+                .child(
+                    view()
+                        .w(px(36.0))
+                        .h(px(36.0))
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(radius::md()))
+                        .cursor_pointer()
+                        .label(move || SharedString::from(show_a11y()))
+                        .on_press(move || shown.update(|s| *s = !*s))
+                        .child(dynamic(move || {
+                            icon(
+                                if shown.get() { Icon::EyeOff } else { Icon::Eye },
+                                18.0,
+                                || Tone::Muted,
+                            )
+                            .into_element()
+                        })),
+                ),
+        )
+        .child(when(
+            move || !err_shown().is_empty(),
+            move || {
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(icon(Icon::Info, 14.0, || Tone::Danger))
+                    .child(label(
+                        err_for_text.clone(),
+                        ty::XS,
+                        FontWeight::MEDIUM,
+                        Tone::Danger,
+                    ))
+                    .into_element()
+            },
+        ))
 }
 
 #[allow(clippy::too_many_arguments)] // a field's parts, named at each call
@@ -92,6 +192,7 @@ fn field_inner(
     test_id: &'static str,
     masked: bool,
     focus: bool,
+    ltr: bool,
 ) -> View {
     let err_for_border = error.clone();
     let err_for_text = error.clone();
@@ -106,6 +207,15 @@ fn field_inner(
                         Tone::BorderStrong.color()
                     } else {
                         Tone::Danger.color()
+                    }
+                })
+                .direction(move || {
+                    if ltr {
+                        LayoutDirection::Ltr
+                    } else if super::tokens::rtl() {
+                        LayoutDirection::Rtl
+                    } else {
+                        LayoutDirection::Ltr
                     }
                 })
                 .child(
@@ -319,7 +429,6 @@ const REQUIRED: &[&str] = &[
     "sp-amount",
     "till-counted",
     "tpl-name",
-    "user-login",
     "user-name",
     "warehouse-name",
 ];

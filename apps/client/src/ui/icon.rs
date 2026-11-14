@@ -172,6 +172,7 @@ icons! {
     Locate => "locate-fixed",
     Link => "link",
     Unlink => "unlink",
+    Loader => "loader-circle",
 }
 
 /// An icon `size` points square, stroked in `tone`.

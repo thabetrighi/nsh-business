@@ -142,6 +142,8 @@ pub(crate) fn schema(c: &Connection) -> rusqlite::Result<()> {
     add_column(c, "accounts", "reset_hash", "TEXT")?;
     add_column(c, "accounts", "reset_until", "INTEGER")?;
     add_column(c, "orgs", "suspended_at", "INTEGER")?;
+    add_column(c, "memberships", "user_id", "TEXT")?;
+    add_column(c, "devices", "added_by", "TEXT")?;
     add_column(c, "orgs", "suspend_reason", "TEXT NOT NULL DEFAULT ''")?;
     Ok(())
 }

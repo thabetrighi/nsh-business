@@ -141,6 +141,20 @@ fn read_session(store: &Store) -> Result<Option<Session>, Error> {
     })
 }
 
+/// The owner of the store's organization (its user id).
+pub fn owner_of(store: &Store) -> Result<String, Error> {
+    read_session(store)?
+        .map(|s| s.owner().to_string())
+        .ok_or(Error::NotFound("organization"))
+}
+
+/// The store's organization.
+pub fn org_of(store: &Store) -> Result<nb_core::OrganizationId, Error> {
+    read_session(store)?
+        .map(|s| s.setup.org)
+        .ok_or(Error::NotFound("organization"))
+}
+
 /// The answer of a store with no organization yet: the first-run setup
 /// shows (a store on disk); in memory (tests, the browser) a demo shop is
 /// made instead.

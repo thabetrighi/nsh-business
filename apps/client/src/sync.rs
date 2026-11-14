@@ -16,6 +16,29 @@ use nsh_core::prelude::*;
 
 use crate::state::AppState;
 
+/// The service's server: where accounts and shops live unless the shop has
+/// a server of its own (the first screen's other options). A build may set
+/// another (`NB_SERVER_URL` when compiling); so may a run (the same
+/// variable, for trials).
+pub const DEFAULT_SERVER: &str = "https://sync.nshbusiness.dz";
+
+pub fn default_server() -> String {
+    std::env::var("NB_SERVER_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| option_env!("NB_SERVER_URL").map(str::to_owned))
+        .unwrap_or_else(|| DEFAULT_SERVER.to_owned())
+}
+
+/// An employee who signs in from their own phone (ADR-0009).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct StaffAccess {
+    pub user_id: String,
+    pub phone: String,
+    pub name: String,
+    pub since: i64,
+}
+
 /// After this long without reaching the server, the top bar warns (the
 /// store locks settings at 14 days, ADR-0007).
 pub const STALE_MS: i64 = 7 * 86_400_000;
@@ -60,6 +83,7 @@ async fn send_full(req: HttpRequest) -> Result<HttpResponse, Failed> {
     match res.status() {
         200..=299 => Ok(res),
         401 => Err(failed("sync.err.unauthorized", "")),
+        429 => Err(failed("sync.err.too_many", "")),
         // What the conflict is (`phone.taken`, `account.locked`, `behind`…)
         // stays in the detail for whoever asked.
         409 => Err(failed(
@@ -80,6 +104,7 @@ async fn send_full(req: HttpRequest) -> Result<HttpResponse, Failed> {
             Err(match code.as_str() {
                 "org.suspended" => failed("sync.err.suspended", ""),
                 "plan.devices" => failed("sync.err.plan_devices", ""),
+                "staff.device" => failed("sync.err.staff_device", ""),
                 _ => failed("sync.err.blocked", code),
             })
         }
@@ -88,6 +113,17 @@ async fn send_full(req: HttpRequest) -> Result<HttpResponse, Failed> {
             format!("{s} {}", String::from_utf8_lossy(&res.body)),
         )),
     }
+}
+
+thread_local! {
+    /// Who is setting this device up (the account signed in on the first
+    /// screen), before anyone works on it.
+    static SETTING_UP: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The person setting this device up, for its name among the shop's.
+pub fn set_setting_up(name: &str) {
+    SETTING_UP.with(|s| *s.borrow_mut() = name.trim().to_owned());
 }
 
 /// What the other devices see this one as: its kind of system, and who
@@ -101,9 +137,16 @@ fn device_name(st: AppState) -> String {
         "linux" => "device.os.linux",
         _ => "device.os.web",
     });
-    match st.user.get_untracked() {
-        Some(u) if !u.name.trim().is_empty() => format!("{os} · {}", u.name.trim()),
-        _ => os,
+    let who = st
+        .user
+        .get_untracked()
+        .map(|u| u.name.trim().to_owned())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| SETTING_UP.with(|s| s.borrow().clone()));
+    if who.is_empty() {
+        os
+    } else {
+        format!("{os} · {who}")
     }
 }
 
@@ -157,7 +200,13 @@ pub async fn link(st: AppState, url: String, key: String) -> Result<Linked, Fail
             .header("x-device-name", name)
             .body(snapshot),
     )
-    .await?;
+    .await
+    // Here a refusal is of the key or the account's session, not of a
+    // device.
+    .map_err(|f| match f.key {
+        "sync.err.unauthorized" => failed("sync.err.key", ""),
+        _ => f,
+    })?;
     let linked: Linked =
         serde_json::from_slice(&body).map_err(|e| failed("sync.err.server", e.to_string()))?;
     let token = linked.token.clone();
@@ -427,6 +476,80 @@ async fn finish_join(st: AppState, url: String, joined: Joined) -> Result<Joined
         .map_err(local)?;
     refresh(st).await;
     Ok(joined)
+}
+
+/// The shop's employees who sign in from their own phone.
+pub async fn staff(st: AppState) -> Result<Vec<StaffAccess>, Failed> {
+    let link = st
+        .db()
+        .call(|s| s.sync_link())
+        .await
+        .map_err(local)?
+        .ok_or_else(|| failed("sync.err.not_linked", ""))?;
+    let body = send(
+        HttpRequest::new("GET", format!("{}/v1/staff", link.server_url))
+            .header("authorization", format!("Bearer {}", link.token)),
+    )
+    .await?;
+    decode(&body)
+}
+
+/// Gives a user of the shop an account on `phone` with `password` (the
+/// owner chooses it). `Ok(true)`: the phone had an account already, used
+/// elsewhere, which keeps its own password.
+pub async fn grant_staff(
+    st: AppState,
+    user_id: String,
+    phone: String,
+    name: String,
+    password: String,
+) -> Result<bool, Failed> {
+    let link = st
+        .db()
+        .call(|s| s.sync_link())
+        .await
+        .map_err(local)?
+        .ok_or_else(|| failed("sync.err.not_linked", ""))?;
+    let body = serde_json::json!({
+        "user_id": user_id,
+        "phone": phone.trim(),
+        "name": name.trim(),
+        "password": password,
+    });
+    let answer = send(
+        HttpRequest::new("PUT", format!("{}/v1/staff", link.server_url))
+            .header("authorization", format!("Bearer {}", link.token))
+            .header("content-type", "application/json")
+            .body(body.to_string().into_bytes()),
+    )
+    .await
+    .map_err(|f| {
+        if f.detail.contains("staff.is_owner") {
+            failed("staff.err.owner", "")
+        } else if f.detail.contains("staff.user") {
+            failed("staff.err.user", "")
+        } else {
+            account_error(f)
+        }
+    })?;
+    let v: serde_json::Value = decode(&answer)?;
+    Ok(v["existing"].as_bool().unwrap_or(false))
+}
+
+/// Takes back a user's access from their phone (their devices stop).
+pub async fn revoke_staff(st: AppState, user_id: String) -> Result<(), Failed> {
+    let link = st
+        .db()
+        .call(|s| s.sync_link())
+        .await
+        .map_err(local)?
+        .ok_or_else(|| failed("sync.err.not_linked", ""))?;
+    send(
+        HttpRequest::new("DELETE", format!("{}/v1/staff/{user_id}", link.server_url))
+            .header("authorization", format!("Bearer {}", link.token)),
+    )
+    .await?;
+    Ok(())
 }
 
 /// A code for a new device of this organization (an hour, once).
@@ -806,9 +929,16 @@ fn listen_after(st: AppState, secs: u64) {
                             let _ = st.db().call(|s| s.note_sync("")).await;
                             0
                         }
+                        // The server refuses this device (stopped, its
+                        // employee's access taken back, the shop suspended):
+                        // one full exchange records why, for the screen.
+                        Err(true) => {
+                            let _ = push_now(st).await;
+                            30
+                        }
                         // Not linked, no network, or the socket is up: look
                         // again a bit later.
-                        Err(()) => 20,
+                        Err(false) => 20,
                     };
                     listen_after(st, again);
                 })
@@ -819,20 +949,22 @@ fn listen_after(st: AppState, secs: u64) {
     });
 }
 
-async fn listen_once(st: AppState) -> Result<bool, ()> {
+/// `Err(true)`: the server refused this device; `Err(false)`: nothing to
+/// wait on now (not linked, the socket is up, no network).
+async fn listen_once(st: AppState) -> Result<bool, bool> {
     if st.session.get_untracked().is_none() {
-        return Err(());
+        return Err(false);
     }
     // The socket brings the news while it is up: no waiting request.
     if LIVE_UP.with(std::cell::Cell::get) {
-        return Err(());
+        return Err(false);
     }
     let (link, at) = st
         .db()
         .call(|s| Ok((s.sync_link()?, s.pull_position()?)))
         .await
-        .map_err(|_| ())?;
-    let link = link.ok_or(())?;
+        .map_err(|_| false)?;
+    let link = link.ok_or(false)?;
     let body = send(
         HttpRequest::new(
             "GET",
@@ -844,7 +976,15 @@ async fn listen_once(st: AppState) -> Result<bool, ()> {
         .header("authorization", format!("Bearer {}", link.token)),
     )
     .await
-    .map_err(|_| ())?;
-    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|_| ())?;
+    .map_err(|f| {
+        matches!(
+            f.key,
+            "sync.err.unauthorized"
+                | "sync.err.suspended"
+                | "sync.err.subscription"
+                | "sync.err.blocked"
+        )
+    })?;
+    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|_| false)?;
     Ok(v["changed"].as_bool().unwrap_or(false))
 }

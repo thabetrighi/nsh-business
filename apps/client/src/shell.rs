@@ -803,7 +803,30 @@ fn phone(st: AppState) -> View {
                             FontWeight::BOLD,
                             Tone::Ink,
                         )))
-                        .child(icon(Icon::Offline, 18.0, || Tone::Warning))
+                        // The sync's real state (its words on the settings'
+                        // sync page, where a tap leads).
+                        .child(dynamic(move || {
+                            let (status, which, key) = sync_state(st);
+                            view()
+                                .w(px(32.0))
+                                .h(px(32.0))
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .label(move || SharedString::from(st.tn(key)))
+                                .test_id("sync-status")
+                                .on_press(move || {
+                                    st.route.set(crate::nav::Route::Settings);
+                                    st.settings_tab.set(8);
+                                })
+                                .child(icon(which, 18.0, move || match status {
+                                    Status::Success => Tone::Success,
+                                    Status::Danger => Tone::Danger,
+                                    Status::Info => Tone::Info,
+                                    _ => Tone::Warning,
+                                }))
+                                .into_element()
+                        }))
                         .child(icon_button(
                             || Icon::Search,
                             st.t("search.placeholder"),

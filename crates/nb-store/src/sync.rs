@@ -88,6 +88,10 @@ pub struct Joined {
     pub prefix: String,
     pub token: String,
     pub cursor: i64,
+    /// An employee's account (ADR-0009): the shop's user this device works
+    /// as. `None`: the owner.
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// A device of the organization, as `/v1/devices` lists it.
@@ -120,6 +124,9 @@ pub struct OrgInfo {
     pub name: String,
     pub role: String,
     pub devices: i64,
+    /// For an employee's account: the shop's user it works as.
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// The server's copy, to compare with this one.

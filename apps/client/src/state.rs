@@ -161,6 +161,16 @@ pub fn persisted_index(key: &'static str, default: usize) -> Signal<usize> {
 const K_PRINTERS: &str = "nb.printers";
 
 /// A text setting saved on the device.
+/// A text kept on the device (read once; empty when never set).
+pub fn stored_text(key: &str) -> String {
+    stored(key, |v| Some(v.to_owned())).unwrap_or_default()
+}
+
+/// Keeps a text on the device.
+pub fn store_text(key: &str, value: &str) {
+    save(key, value);
+}
+
 pub fn persisted_text(key: &'static str) -> Signal<String> {
     let s = signal(stored(key, |v| Some(v.to_owned())).unwrap_or_default());
     effect(move || save(key, &s.get()));
@@ -315,6 +325,10 @@ pub struct AppState {
     pub data_rev: Signal<u64>,
     /// The person using the app; `None` while the lock screen shows.
     pub user: Signal<Option<SignedIn>>,
+    /// Who opens the shop next, without the lock screen: they just proved
+    /// who they are (an account's password, a new PIN). `Some("")`: the
+    /// owner. Taken once by [`AppState::connect`].
+    pub enter_as: Stored<Option<String>>,
     /// Whether this device asks who is there (someone has a PIN or password).
     pub needs_sign_in: Signal<bool>,
     /// The organization's features (activity profile and switches); `None`
@@ -359,6 +373,7 @@ impl AppState {
             unsound: signal(false),
             data_rev: signal(0),
             user: signal(None),
+            enter_as: nsh_core::prelude::stored(None),
             needs_sign_in: signal(false),
             features: signal(None),
             last_active: nsh_core::prelude::stored(now_ms()),
@@ -420,6 +435,7 @@ impl AppState {
     /// any PIN or password on the device, the owner works without signing in.
     pub fn connect(self) {
         let db = self.db();
+        let entering = self.enter_as.replace(None);
         let task = spawn(async move {
             let opened = async {
                 let s = db.session().await?;
@@ -436,10 +452,11 @@ impl AppState {
                                 .unwrap_or_default())
                         })?;
                         let needs = sign_in_required(store)?;
-                        let me = if needs {
-                            None
-                        } else {
-                            Some(session_of(store, owner)?)
+                        let me = match entering.as_deref() {
+                            Some("") => Some(session_of(store, owner)?),
+                            Some(id) => Some(session_of(store, nb_store::repo::parse_id(id)?)?),
+                            None if needs => None,
+                            None => Some(session_of(store, owner)?),
                         };
                         Ok((needs, org_usecases::features(store)?, me, (name, branch)))
                     })

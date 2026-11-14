@@ -218,53 +218,69 @@ fn linked_body(
             .bg(Tone::Subtle.color())
             .border_t_1()
             .border_color(Tone::Border.color())
-            .child(button(
-                Variant::Ghost,
-                Size::Md,
-                Some(Icon::Unlink),
-                st.t("sync.unlink"),
+            // The shop's devices are its managers' business (unlinking
+            // this one, seeing the others, inviting a new one).
+            .child(when(
+                move || st.can("devices.manage"),
                 move || {
-                    let task = spawn(crate::sync::unlink(st));
-                    drop(task); // runs to completion
+                    button(
+                        Variant::Ghost,
+                        Size::Md,
+                        Some(Icon::Unlink),
+                        st.t("sync.unlink"),
+                        move || {
+                            let task = spawn(crate::sync::unlink(st));
+                            drop(task); // runs to completion
+                        },
+                    )
+                    .into_element()
                 },
             ))
             .child(forget_browser_button(st))
-            .child(
-                button(
-                    Variant::Ghost,
-                    Size::Md,
-                    Some(Icon::Monitor),
-                    st.t("sync.devices"),
-                    move || {
-                        if devices.get_untracked().is_some() {
-                            devices.set(None);
-                            return;
-                        }
-                        load_devices(st, devices);
-                    },
-                )
-                .test_id("sync-devices"),
-            )
-            .child(
-                button(
-                    Variant::Secondary,
-                    Size::Md,
-                    Some(Icon::Key),
-                    st.t("sync.invite"),
-                    move || {
-                        let task = st.root.run(|| {
-                            spawn(async move {
-                                match crate::sync::invite(st).await {
-                                    Ok(i) => invite.set(Some(i)),
-                                    Err(f) => show_failure(st, &f),
-                                }
-                            })
-                        });
-                        drop(task); // runs to completion
-                    },
-                )
-                .test_id("sync-invite"),
-            )
+            .child(when(
+                move || st.can("devices.manage"),
+                move || {
+                    button(
+                        Variant::Ghost,
+                        Size::Md,
+                        Some(Icon::Monitor),
+                        st.t("sync.devices"),
+                        move || {
+                            if devices.get_untracked().is_some() {
+                                devices.set(None);
+                                return;
+                            }
+                            load_devices(st, devices);
+                        },
+                    )
+                    .test_id("sync-devices")
+                    .into_element()
+                },
+            ))
+            .child(when(
+                move || st.can("devices.manage"),
+                move || {
+                    button(
+                        Variant::Secondary,
+                        Size::Md,
+                        Some(Icon::Key),
+                        st.t("sync.invite"),
+                        move || {
+                            let task = st.root.run(|| {
+                                spawn(async move {
+                                    match crate::sync::invite(st).await {
+                                        Ok(i) => invite.set(Some(i)),
+                                        Err(f) => show_failure(st, &f),
+                                    }
+                                })
+                            });
+                            drop(task); // runs to completion
+                        },
+                    )
+                    .test_id("sync-invite")
+                    .into_element()
+                },
+            ))
             .child(
                 button(
                     Variant::Secondary,

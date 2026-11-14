@@ -108,7 +108,7 @@ pub(crate) fn password_is(stored: &str, password: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn check_password(password: &str) -> ApiResult<()> {
+pub(crate) fn check_password(password: &str) -> ApiResult<()> {
     if password.chars().count() < 8 {
         return Err(ApiError::BadRequest("password.short".into()));
     }
@@ -162,12 +162,20 @@ impl Server {
         Ok(token)
     }
 
-    pub(crate) fn member(&self, account: &str, org: &str) -> ApiResult<bool> {
-        Ok(lock(&self.control)?.query_row(
-            "SELECT EXISTS (SELECT 1 FROM memberships WHERE account_id = ?1 AND org_id = ?2)",
-            params![account, org],
-            |r| r.get(0),
-        )?)
+    /// The account's role in `org` (`owner` or `staff`) and, for staff,
+    /// the shop's user it works as.
+    pub(crate) fn membership(
+        &self,
+        account: &str,
+        org: &str,
+    ) -> ApiResult<Option<(String, Option<String>)>> {
+        Ok(lock(&self.control)?
+            .query_row(
+                "SELECT role, user_id FROM memberships WHERE account_id = ?1 AND org_id = ?2",
+                params![account, org],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 }
 
@@ -421,7 +429,8 @@ pub(crate) async fn orgs(
     let control = lock(&server.control)?;
     let mut st = control.prepare(
         "SELECT o.id, o.name, m.role,
-                (SELECT COUNT(*) FROM devices d WHERE d.org_id = o.id AND d.revoked_at IS NULL)
+                (SELECT COUNT(*) FROM devices d WHERE d.org_id = o.id AND d.revoked_at IS NULL),
+                m.user_id
          FROM memberships m JOIN orgs o ON o.id = m.org_id
          WHERE m.account_id = ?1 ORDER BY o.name, o.id",
     )?;
@@ -431,6 +440,7 @@ pub(crate) async fn orgs(
             name: r.get(1)?,
             role: r.get(2)?,
             devices: r.get(3)?,
+            user_id: r.get(4)?,
         })
     })?;
     Ok(axum::Json(rows.collect::<Result<_, _>>()?))
@@ -444,16 +454,45 @@ pub(crate) async fn add_device(
     axum::Json(req): axum::Json<NewDevice>,
 ) -> ApiResult<axum::Json<Joined>> {
     let account = server.account(&headers)?;
-    if !server.member(&account.id, &org)? {
+    let Some((role, user)) = server.membership(&account.id, &org)? else {
         // Another account's shop is not even said to exist.
         return Err(ApiError::Unauthorized);
-    }
-    match req.replaces {
-        Some(old) => blocking(move || server.replace_device(&org, &old, &req.name)).await,
-        None => {
-            blocking(move || server.new_device(&org, &req.name, req.device_id.as_deref())).await
+    };
+    blocking(move || {
+        // An employee works as its user, still active in the shop, and
+        // takes back only a device it added itself.
+        let staff = role == "staff";
+        if staff {
+            let user = user.as_deref().ok_or(ApiError::Unauthorized)?;
+            if !server.staff_user_ok(&org, user)? {
+                return Err(ApiError::Unauthorized);
+            }
         }
-    }
+        if let (true, Some(old)) = (staff, req.replaces.as_deref()) {
+            let by: Option<String> = lock(&server.control)?
+                .query_row(
+                    "SELECT added_by FROM devices WHERE id = ?1 AND org_id = ?2",
+                    params![old, org],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            if by.as_deref() != Some(account.id.as_str()) {
+                return Err(ApiError::Unauthorized);
+            }
+        }
+        let axum::Json(mut joined) = match req.replaces {
+            Some(old) => server.replace_device(&org, &old, &req.name)?,
+            None => server.new_device(&org, &req.name, req.device_id.as_deref())?,
+        };
+        lock(&server.control)?.execute(
+            "UPDATE devices SET added_by = ?2 WHERE id = ?1",
+            params![joined.device_id, account.id],
+        )?;
+        joined.user_id = if staff { user } else { None };
+        Ok(axum::Json(joined))
+    })
+    .await
 }
 
 /// The account's shop's devices (to pick the one a reinstall replaces).
@@ -463,10 +502,28 @@ pub(crate) async fn org_devices(
     Path(org): Path<String>,
 ) -> ApiResult<axum::Json<Vec<crate::DeviceInfo>>> {
     let account = server.account(&headers)?;
-    if !server.member(&account.id, &org)? {
+    let Some((role, _)) = server.membership(&account.id, &org)? else {
         return Err(ApiError::Unauthorized);
+    };
+    let mut list = server.devices_of(&org, "")?;
+    if role == "staff" {
+        // An employee picks among its own devices only.
+        let c = lock(&server.control)?;
+        let mut mine = Vec::new();
+        for d in list {
+            let by: Option<String> = c
+                .query_row("SELECT added_by FROM devices WHERE id = ?1", [&d.id], |r| {
+                    r.get(0)
+                })
+                .optional()?
+                .flatten();
+            if by.as_deref() == Some(account.id.as_str()) {
+                mine.push(d);
+            }
+        }
+        list = mine;
     }
-    Ok(axum::Json(server.devices_of(&org, "")?))
+    Ok(axum::Json(list))
 }
 
 /// Makes `org` the account's (it linked it).

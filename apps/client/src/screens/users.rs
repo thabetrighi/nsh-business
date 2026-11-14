@@ -101,6 +101,25 @@ pub fn users_tab(st: AppState, compact: bool) -> View {
         },
     );
     let data = computed(move || team.with(|t: Option<&Team>| t.cloned()).unwrap_or_default());
+    // Who signs in from their own phone (ADR-0009): known from the server
+    // (`None`: the shop is not on a server, or it cannot be reached).
+    let remote = resource(
+        move || st.session.get().map(|_| st.data_rev.get()),
+        move |_, _| async move { Ok::<_, ()>(crate::sync::staff(st).await.ok()) },
+    );
+    let remote = computed(move || {
+        remote
+            .with(|r: Option<&Option<Vec<crate::sync::StaffAccess>>>| r.cloned())
+            .flatten()
+    });
+    let phone_for: Signal<Option<UserRow>> = signal(None);
+    let phone_open = signal(false);
+    effect(move || phone_open.set(phone_for.get().is_some()));
+    effect(move || {
+        if !phone_open.get() {
+            phone_for.set(None);
+        }
+    });
     // The form: closed, a new user (None), or someone to edit.
     let editing: Signal<Option<Option<UserRow>>> = signal(None);
     let open = signal(false);
@@ -132,8 +151,22 @@ pub fn users_tab(st: AppState, compact: bool) -> View {
                 },
             )),
         ));
+        let access = remote.get();
         for (i, u) in t.users.iter().enumerate() {
-            c = c.child(user_row(st, &t, u.clone(), i, compact, editing));
+            let phone = access
+                .as_ref()
+                .and_then(|l| l.iter().find(|a| a.user_id == u.id))
+                .map(|a| a.phone.clone());
+            c = c.child(user_row(
+                st,
+                &t,
+                u.clone(),
+                i,
+                compact,
+                editing,
+                phone,
+                phone_for,
+            ));
         }
         c.into_element()
     });
@@ -148,8 +181,216 @@ pub fn users_tab(st: AppState, compact: bool) -> View {
             };
             user_form(st, data.get_untracked(), who, move || editing.set(None)).into_element()
         }))
+        .child(modal(phone_open, compact, move || {
+            let Some(who) = phone_for.get_untracked() else {
+                return view().into_element();
+            };
+            let linked = remote.get_untracked();
+            let current = linked
+                .as_ref()
+                .and_then(|l| l.iter().find(|a| a.user_id == who.id).cloned());
+            phone_form(st, who, linked.is_some(), current, move || {
+                phone_for.set(None)
+            })
+            .into_element()
+        }))
 }
 
+/// An employee signs in from their own phone: the owner gives them an
+/// account (their phone, a password the owner chooses), or takes it back.
+fn phone_form(
+    st: AppState,
+    who: UserRow,
+    linked: bool,
+    current: Option<crate::sync::StaffAccess>,
+    close: impl Fn() + Clone + 'static,
+) -> View {
+    let phone = signal(
+        current
+            .as_ref()
+            .map(|a| a.phone.clone())
+            .or_else(|| who.phone.clone())
+            .unwrap_or_default(),
+    );
+    let password = signal(String::new());
+    let error = signal(String::new());
+    let busy = signal(false);
+    let has = current.is_some();
+    let name = who.name.clone();
+    let save = {
+        let close = close.clone();
+        let (id, name) = (who.id.clone(), who.name.clone());
+        move || {
+            if busy.get_untracked() {
+                return;
+            }
+            if phone.get_untracked().trim().is_empty() {
+                error.set(st.tn("onboard.err.required"));
+                return;
+            }
+            busy.set(true);
+            error.set(String::new());
+            let close = close.clone();
+            let (id, name, p, w) = (
+                id.clone(),
+                name.clone(),
+                phone.get_untracked(),
+                password.get_untracked(),
+            );
+            let task = st.root.run(|| {
+                spawn(async move {
+                    match crate::sync::grant_staff(st, id, p.clone(), name.clone(), w).await {
+                        Ok(existing) => {
+                            busy.set(false);
+                            show_toast(
+                                st,
+                                tr_args(
+                                    st.lang(),
+                                    if existing {
+                                        "staff.granted_existing"
+                                    } else {
+                                        "staff.granted"
+                                    },
+                                    &[("name", &name), ("phone", &p)],
+                                ),
+                            );
+                            st.changed();
+                            close();
+                        }
+                        Err(f) => {
+                            busy.set(false);
+                            error.set(crate::screens::cloud::failure_text(st, &f));
+                        }
+                    }
+                })
+            });
+            drop(task); // runs to completion under the root
+        }
+    };
+    let stop = {
+        let close = close.clone();
+        let (id, name) = (who.id.clone(), who.name.clone());
+        move || {
+            if busy.get_untracked() {
+                return;
+            }
+            busy.set(true);
+            let close = close.clone();
+            let (id, name) = (id.clone(), name.clone());
+            let task = st.root.run(|| {
+                spawn(async move {
+                    match crate::sync::revoke_staff(st, id).await {
+                        Ok(()) => {
+                            busy.set(false);
+                            show_toast(st, tr_args(st.lang(), "staff.revoked", &[("name", &name)]));
+                            st.changed();
+                            close();
+                        }
+                        Err(f) => {
+                            busy.set(false);
+                            error.set(crate::screens::cloud::failure_text(st, &f));
+                        }
+                    }
+                })
+            });
+            drop(task); // runs to completion under the root
+        }
+    };
+    let body = if linked {
+        view()
+            .gap(px(14.0))
+            .child(crate::ui::form::phone_field(
+                st.t("onboard.phone"),
+                phone,
+                "staff-phone",
+            ))
+            .child(crate::ui::form::password_field(
+                st.t(if has {
+                    "staff.password_again"
+                } else {
+                    "staff.password"
+                }),
+                password,
+                String::new,
+                KeyboardType::Default,
+                "staff-password",
+                st.t("onboard.show_password"),
+            ))
+            .child(label(
+                st.t(if has {
+                    "staff.password_keep"
+                } else {
+                    "staff.password_help"
+                }),
+                ty::XS,
+                FontWeight::NORMAL,
+                Tone::Muted,
+            ))
+            .child(dynamic(move || {
+                let e = error.get();
+                if e.is_empty() {
+                    view().into_element()
+                } else {
+                    label(move || e.clone(), ty::SM, FontWeight::MEDIUM, Tone::Danger)
+                        .test_id("staff-error")
+                        .into_element()
+                }
+            }))
+    } else {
+        view().child(label(
+            st.t("staff.not_linked"),
+            ty::SM,
+            FontWeight::NORMAL,
+            Tone::Body,
+        ))
+    };
+    let mut footer = view().flex_row().gap(px(10.0));
+    if linked && has {
+        footer = footer.child(
+            button(
+                Variant::Danger,
+                Size::Md,
+                Some(Icon::UserX),
+                st.t("staff.revoke"),
+                stop,
+            )
+            .test_id("staff-revoke"),
+        );
+    }
+    footer = footer.child(view().flex_1());
+    {
+        let close = close.clone();
+        footer = footer.child(button(
+            Variant::Secondary,
+            Size::Md,
+            None,
+            st.t("form.cancel"),
+            close,
+        ));
+    }
+    if linked {
+        footer = footer.child(
+            button(
+                Variant::Primary,
+                Size::Md,
+                Some(Icon::Phone),
+                st.t(if has { "form.save" } else { "staff.grant" }),
+                save,
+            )
+            .test_id("staff-save"),
+        );
+    }
+    dialog_frame(
+        st,
+        move || tr_args(st.lang(), "staff.title", &[("name", &name)]),
+        st.t("staff.description"),
+        body,
+        footer,
+        close,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // a row's parts, named at the one call
 fn user_row(
     st: AppState,
     t: &Team,
@@ -157,6 +398,8 @@ fn user_row(
     i: usize,
     compact: bool,
     editing: Signal<Option<Option<UserRow>>>,
+    remote_phone: Option<String>,
+    phone_for: Signal<Option<UserRow>>,
 ) -> View {
     let status = if !u.active {
         Status::Neutral
@@ -224,6 +467,26 @@ fn user_row(
             (Status::Warning, Icon::Info, "users.no_secret")
         };
         r = r.child(badge(s, Some(which), st.t(key)));
+    }
+    // Signs in from their own phone.
+    if let Some(p) = remote_phone {
+        let shown = nb_i18n::bidi::isolate_ltr(&p);
+        r = r.child(badge(Status::Info, Some(Icon::Phone), move || {
+            shown.clone()
+        }));
+    }
+    let owner = u.grants.iter().any(|g| g.role == "owner");
+    if st.can("users.manage") && !owner && u.active {
+        let who = u.clone();
+        r = r.child(
+            crate::ui::kit::icon_button(
+                || Icon::Phone,
+                st.t("staff.manage"),
+                Variant::Ghost,
+                move || phone_for.set(Some(who.clone())),
+            )
+            .test_id(&format!("user-phone-{i}")),
+        );
     }
     if st.can("users.manage") {
         r = r

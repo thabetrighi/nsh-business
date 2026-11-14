@@ -419,3 +419,19 @@ pub fn checkbox(
             Some(false) => view().into_element(),
         }))
 }
+
+/// Something is under way: a turning circle (stops with its view).
+pub fn spinner(size: f32) -> View {
+    let turn = signal(0.0_f32);
+    let tick = set_interval(std::time::Duration::from_millis(60), move || {
+        turn.update(|t| *t = (*t + 0.35) % std::f32::consts::TAU);
+    });
+    drop(tick); // runs while the view lives: tasks end with their owner
+    view()
+        .w(px(size))
+        .h(px(size))
+        .items_center()
+        .justify_center()
+        .rotate(move || Radians(turn.get()))
+        .child(icon(Icon::Loader, size, || Tone::Primary))
+}
