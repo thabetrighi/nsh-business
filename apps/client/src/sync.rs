@@ -69,6 +69,20 @@ async fn send_full(req: HttpRequest) -> Result<HttpResponse, Failed> {
                 .and_then(|v| v["detail"].as_str().map(str::to_owned))
                 .unwrap_or_default(),
         )),
+        // The platform stopped the shop (its operator), or its
+        // subscription ended: the shop goes on selling here, unsynced.
+        402 => Err(failed("sync.err.subscription", "")),
+        403 => {
+            let code = serde_json::from_slice::<serde_json::Value>(&res.body)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(str::to_owned))
+                .unwrap_or_default();
+            Err(match code.as_str() {
+                "org.suspended" => failed("sync.err.suspended", ""),
+                "plan.devices" => failed("sync.err.plan_devices", ""),
+                _ => failed("sync.err.blocked", code),
+            })
+        }
         s => Err(failed(
             "sync.err.server",
             format!("{s} {}", String::from_utf8_lossy(&res.body)),
@@ -640,6 +654,30 @@ pub async fn verify(st: AppState) -> Result<bool, Failed> {
     let state: StateInfo =
         serde_json::from_slice(&body).map_err(|e| failed("sync.err.server", e.to_string()))?;
     Ok(state.fingerprint == mine)
+}
+
+/// A shared computer: everything this browser kept of the shop goes, after
+/// what waits here reached the server (nothing is lost: the server and the
+/// other devices keep it all). The page starts again on its first screen.
+#[cfg(target_arch = "wasm32")]
+pub async fn forget_browser(st: AppState) -> Result<(), Failed> {
+    refresh(st).await;
+    if st.sync.get_untracked().linked && st.sync.get_untracked().pending > 0 {
+        push_now(st).await?;
+        refresh(st).await;
+        if st.sync.get_untracked().pending > 0 {
+            return Err(failed("sync.err.unsent", ""));
+        }
+    }
+    crate::web_store::stop_saving();
+    let _ = st.db().call(|s| s.clear_sync_link()).await;
+    crate::web_store::clear()
+        .await
+        .map_err(|e| failed("sync.err.local", e))?;
+    if let Some(w) = web_sys::window() {
+        let _ = w.location().reload();
+    }
+    Ok(())
 }
 
 /// Stops syncing here (the server keeps its copy).

@@ -94,6 +94,32 @@ pub fn cloud_card(st: AppState, compact: bool) -> View {
         .child(body)
 }
 
+/// The browser only: leave a shared computer with nothing of the shop on it.
+#[cfg(target_arch = "wasm32")]
+fn forget_browser_button(st: AppState) -> View {
+    button(
+        Variant::Ghost,
+        Size::Md,
+        Some(Icon::Unlink),
+        st.t("sync.forget_browser"),
+        move || {
+            let task = spawn(async move {
+                show_toast(st, st.tn("sync.forget_browser.busy"));
+                if let Err(f) = crate::sync::forget_browser(st).await {
+                    show_failure(st, &f);
+                }
+            });
+            drop(task); // runs to completion
+        },
+    )
+}
+
+/// Apps keep their copy: only the browser has a "leave this computer".
+#[cfg(not(target_arch = "wasm32"))]
+fn forget_browser_button(_st: AppState) -> View {
+    view()
+}
+
 fn stat(st: AppState, key: &'static str, value: String) -> View {
     view()
         .flex_1()
@@ -202,6 +228,7 @@ fn linked_body(
                     drop(task); // runs to completion
                 },
             ))
+            .child(forget_browser_button(st))
             .child(
                 button(
                     Variant::Ghost,

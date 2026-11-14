@@ -24,7 +24,9 @@ use axum::http::HeaderMap;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{ApiError, ApiResult, Joined, Server, bearer, blocking, hash, lock, new_token, now_ms};
+use crate::{
+    ApiError, ApiResult, ClientIp, Joined, Server, bearer, blocking, hash, lock, new_token, now_ms,
+};
 pub use nb_store::sync::{OrgInfo, Session};
 
 /// How long an account session lasts.
@@ -86,7 +88,7 @@ pub fn normalize_phone(raw: &str) -> Option<String> {
     (8..=15).contains(&full.len()).then(|| format!("+{full}"))
 }
 
-fn hash_password(password: &str) -> ApiResult<String> {
+pub(crate) fn hash_password(password: &str) -> ApiResult<String> {
     let mut salt = [0u8; 16];
     getrandom::fill(&mut salt).map_err(|e| ApiError::Internal(e.to_string()))?;
     let salt = SaltString::encode_b64(&salt).map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -96,7 +98,7 @@ fn hash_password(password: &str) -> ApiResult<String> {
         .map_err(|e| ApiError::Internal(e.to_string()))
 }
 
-fn password_is(stored: &str, password: &str) -> bool {
+pub(crate) fn password_is(stored: &str, password: &str) -> bool {
     PasswordHash::new(stored)
         .map(|h| {
             argon2::Argon2::default()
@@ -123,7 +125,7 @@ fn recovery_codes() -> ApiResult<Vec<String>> {
         .collect()
 }
 
-fn plain_code(code: &str) -> String {
+pub(crate) fn plain_code(code: &str) -> String {
     code.trim().to_uppercase().replace([' ', '-'], "")
 }
 
@@ -142,7 +144,8 @@ impl Server {
     pub(crate) fn account_of(&self, token: &str) -> ApiResult<Option<AccountRow>> {
         Ok(lock(&self.control)?
             .query_row(
-                "SELECT account_id FROM sessions WHERE token_hash = ?1 AND expires_at > ?2",
+                "SELECT s.account_id FROM sessions s JOIN accounts a ON a.id = s.account_id
+                 WHERE s.token_hash = ?1 AND s.expires_at > ?2 AND a.disabled_at IS NULL",
                 params![hash(token), now_ms()],
                 |r| Ok(AccountRow { id: r.get(0)? }),
             )
@@ -256,21 +259,35 @@ pub(crate) async fn signup(
 
 pub(crate) async fn login(
     State(server): State<Arc<Server>>,
+    axum::Extension(ClientIp(ip)): axum::Extension<ClientIp>,
     axum::Json(req): axum::Json<LoginRequest>,
 ) -> ApiResult<axum::Json<Session>> {
     let phone = normalize_phone(&req.phone).ok_or(ApiError::Unauthorized)?;
     blocking(move || {
         let control = lock(&server.control)?;
-        let row: Option<(String, String, String, i64, Option<i64>)> = control
+        type Row = (String, String, String, i64, Option<i64>, Option<i64>);
+        let row: Option<Row> = control
             .query_row(
-                "SELECT id, name, password_hash, failed, locked_until FROM accounts WHERE phone = ?1",
+                "SELECT id, name, password_hash, failed, locked_until, disabled_at
+                 FROM accounts WHERE phone = ?1",
                 [&phone],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((id, name, stored, failed, locked_until)) = row else {
-            // As long as a wrong password, so a phone's presence is not told.
+        let Some((id, name, stored, failed, locked_until, None)) = row else {
+            // As long as a wrong password, so a phone's presence (or a
+            // stopped account) is not told.
             let _ = hash_password(&req.password);
+            crate::admin::event_on(&control, "account.login_failed", &ip, &phone, "");
             return Err(ApiError::Unauthorized);
         };
         if locked_until.is_some_and(|t| t > now_ms()) {
@@ -281,8 +298,16 @@ pub(crate) async fn login(
             let lock_until = (failed >= TRIES).then(|| now_ms() + LOCK_MS);
             control.execute(
                 "UPDATE accounts SET failed = ?2, locked_until = ?3 WHERE id = ?1",
-                params![id, if lock_until.is_some() { 0 } else { failed }, lock_until],
+                params![
+                    id,
+                    if lock_until.is_some() { 0 } else { failed },
+                    lock_until
+                ],
             )?;
+            crate::admin::event_on(&control, "account.login_failed", &ip, &phone, "");
+            if lock_until.is_some() {
+                crate::admin::event_on(&control, "account.locked", &ip, &phone, "");
+            }
             return Err(ApiError::Unauthorized);
         }
         control.execute(
@@ -302,35 +327,70 @@ pub(crate) async fn login(
 
 pub(crate) async fn recover(
     State(server): State<Arc<Server>>,
+    axum::Extension(ClientIp(ip)): axum::Extension<ClientIp>,
     axum::Json(req): axum::Json<RecoverRequest>,
 ) -> ApiResult<axum::Json<Session>> {
     let phone = normalize_phone(&req.phone).ok_or(ApiError::Unauthorized)?;
     check_password(&req.password)?;
     blocking(move || {
         let control = lock(&server.control)?;
-        let row: Option<(String, String, String, Option<i64>)> = control
+        type Row = (
+            String,
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+        );
+        let row: Option<Row> = control
             .query_row(
-                "SELECT id, name, recovery, locked_until FROM accounts WHERE phone = ?1",
+                "SELECT id, name, recovery, locked_until, reset_hash, reset_until
+                 FROM accounts WHERE phone = ?1 AND disabled_at IS NULL",
                 [&phone],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .optional()?;
-        let (id, name, recovery, locked_until) = row.ok_or(ApiError::Unauthorized)?;
+        let Some((id, name, recovery, locked_until, reset_hash, reset_until)) = row else {
+            crate::admin::event_on(&control, "account.recover_failed", &ip, &phone, "");
+            return Err(ApiError::Unauthorized);
+        };
         if locked_until.is_some_and(|t| t > now_ms()) {
             return Err(ApiError::Conflict("account.locked".into()));
         }
         let mut codes: Vec<String> = serde_json::from_str(&recovery).unwrap_or_default();
         let wanted = hash(&plain_code(&req.code));
-        let Some(at) = codes.iter().position(|c| *c == wanted) else {
+        // A code the platform's support gave (a day, once), or one of the ten.
+        let by_support = reset_hash.as_deref() == Some(wanted.as_str())
+            && reset_until.is_some_and(|t| t > now_ms());
+        let found = codes.iter().position(|c| *c == wanted);
+        if !by_support && found.is_none() {
             control.execute(
                 "UPDATE accounts SET failed = failed + 1,
                      locked_until = CASE WHEN failed + 1 >= ?2 THEN ?3 END
                  WHERE id = ?1",
                 params![id, TRIES, now_ms() + LOCK_MS],
             )?;
+            crate::admin::event_on(&control, "account.recover_failed", &ip, &phone, "");
             return Err(ApiError::Unauthorized);
-        };
-        codes.remove(at);
+        }
+        if let Some(at) = found
+            && !by_support
+        {
+            codes.remove(at);
+        }
+        control.execute(
+            "UPDATE accounts SET reset_hash = NULL, reset_until = NULL WHERE id = ?1",
+            [&id],
+        )?;
         control.execute(
             "UPDATE accounts SET password_hash = ?2, recovery = ?3, failed = 0, locked_until = NULL
              WHERE id = ?1",

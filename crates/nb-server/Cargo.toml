@@ -19,6 +19,12 @@ tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 argon2 = { version = "0.5", features = ["std"] }
 getrandom = "0.3"
+nb-i18n.workspace = true
+hmac = "0.12"
+sha1 = "0.10"
+data-encoding = "2"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+fs4 = "0.13"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -29,6 +29,7 @@
 //! `x-nb-epoch`.
 
 mod accounts;
+pub mod admin;
 mod ws;
 pub use accounts::{
     LoginRequest, NewDevice, OrgInfo, RecoverRequest, Session, SignupRequest, normalize_phone,
@@ -61,6 +62,13 @@ pub enum ApiError {
     Unauthorized,
     BadRequest(String),
     Conflict(String),
+    /// Known, and refused: a stopped shop (`org.suspended`), a plan's
+    /// limit (`plan.devices`), a blocked address, a missing second factor.
+    Forbidden(String),
+    /// The shop's subscription ended (and its grace with it).
+    PaymentRequired(String),
+    NotFound,
+    TooMany,
     Internal(String),
 }
 
@@ -70,7 +78,31 @@ impl IntoResponse for ApiError {
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", String::new()),
             ApiError::BadRequest(d) => (StatusCode::BAD_REQUEST, "bad_request", d),
             ApiError::Conflict(d) => (StatusCode::CONFLICT, "conflict", d),
-            ApiError::Internal(d) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", d),
+            ApiError::Forbidden(c) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({ "error": c, "detail": "" })),
+                )
+                    .into_response();
+            }
+            ApiError::PaymentRequired(c) => {
+                return (
+                    StatusCode::PAYMENT_REQUIRED,
+                    axum::Json(serde_json::json!({ "error": c, "detail": "" })),
+                )
+                    .into_response();
+            }
+            ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found", String::new()),
+            ApiError::TooMany => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many",
+                "try again in a minute".to_owned(),
+            ),
+            // The details stay in the server's log, not in the answer.
+            ApiError::Internal(d) => {
+                eprintln!("internal error: {d}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal", String::new())
+            }
         };
         (
             status,
@@ -108,6 +140,14 @@ pub struct Server {
     /// Per organization: bumped whenever its log grows or starts again, so
     /// devices waiting on `/v1/wait` hear of it at once.
     waves: Mutex<HashMap<String, tokio::sync::watch::Sender<Wave>>>,
+    /// Subscriptions are enforced (a platform selling the service).
+    billing: bool,
+    /// Who may reach the platform's administration (empty: anyone who
+    /// reaches its address, by default this machine only).
+    admin_allow: Vec<admin::Net>,
+    /// Addresses refused everywhere, until when (`None`: until lifted).
+    blocked: Mutex<HashMap<String, Option<i64>>>,
+    started_at: i64,
 }
 
 /// An open organization: `None` once its file was replaced (a reseed), so
@@ -140,6 +180,12 @@ pub struct Options {
     pub open_signup: bool,
     /// The web app's origins (`https://…`) allowed to call from a browser.
     pub allow_origins: Vec<String>,
+    /// Subscriptions are enforced: a new shop gets a trial, a shop whose
+    /// subscription ended (past its grace) stops syncing.
+    pub billing: bool,
+    /// Addresses or networks (`203.0.113.7`, `10.0.0.0/8`) allowed into
+    /// the administration; empty: any that reaches it.
+    pub admin_allow_ips: Vec<String>,
 }
 
 /// What changed last in an organization's log: a counter, and the device
@@ -166,53 +212,23 @@ impl Server {
         let Options {
             open_signup,
             allow_origins,
+            billing,
+            admin_allow_ips,
         } = options;
+        let admin_allow = admin_allow_ips
+            .iter()
+            .map(|n| {
+                n.parse::<admin::Net>()
+                    .map_err(|_| ApiError::BadRequest(format!("not an address or network: {n}")))
+            })
+            .collect::<ApiResult<Vec<_>>>()?;
         if enrollment_key.trim().len() < 12 {
             return Err(ApiError::BadRequest(
                 "the enrollment key needs at least 12 characters".into(),
             ));
         }
-        std::fs::create_dir_all(dir.join("tenants"))
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        let control = Connection::open(dir.join("control.sqlite"))?;
-        control.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             CREATE TABLE IF NOT EXISTS orgs (
-                 id          TEXT PRIMARY KEY,
-                 name        TEXT NOT NULL,
-                 created_at  INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS devices (
-                 id           TEXT PRIMARY KEY,
-                 org_id       TEXT NOT NULL REFERENCES orgs(id),
-                 prefix       TEXT NOT NULL,
-                 name         TEXT NOT NULL,
-                 token_hash   TEXT NOT NULL UNIQUE,
-                 created_at   INTEGER NOT NULL,
-                 last_seen_at INTEGER,
-                 revoked_at   INTEGER,
-                 UNIQUE (org_id, prefix)
-             );
-             CREATE TABLE IF NOT EXISTS invites (
-                 code_hash   TEXT PRIMARY KEY,
-                 org_id      TEXT NOT NULL REFERENCES orgs(id),
-                 made_by     TEXT NOT NULL,
-                 expires_at  INTEGER NOT NULL,
-                 used_at     INTEGER
-             );",
-        )?;
-        accounts::schema(&control)?;
-        let has_epoch: bool = control.query_row(
-            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('orgs') WHERE name = 'epoch')",
-            [],
-            |r| r.get(0),
-        )?;
-        if !has_epoch {
-            control.execute(
-                "ALTER TABLE orgs ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
+        let control = control_db(dir)?;
+        let blocked = admin::load_blocks(&control)?;
         Ok(Arc::new(Self {
             dir: dir.to_path_buf(),
             enrollment_key: enrollment_key.trim().to_owned(),
@@ -222,6 +238,10 @@ impl Server {
             control: Mutex::new(control),
             tenants: Mutex::new(HashMap::new()),
             waves: Mutex::new(HashMap::new()),
+            billing,
+            admin_allow,
+            blocked: Mutex::new(blocked),
+            started_at: now_ms(),
         }))
     }
 
@@ -300,16 +320,10 @@ impl Server {
             if org.parse::<nb_core::OrganizationId>().is_err() {
                 continue;
             }
-            let dir = self.dir.join("backups").join(&org);
-            std::fs::create_dir_all(&dir).map_err(|e| ApiError::Internal(e.to_string()))?;
-            let file = dir.join(format!("{today}.sqlite"));
-            if !file.exists() && self.tenant_path(&org).exists() {
-                let db = self.with_tenant(&org, |store| Ok(store.snapshot()?))?;
-                let part = dir.join(format!("{today}.part"));
-                std::fs::write(&part, db).map_err(|e| ApiError::Internal(e.to_string()))?;
-                std::fs::rename(&part, &file).map_err(|e| ApiError::Internal(e.to_string()))?;
+            if self.backup_org(&org, &today)? {
                 made += 1;
             }
+            let dir = self.backups_dir(&org);
             // The oldest go (names sort by date).
             let mut days: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
                 .map_err(|e| ApiError::Internal(e.to_string()))?
@@ -325,6 +339,30 @@ impl Server {
             }
         }
         Ok(made)
+    }
+
+    /// Where `org`'s copies live (`org` is a UUID: checked by the caller).
+    pub(crate) fn backups_dir(&self, org: &str) -> PathBuf {
+        self.dir.join("backups").join(org)
+    }
+
+    /// A copy of `org` named `name` (`yyyy-mm-dd`, or with the time for one
+    /// made by hand), unless it exists. Whether it made one.
+    pub(crate) fn backup_org(&self, org: &str, name: &str) -> ApiResult<bool> {
+        if org.parse::<nb_core::OrganizationId>().is_err() {
+            return Err(ApiError::NotFound);
+        }
+        let dir = self.backups_dir(org);
+        std::fs::create_dir_all(&dir).map_err(|e| ApiError::Internal(e.to_string()))?;
+        let file = dir.join(format!("{name}.sqlite"));
+        if file.exists() || !self.tenant_path(org).exists() {
+            return Ok(false);
+        }
+        let db = self.with_tenant(org, |store| Ok(store.snapshot()?))?;
+        let part = dir.join(format!("{name}.part"));
+        std::fs::write(&part, db).map_err(|e| ApiError::Internal(e.to_string()))?;
+        std::fs::rename(&part, &file).map_err(|e| ApiError::Internal(e.to_string()))?;
+        Ok(true)
     }
 
     /// Which copy of `org`'s log positions count in.
@@ -359,6 +397,9 @@ impl Server {
         let Some(row) = row else {
             return Ok(None);
         };
+        // A stopped shop, or one whose subscription ended, is refused here
+        // (its devices go on selling, unsynced).
+        self.gate(&control, &row.org)?;
         control.execute(
             "UPDATE devices SET last_seen_at = ?2 WHERE id = ?1",
             params![row.id, now_ms()],
@@ -429,6 +470,55 @@ impl Server {
     }
 }
 
+/// The registry (`control.sqlite`): organizations, devices, accounts, the
+/// platform's administration; made or brought up to date.
+pub(crate) fn control_db(dir: &Path) -> ApiResult<Connection> {
+    std::fs::create_dir_all(dir.join("tenants")).map_err(|e| ApiError::Internal(e.to_string()))?;
+    let control = Connection::open(dir.join("control.sqlite"))?;
+    // The command line (`nb-server admin …`) may write while it runs.
+    control.busy_timeout(std::time::Duration::from_secs(5))?;
+    control.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         CREATE TABLE IF NOT EXISTS orgs (
+             id          TEXT PRIMARY KEY,
+             name        TEXT NOT NULL,
+             created_at  INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS devices (
+             id           TEXT PRIMARY KEY,
+             org_id       TEXT NOT NULL REFERENCES orgs(id),
+             prefix       TEXT NOT NULL,
+             name         TEXT NOT NULL,
+             token_hash   TEXT NOT NULL UNIQUE,
+             created_at   INTEGER NOT NULL,
+             last_seen_at INTEGER,
+             revoked_at   INTEGER,
+             UNIQUE (org_id, prefix)
+         );
+         CREATE TABLE IF NOT EXISTS invites (
+             code_hash   TEXT PRIMARY KEY,
+             org_id      TEXT NOT NULL REFERENCES orgs(id),
+             made_by     TEXT NOT NULL,
+             expires_at  INTEGER NOT NULL,
+             used_at     INTEGER
+         );",
+    )?;
+    accounts::schema(&control)?;
+    let has_epoch: bool = control.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('orgs') WHERE name = 'epoch')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_epoch {
+        control.execute(
+            "ALTER TABLE orgs ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    admin::schema(&control)?;
+    Ok(control)
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -489,8 +579,31 @@ pub fn router(server: Arc<Server>) -> Router {
         .merge(guarded)
         .layer(DefaultBodyLimit::max(MAX_SMALL))
         .layer(axum::middleware::map_response(secure_headers))
+        .layer(axum::middleware::from_fn_with_state(
+            server.clone(),
+            doorman,
+        ))
         .layer(cors_layer(&server.allow_origins))
         .with_state(server)
+}
+
+/// The caller's address, as the handlers see it.
+#[derive(Debug, Clone)]
+pub(crate) struct ClientIp(pub String);
+
+/// Every request: a blocked address goes no further; the others carry
+/// their address to the handlers (for the security log).
+async fn doorman(
+    State(server): State<Arc<Server>>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let ip = client_address(&req);
+    if server.is_blocked(&ip) {
+        return ApiError::Forbidden("blocked".into()).into_response();
+    }
+    req.extensions_mut().insert(ClientIp(ip));
+    next.run(req).await
 }
 
 /// Answers are private data: never cached, never sniffed, no referrer.
@@ -546,31 +659,36 @@ async fn limited(
     next: axum::middleware::Next,
 ) -> Response {
     let who = client_address(&req);
-    let now = now_ms() / 60_000;
-    let over = match server.knocks.lock() {
-        Ok(mut map) => {
-            if map.len() > 100_000 {
-                map.retain(|_, (minute, _)| *minute == now);
-            }
-            let e = map.entry(who).or_insert((now, 0));
-            if e.0 != now {
-                *e = (now, 0);
-            }
-            e.1 += 1;
-            e.1 > PER_MINUTE
-        }
-        Err(_) => false,
-    };
-    if over {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            axum::Json(
-                serde_json::json!({ "error": "too_many", "detail": "try again in a minute" }),
-            ),
-        )
-            .into_response();
+    if server.knock(&who, PER_MINUTE) {
+        return ApiError::TooMany.into_response();
     }
     next.run(req).await
+}
+
+impl Server {
+    /// One more request from `key` this minute: whether it is over
+    /// `per_minute` (the first time over is written in the security log).
+    pub(crate) fn knock(&self, key: &str, per_minute: u32) -> bool {
+        let now = now_ms() / 60_000;
+        let count = match self.knocks.lock() {
+            Ok(mut map) => {
+                if map.len() > 100_000 {
+                    map.retain(|_, (minute, _)| *minute == now);
+                }
+                let e = map.entry(key.to_owned()).or_insert((now, 0));
+                if e.0 != now {
+                    *e = (now, 0);
+                }
+                e.1 += 1;
+                e.1
+            }
+            Err(_) => 0,
+        };
+        if count == per_minute + 1 {
+            self.event("rate_limited", key, "", "");
+        }
+        count > per_minute
+    }
 }
 
 /// The caller's address: the socket's, or behind a reverse proxy the
@@ -606,6 +724,7 @@ async fn blocking<T: Send + 'static>(
 
 async fn link(
     State(server): State<Arc<Server>>,
+    axum::Extension(ClientIp(ip)): axum::Extension<ClientIp>,
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<axum::Json<Linked>> {
@@ -622,8 +741,13 @@ async fn link(
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| "device".to_owned());
     blocking(move || {
-        nb_store::store::check_snapshot(&body)
-            .map_err(|e| ApiError::BadRequest(format!("not a database of this app: {e}")))?;
+        if let Err(e) = nb_store::store::check_snapshot(&body) {
+            // A crafted file, most likely: told in the security log.
+            server.event("db.refused", &ip, "", &e.to_string());
+            return Err(ApiError::BadRequest(format!(
+                "not a database of this app: {e}"
+            )));
+        }
         // An organization links once; its other devices join it (M2).
         let probe = {
             let tmp = server.dir.join(format!("probe-{}.sqlite", new_token()?));
@@ -936,6 +1060,8 @@ async fn join(
                 )
                 .optional()?;
             let org = org.ok_or(ApiError::Unauthorized)?;
+            server.gate(&control, &org)?;
+            server.room_for_device(&control, &org)?;
             control.execute(
                 "UPDATE invites SET used_at = ?2 WHERE code_hash = ?1",
                 params![hash(&code), now_ms()],
@@ -960,6 +1086,8 @@ impl Server {
             let control = lock(&self.control)?;
             let org_name: String =
                 control.query_row("SELECT name FROM orgs WHERE id = ?1", [org], |r| r.get(0))?;
+            self.gate(&control, org)?;
+            self.room_for_device(&control, org)?;
             let prefix = free_prefix(&control, org)?;
             let proposed = proposed
                 .and_then(|d| d.parse::<nb_core::DeviceId>().ok())

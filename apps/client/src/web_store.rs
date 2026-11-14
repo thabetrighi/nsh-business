@@ -11,6 +11,21 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{IdbDatabase, IdbOpenDbRequest, IdbRequest, IdbTransactionMode};
 
 const DB: &str = "nsh-business";
+
+thread_local! {
+    static STOPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// No more saving (the browser is being forgotten): a save after the
+/// clearing would bring the shop back.
+pub fn stop_saving() {
+    STOPPED.with(|s| s.set(true));
+}
+
+/// Whether saving stopped.
+pub fn stopped() -> bool {
+    STOPPED.with(std::cell::Cell::get)
+}
 const STORE: &str = "files";
 const KEY: &str = "shop";
 
@@ -85,6 +100,9 @@ pub async fn load() -> Result<Option<Vec<u8>>, String> {
 
 /// Saves the database (replacing the saved one).
 pub async fn save(bytes: &[u8]) -> Result<(), String> {
+    if stopped() {
+        return Ok(());
+    }
     let db = database().await?;
     let tx = db
         .transaction_with_str_and_mode(STORE, IdbTransactionMode::Readwrite)
@@ -99,7 +117,6 @@ pub async fn save(bytes: &[u8]) -> Result<(), String> {
 }
 
 /// Forgets the saved database (unlinking a shared computer, for example).
-#[allow(dead_code)]
 pub async fn clear() -> Result<(), String> {
     let db = database().await?;
     let tx = db
