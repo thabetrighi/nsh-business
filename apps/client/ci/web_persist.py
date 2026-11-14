@@ -17,8 +17,11 @@ with sync_playwright() as p:
     page.goto(url)
     page.wait_for_timeout(12000)
     page.screenshot(path=f"{out}/persist-1-first-visit.png")
-    # "التجربة بمتجر عرض" on the first screen.
-    page.mouse.click(680, 522)
+    # "خيارات أخرى" on the first screen, then "جرّب المتجر التجريبي".
+    page.mouse.click(680, 351)
+    page.wait_for_timeout(3000)
+    page.screenshot(path=f"{out}/persist-1b-more.png")
+    page.mouse.click(680, 265)
     page.wait_for_timeout(15000)
     page.screenshot(path=f"{out}/persist-2-demo.png")
     page.reload()
