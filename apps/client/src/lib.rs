@@ -173,14 +173,34 @@ pub fn App() -> impl IntoElement {
 }
 
 /// The browser keeps the shop in IndexedDB: loaded before the shop opens,
-/// saved a few seconds after it changes.
+/// saved a few seconds after it changes. The shop opens anyway if the
+/// browser's storage does not answer within 3 seconds.
 #[cfg(target_arch = "wasm32")]
 fn web_open(st: state::AppState) {
+    use std::cell::Cell;
+    use std::rc::Rc;
     st.root.run(|| {
+        // Asking to be kept is a hint: never waited for (it may never answer).
+        let ask = spawn(web_store::keep());
+        drop(ask); // runs to completion under the root
+        let opened = Rc::new(Cell::new(false));
+        let open_once = {
+            let opened = opened.clone();
+            move || {
+                if !opened.replace(true) {
+                    st.connect();
+                }
+            }
+        };
+        let late = {
+            let open_once = open_once.clone();
+            set_timeout(std::time::Duration::from_secs(3), move || open_once())
+        };
+        drop(late); // fires once, under the root
+        let was = opened.clone();
         let task = spawn(async move {
-            web_store::keep().await;
             match web_store::load().await {
-                Ok(Some(bytes)) => {
+                Ok(Some(bytes)) if !was.get() => {
                     if let Err(e) = st.db().adopt_saved(bytes).await {
                         log::warn!(
                             "the copy kept in this browser could not open: {}",
@@ -188,14 +208,22 @@ fn web_open(st: state::AppState) {
                         );
                     }
                 }
+                Ok(Some(_)) => log::warn!(
+                    "browser storage answered late: the kept copy waits for the next visit"
+                ),
                 Ok(None) => {}
                 Err(e) => log::warn!("browser storage: {e}"),
             }
-            st.connect();
+            open_once();
         });
         drop(task); // runs to completion under the root
-        let saved = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let saved = Rc::new(Cell::new(0u64));
         let every = set_interval(std::time::Duration::from_secs(3), move || {
+            // Not before the shop opened: an empty start must not replace a
+            // copy still being read.
+            if !opened.get() {
+                return;
+            }
             let saved = saved.clone();
             let task = spawn(async move {
                 if let Ok(Some((n, bytes))) = st.db().copy_if_changed(saved.get()).await {
