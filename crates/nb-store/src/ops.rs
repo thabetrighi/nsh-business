@@ -22,6 +22,17 @@ pub enum Call {
     Opaque {
         name: String,
     },
+    AccessCreateUserHashed {
+        input: crate::usecases::access::NewUser,
+    },
+    AccessUpdateUser {
+        input: crate::usecases::access::UserUpdate,
+    },
+    AccessSetSecretHashed {
+        user: nb_domain::UserId,
+        which: String,
+        hash: Option<String>,
+    },
     AccessSaveRole {
         input: crate::usecases::access::RoleInput,
     },
@@ -456,6 +467,15 @@ pub fn replay(store: &mut Store, meta: OpMeta, call: Call) -> Result<serde_json:
         Call::Opaque { name } => {
             return Err(crate::Error::Corrupt(format!("opaque operation {name}")));
         }
+        Call::AccessCreateUserHashed { input } => serde_json::to_value(
+            crate::usecases::access::create_user_hashed(store, meta, input)?,
+        )?,
+        Call::AccessUpdateUser { input } => {
+            serde_json::to_value(crate::usecases::access::update_user(store, meta, input)?)?
+        }
+        Call::AccessSetSecretHashed { user, which, hash } => serde_json::to_value(
+            crate::usecases::access::set_secret_hashed(store, meta, user, which, hash)?,
+        )?,
         Call::AccessSaveRole { input } => {
             serde_json::to_value(crate::usecases::access::save_role(store, meta, input)?)?
         }

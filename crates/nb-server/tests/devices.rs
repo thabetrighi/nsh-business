@@ -201,7 +201,19 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
         &reg,
         10_000,
     )?;
-    let (_, bytes) = call(&app, "POST", "/v1/link", KEY, a.snapshot()?).await?;
+    // The owner's account links the shop (a repair later needs it).
+    let (_, bytes) = call(
+        &app,
+        "POST",
+        "/v1/signup",
+        "",
+        serde_json::json!({"phone": "0550123456", "password": "kesra-2026", "name": "Ahmed", "key": KEY})
+            .to_string()
+            .into_bytes(),
+    )
+    .await?;
+    let owner: nb_server::Session = serde_json::from_slice(&bytes)?;
+    let (_, bytes) = call(&app, "POST", "/v1/link", &owner.token, a.snapshot()?).await?;
     let linked: Linked = serde_json::from_slice(&bytes)?;
     a.set_sync_link("http://server", &linked.token)?;
 
@@ -417,19 +429,8 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
     pull(&app, &joined.token, &mut b).await?;
     assert_eq!(a.fingerprint()?, b.fingerprint()?);
 
-    // A PIN on B: its secret does not travel as an operation, so B sends
-    // its database (a new epoch) — but only once it has A's operations.
-    save_customer(
-        &mut a,
-        OpMeta::new("c", Some(setup.org), Some(setup.owner)),
-        CustomerInput {
-            kind: "person".into(),
-            name: "Avant le PIN".into(),
-            status: "active".into(),
-            ..Default::default()
-        },
-    )?;
-    push(&app, &linked.token, &mut a).await?;
+    // A cashier with a PIN made on B travels as an operation (its PIN as
+    // a hash, never as typed): she signs in on A too.
     create_user(
         &mut b,
         OpMeta::new("user", Some(setup.org), Some(setup.owner)),
@@ -443,25 +444,63 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
         },
     )?;
     let r = push(&app, &joined.token, &mut b).await?;
-    assert_eq!(r.failed.map(|f| f.code).as_deref(), Some("opaque"));
-    let reseed = |at: Position, db: Vec<u8>| {
+    assert!(r.failed.is_none(), "{:?}", r.failed);
+    let logged = serde_json::to_string(&b.operation_log()?)?;
+    assert!(!logged.contains("4826"), "a PIN is never logged as typed");
+    pull(&app, &linked.token, &mut a).await?;
+    assert_eq!(a.fingerprint()?, b.fingerprint()?);
+    let yacine = nb_store::usecases::access::list_users(&a)?
+        .into_iter()
+        .find(|u| u.name == "Yacine")
+        .ok_or("Yacine on A")?;
+    let id = yacine.id.parse().map_err(|_| "user id")?;
+    assert!(matches!(
+        nb_store::usecases::access::sign_in_pin(&mut a, id, "4826")?,
+        nb_store::usecases::access::SignInOutcome::SignedIn(_)
+    ));
+
+    // A repair: the whole database sent again (a broken copy on the
+    // server). Only with the owner's account, and only from a device that
+    // has everything the others sent.
+    save_customer(
+        &mut a,
+        OpMeta::new("c", Some(setup.org), Some(setup.owner)),
+        CustomerInput {
+            kind: "person".into(),
+            name: "Avant la réparation".into(),
+            status: "active".into(),
+            ..Default::default()
+        },
+    )?;
+    push(&app, &linked.token, &mut a).await?;
+    let reseed = |at: Position, db: Vec<u8>, account: Option<String>| {
         let app = app.clone();
         let token = joined.token.clone();
         async move {
-            let req = Request::builder()
+            let mut req = Request::builder()
                 .method("POST")
                 .uri(format!("/v1/reseed?after={}&epoch={}", at.cursor, at.epoch))
                 .header("authorization", format!("Bearer {token}"));
+            if let Some(a) = account {
+                req = req.header("x-account", a);
+            }
             let res = app.oneshot(req.body(Body::from(db))?).await?;
             let status = res.status();
             let bytes = res.into_body().collect().await?.to_bytes().to_vec();
             Res::Ok((status, bytes))
         }
     };
-    let (status, _) = reseed(b.pull_position()?, b.snapshot()?).await?;
+    let (status, _) = reseed(b.pull_position()?, b.snapshot()?, None).await?;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a device alone cannot replace the shop"
+    );
+    let (status, _) = reseed(b.pull_position()?, b.snapshot()?, Some(owner.token.clone())).await?;
     assert_eq!(status, StatusCode::CONFLICT, "B has not A's last operation");
     pull(&app, &joined.token, &mut b).await?;
-    let (status, bytes) = reseed(b.pull_position()?, b.snapshot()?).await?;
+    let (status, bytes) =
+        reseed(b.pull_position()?, b.snapshot()?, Some(owner.token.clone())).await?;
     assert_eq!(
         status,
         StatusCode::OK,

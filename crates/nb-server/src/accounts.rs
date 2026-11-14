@@ -159,7 +159,7 @@ impl Server {
         Ok(token)
     }
 
-    fn member(&self, account: &str, org: &str) -> ApiResult<bool> {
+    pub(crate) fn member(&self, account: &str, org: &str) -> ApiResult<bool> {
         Ok(lock(&self.control)?.query_row(
             "SELECT EXISTS (SELECT 1 FROM memberships WHERE account_id = ?1 AND org_id = ?2)",
             params![account, org],
@@ -197,6 +197,11 @@ pub struct NewDevice {
     pub name: String,
     #[serde(default)]
     pub device_id: Option<String>,
+    /// This (reinstalled or new) device takes the place of that device of
+    /// the shop: its letter and identity, and its till. The old one's token
+    /// stops at once (what it never sent is lost with it).
+    #[serde(default)]
+    pub replaces: Option<String>,
 }
 
 pub(crate) async fn signup(
@@ -383,7 +388,25 @@ pub(crate) async fn add_device(
         // Another account's shop is not even said to exist.
         return Err(ApiError::Unauthorized);
     }
-    blocking(move || server.new_device(&org, &req.name, req.device_id.as_deref())).await
+    match req.replaces {
+        Some(old) => blocking(move || server.replace_device(&org, &old, &req.name)).await,
+        None => {
+            blocking(move || server.new_device(&org, &req.name, req.device_id.as_deref())).await
+        }
+    }
+}
+
+/// The account's shop's devices (to pick the one a reinstall replaces).
+pub(crate) async fn org_devices(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    Path(org): Path<String>,
+) -> ApiResult<axum::Json<Vec<crate::DeviceInfo>>> {
+    let account = server.account(&headers)?;
+    if !server.member(&account.id, &org)? {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(axum::Json(server.devices_of(&org, "")?))
 }
 
 /// Makes `org` the account's (it linked it).

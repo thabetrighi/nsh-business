@@ -29,6 +29,7 @@
 //! `x-nb-epoch`.
 
 mod accounts;
+mod ws;
 pub use accounts::{
     LoginRequest, NewDevice, OrgInfo, RecoverRequest, Session, SignupRequest, normalize_phone,
 };
@@ -101,9 +102,12 @@ pub struct Server {
     control: Mutex<Connection>,
     tenants: Mutex<HashMap<String, Tenant>>,
     open_signup: bool,
+    allow_origins: Vec<String>,
+    /// Requests per address at the guarded doors: (minute, count).
+    knocks: Mutex<HashMap<String, (i64, u32)>>,
     /// Per organization: bumped whenever its log grows or starts again, so
     /// devices waiting on `/v1/wait` hear of it at once.
-    waves: Mutex<HashMap<String, tokio::sync::watch::Sender<u64>>>,
+    waves: Mutex<HashMap<String, tokio::sync::watch::Sender<Wave>>>,
 }
 
 /// An open organization: `None` once its file was replaced (a reseed), so
@@ -128,9 +132,23 @@ fn lock<T>(m: &Mutex<T>) -> ApiResult<std::sync::MutexGuard<'_, T>> {
         .map_err(|_| ApiError::Internal("lock poisoned".into()))
 }
 
+/// How a server runs beyond its folder and key.
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    /// Anyone may make an account (a public server); otherwise making one
+    /// asks for the server's key.
+    pub open_signup: bool,
+    /// The web app's origins (`https://…`) allowed to call from a browser.
+    pub allow_origins: Vec<String>,
+}
+
+/// What changed last in an organization's log: a counter, and the device
+/// that sent it (it needs no notice of its own work).
+type Wave = (u64, String);
+
 /// A registered device, as its token says.
 #[derive(Debug, Clone)]
-struct DeviceRow {
+pub(crate) struct DeviceRow {
     id: String,
     org: String,
     prefix: String,
@@ -140,12 +158,15 @@ impl Server {
     /// Opens (or creates) the server's data in `dir`. `enrollment_key` is
     /// what a device shows to link a new organization.
     pub fn open(dir: &Path, enrollment_key: &str) -> ApiResult<Arc<Self>> {
-        Self::open_with(dir, enrollment_key, false)
+        Self::open_with(dir, enrollment_key, Options::default())
     }
 
-    /// As [`Server::open`]; `open_signup`: anyone may make an account (a
-    /// public server). Otherwise making one asks for the server's key.
-    pub fn open_with(dir: &Path, enrollment_key: &str, open_signup: bool) -> ApiResult<Arc<Self>> {
+    /// As [`Server::open`], with [`Options`].
+    pub fn open_with(dir: &Path, enrollment_key: &str, options: Options) -> ApiResult<Arc<Self>> {
+        let Options {
+            open_signup,
+            allow_origins,
+        } = options;
         if enrollment_key.trim().len() < 12 {
             return Err(ApiError::BadRequest(
                 "the enrollment key needs at least 12 characters".into(),
@@ -196,6 +217,8 @@ impl Server {
             dir: dir.to_path_buf(),
             enrollment_key: enrollment_key.trim().to_owned(),
             open_signup,
+            allow_origins,
+            knocks: Mutex::new(HashMap::new()),
             control: Mutex::new(control),
             tenants: Mutex::new(HashMap::new()),
             waves: Mutex::new(HashMap::new()),
@@ -203,7 +226,12 @@ impl Server {
     }
 
     fn tenant_path(&self, org: &str) -> PathBuf {
-        self.dir.join("tenants").join(format!("{org}.sqlite"))
+        // Ids are UUIDs; anything else never becomes a path (traversal).
+        let safe = org
+            .parse::<nb_core::OrganizationId>()
+            .map(|o| o.to_string())
+            .unwrap_or_else(|_| "invalid".into());
+        self.dir.join("tenants").join(format!("{safe}.sqlite"))
     }
 
     fn tenant(&self, org: &str) -> ApiResult<Tenant> {
@@ -234,20 +262,23 @@ impl Server {
         Err(ApiError::Internal("organization busy".into()))
     }
 
-    fn wave(&self, org: &str) -> ApiResult<tokio::sync::watch::Receiver<u64>> {
+    fn wave(&self, org: &str) -> ApiResult<tokio::sync::watch::Receiver<Wave>> {
         let mut waves = lock(&self.waves)?;
         Ok(waves
             .entry(org.to_owned())
-            .or_insert_with(|| tokio::sync::watch::channel(0).0)
+            .or_insert_with(|| tokio::sync::watch::channel((0, String::new())).0)
             .subscribe())
     }
 
     /// Tells the devices waiting on `org` that something new is there.
-    fn ripple(&self, org: &str) {
+    fn ripple(&self, org: &str, from: &str) {
         if let Ok(waves) = self.waves.lock()
             && let Some(w) = waves.get(org)
         {
-            w.send_modify(|n| *n = n.wrapping_add(1));
+            w.send_modify(|(n, who)| {
+                *n = n.wrapping_add(1);
+                from.clone_into(who);
+            });
         }
     }
 
@@ -266,6 +297,9 @@ impl Server {
         let today = format!("{y:04}-{m:02}-{d:02}");
         let mut made = 0;
         for org in orgs {
+            if org.parse::<nb_core::OrganizationId>().is_err() {
+                continue;
+            }
             let dir = self.dir.join("backups").join(&org);
             std::fs::create_dir_all(&dir).map_err(|e| ApiError::Internal(e.to_string()))?;
             let file = dir.join(format!("{today}.sqlite"));
@@ -301,11 +335,18 @@ impl Server {
 
     fn device(&self, headers: &HeaderMap) -> ApiResult<DeviceRow> {
         let token = bearer(headers).ok_or(ApiError::Unauthorized)?;
+        self.device_of(&token)?
+            .map(|(d, _)| d)
+            .ok_or(ApiError::Unauthorized)
+    }
+
+    /// The device a token belongs to (not stopped), and the token.
+    pub(crate) fn device_of(&self, token: &str) -> ApiResult<Option<(DeviceRow, String)>> {
         let control = lock(&self.control)?;
         let row = control
             .query_row(
                 "SELECT id, org_id, prefix FROM devices WHERE token_hash = ?1 AND revoked_at IS NULL",
-                [hash(&token)],
+                [hash(token)],
                 |r| {
                     Ok(DeviceRow {
                         id: r.get(0)?,
@@ -314,13 +355,15 @@ impl Server {
                     })
                 },
             )
-            .optional()?
-            .ok_or(ApiError::Unauthorized)?;
+            .optional()?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
         control.execute(
             "UPDATE devices SET last_seen_at = ?2 WHERE id = ?1",
             params![row.id, now_ms()],
         )?;
-        Ok(row)
+        Ok(Some((row, token.to_owned())))
     }
 
     /// Checks a database a device sent and puts it in place as `org`'s copy
@@ -331,6 +374,10 @@ impl Server {
         db: &[u8],
         expect_org: Option<&str>,
     ) -> ApiResult<(String, String, String, String)> {
+        // Before anything of it runs: a sound file of this app's exact
+        // schema (no added trigger or view), not a newer one.
+        nb_store::store::check_snapshot(db)
+            .map_err(|e| ApiError::BadRequest(format!("not a database of this app: {e}")))?;
         let tmp = self.dir.join(format!("incoming-{}.sqlite", new_token()?));
         std::fs::write(&tmp, db).map_err(|e| ApiError::Internal(e.to_string()))?;
         let checked = (|| -> ApiResult<(String, String, String, String)> {
@@ -398,27 +445,150 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
 }
 
 /// The routes.
+/// Largest operation batch a device may send at once.
+pub const MAX_PUSH: usize = 32 << 20;
+/// Largest body of every other request (sign-in, codes…).
+pub const MAX_SMALL: usize = 64 << 10;
+/// Most operations in one push.
+pub const MAX_OPS: usize = 1_000;
+
 pub fn router(server: Arc<Server>) -> Router {
-    Router::new()
-        .route("/v1/health", get(health))
-        .route("/v1/link", post(link))
-        .route("/v1/push", post(push))
-        .route("/v1/state", get(state))
-        .route("/v1/snapshot", get(snapshot))
-        .route("/v1/reseed", post(reseed))
-        .route("/v1/invite", post(invite))
-        .route("/v1/join", post(join))
-        .route("/v1/pull", get(pull))
-        .route("/v1/wait", get(wait))
+    let big = DefaultBodyLimit::max(MAX_DB);
+    // Who may knock at the doors that take a password or a code, per
+    // address and minute: guessing stays slow.
+    let guarded = Router::new()
         .route("/v1/signup", post(accounts::signup))
         .route("/v1/login", post(accounts::login))
         .route("/v1/recover", post(accounts::recover))
+        .route("/v1/join", post(join))
+        .route_layer(axum::middleware::from_fn_with_state(
+            server.clone(),
+            limited,
+        ));
+    Router::new()
+        .route("/v1/health", get(health))
+        .route("/v1/link", post(link).layer(big))
+        .route(
+            "/v1/push",
+            post(push).layer(DefaultBodyLimit::max(MAX_PUSH)),
+        )
+        .route("/v1/state", get(state))
+        .route("/v1/snapshot", get(snapshot))
+        .route("/v1/reseed", post(reseed).layer(big))
+        .route("/v1/invite", post(invite))
+        .route("/v1/pull", get(pull))
+        .route("/v1/wait", get(wait))
+        .route("/v1/ws", get(ws::upgrade))
         .route("/v1/orgs", get(accounts::orgs))
-        .route("/v1/orgs/{id}/devices", post(accounts::add_device))
+        .route(
+            "/v1/orgs/{id}/devices",
+            post(accounts::add_device).get(accounts::org_devices),
+        )
         .route("/v1/devices", get(devices))
         .route("/v1/devices/{id}/revoke", post(revoke))
-        .layer(DefaultBodyLimit::max(MAX_DB))
+        .merge(guarded)
+        .layer(DefaultBodyLimit::max(MAX_SMALL))
+        .layer(axum::middleware::map_response(secure_headers))
+        .layer(cors_layer(&server.allow_origins))
         .with_state(server)
+}
+
+/// Answers are private data: never cached, never sniffed, no referrer.
+async fn secure_headers(mut res: Response) -> Response {
+    let h = res.headers_mut();
+    for (k, v) in [
+        ("cache-control", "no-store"),
+        ("x-content-type-options", "nosniff"),
+        ("referrer-policy", "no-referrer"),
+        ("x-frame-options", "DENY"),
+    ] {
+        if let Ok(v) = axum::http::HeaderValue::from_str(v) {
+            h.insert(k, v);
+        }
+    }
+    res
+}
+
+/// The web app on another address may call the server only from the
+/// origins in [`Options::allow_origins`] (`https://…`); none by default.
+/// Tokens travel in headers, never cookies, so a page elsewhere cannot act
+/// for a signed-in device.
+fn cors_layer(allowed: &[String]) -> tower_http::cors::CorsLayer {
+    use axum::http::{HeaderName, HeaderValue, Method};
+    let origins: Vec<HeaderValue> = allowed
+        .iter()
+        .map(|o| o.trim())
+        .filter(|o| o.starts_with("https://") || o.starts_with("http://localhost"))
+        .filter_map(|o| HeaderValue::from_str(o).ok())
+        .collect();
+    tower_http::cors::CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+            HeaderName::from_static("x-device-name"),
+            HeaderName::from_static("x-account"),
+        ])
+        .expose_headers([
+            HeaderName::from_static(CURSOR_HEADER),
+            HeaderName::from_static(EPOCH_HEADER),
+        ])
+        .max_age(std::time::Duration::from_secs(3600))
+}
+
+/// Requests per address and minute at the guarded doors.
+const PER_MINUTE: u32 = 20;
+
+async fn limited(
+    State(server): State<Arc<Server>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let who = client_address(&req);
+    let now = now_ms() / 60_000;
+    let over = match server.knocks.lock() {
+        Ok(mut map) => {
+            if map.len() > 100_000 {
+                map.retain(|_, (minute, _)| *minute == now);
+            }
+            let e = map.entry(who).or_insert((now, 0));
+            if e.0 != now {
+                *e = (now, 0);
+            }
+            e.1 += 1;
+            e.1 > PER_MINUTE
+        }
+        Err(_) => false,
+    };
+    if over {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(
+                serde_json::json!({ "error": "too_many", "detail": "try again in a minute" }),
+            ),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+/// The caller's address: the socket's, or behind a reverse proxy the
+/// proxy's last `X-Forwarded-For` entry (only with
+/// `NB_SERVER_TRUST_PROXY=1`: otherwise anyone could pick their own).
+fn client_address(req: &axum::extract::Request) -> String {
+    if std::env::var("NB_SERVER_TRUST_PROXY").is_ok_and(|v| v == "1")
+        && let Some(last) = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.rsplit(',').next())
+    {
+        return last.trim().to_owned();
+    }
+    req.extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map_or_else(|| "local".to_owned(), |c| c.0.ip().to_string())
 }
 
 async fn health() -> impl IntoResponse {
@@ -452,6 +622,8 @@ async fn link(
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| "device".to_owned());
     blocking(move || {
+        nb_store::store::check_snapshot(&body)
+            .map_err(|e| ApiError::BadRequest(format!("not a database of this app: {e}")))?;
         // An organization links once; its other devices join it (M2).
         let probe = {
             let tmp = server.dir.join(format!("probe-{}.sqlite", new_token()?));
@@ -507,13 +679,14 @@ async fn push(
 ) -> ApiResult<axum::Json<PushResult>> {
     let device = server.device(&headers)?;
     let org = device.org.clone();
+    let from = device.id.clone();
     let s = server.clone();
     let r = blocking(move || {
         s.with_tenant(&device.org.clone(), |store| push_into(store, &device, req))
     })
     .await?;
     if !r.accepted.is_empty() {
-        server.ripple(&org);
+        server.ripple(&org, &from);
     }
     Ok(r)
 }
@@ -531,6 +704,11 @@ fn push_into(
                 .map_err(|_| ApiError::Internal("device id".into()))?,
             prefix: device.prefix.clone(),
         };
+        if req.ops.len() > MAX_OPS {
+            return Err(ApiError::BadRequest(format!(
+                "at most {MAX_OPS} operations at once"
+            )));
+        }
         let mut accepted = Vec::new();
         let mut failed = None;
         for mut op in req.ops {
@@ -626,6 +804,18 @@ async fn reseed(
     body: Bytes,
 ) -> ApiResult<axum::Json<StateInfo>> {
     let device = server.device(&headers)?;
+    // Replacing a shop's whole database is a repair: it takes a person of
+    // that shop (an account session in `x-account`), not a device alone —
+    // a stolen or rogue device cannot wipe the shop (security review).
+    let account = headers
+        .get("x-account")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .and_then(|t| server.account_of(t).ok().flatten())
+        .ok_or(ApiError::Unauthorized)?;
+    if !server.member(&account.id, &device.org)? {
+        return Err(ApiError::Unauthorized);
+    }
     blocking(move || {
         let epoch = server.epoch(&device.org)?;
         {
@@ -664,7 +854,7 @@ async fn reseed(
             "UPDATE orgs SET epoch = ?2 WHERE id = ?1",
             params![device.org, epoch],
         )?;
-        server.ripple(&device.org);
+        server.ripple(&device.org, &device.id);
         server.with_tenant(&device.org, |store| {
             Ok(axum::Json(state_of(store, &device.org, epoch)?))
         })
@@ -876,24 +1066,77 @@ async fn devices(
     headers: HeaderMap,
 ) -> ApiResult<axum::Json<Vec<DeviceInfo>>> {
     let me = server.device(&headers)?;
-    let control = lock(&server.control)?;
-    let mut st = control.prepare(
-        "SELECT id, prefix, name, created_at, last_seen_at, revoked_at FROM devices
-         WHERE org_id = ?1 ORDER BY created_at, prefix",
-    )?;
-    let rows = st.query_map([&me.org], |r| {
-        let id: String = r.get(0)?;
-        Ok(DeviceInfo {
-            this: id == me.id,
-            id,
-            prefix: r.get(1)?,
-            name: r.get(2)?,
-            created_at: r.get(3)?,
-            last_seen_at: r.get(4)?,
-            revoked_at: r.get(5)?,
-        })
-    })?;
-    Ok(axum::Json(rows.collect::<Result<_, _>>()?))
+    Ok(axum::Json(server.devices_of(&me.org, &me.id)?))
+}
+
+impl Server {
+    /// `org`'s devices; `me` is marked as the one asking.
+    pub(crate) fn devices_of(&self, org: &str, me: &str) -> ApiResult<Vec<DeviceInfo>> {
+        let control = lock(&self.control)?;
+        let mut st = control.prepare(
+            "SELECT id, prefix, name, created_at, last_seen_at, revoked_at FROM devices
+             WHERE org_id = ?1 ORDER BY created_at, prefix",
+        )?;
+        let rows = st.query_map([org], |r| {
+            let id: String = r.get(0)?;
+            Ok(DeviceInfo {
+                this: id == me,
+                id,
+                prefix: r.get(1)?,
+                name: r.get(2)?,
+                created_at: r.get(3)?,
+                last_seen_at: r.get(4)?,
+                revoked_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// A reinstalled device takes `old`'s place: same id and letter (its
+    /// numbers go on after the last one the server has), a new token, the
+    /// old token stopped.
+    pub(crate) fn replace_device(
+        &self,
+        org: &str,
+        old: &str,
+        name: &str,
+    ) -> ApiResult<axum::Json<Joined>> {
+        let token = new_token()?;
+        let (org_name, prefix) = {
+            let control = lock(&self.control)?;
+            let prefix: Option<String> = control
+                .query_row(
+                    "SELECT prefix FROM devices WHERE id = ?1 AND org_id = ?2",
+                    params![old, org],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let prefix = prefix.ok_or_else(|| ApiError::BadRequest("no such device".into()))?;
+            control.execute(
+                "UPDATE devices SET token_hash = ?3, name = ?4, revoked_at = NULL, last_seen_at = ?5
+                 WHERE id = ?1 AND org_id = ?2",
+                params![
+                    old,
+                    org,
+                    hash(&token),
+                    if name.trim().is_empty() { "device" } else { name.trim() },
+                    now_ms()
+                ],
+            )?;
+            let org_name: String =
+                control.query_row("SELECT name FROM orgs WHERE id = ?1", [org], |r| r.get(0))?;
+            (org_name, prefix)
+        };
+        let cursor = self.with_tenant(org, |store| Ok(store.log_end()?))?;
+        Ok(axum::Json(Joined {
+            org_id: org.to_owned(),
+            org_name,
+            device_id: old.to_owned(),
+            prefix,
+            token,
+            cursor,
+        }))
+    }
 }
 
 /// A lost or replaced device stops: its token no longer opens anything.
@@ -992,6 +1235,18 @@ async fn wait(
     if ahead {
         return Ok(axum::Json(Waited { changed: true }));
     }
-    let changed = matches!(tokio::time::timeout(WAIT, rx.changed()).await, Ok(Ok(())));
+    // Its own operations are no news to it: wait on for another's.
+    let me = device.id.clone();
+    let others = async {
+        loop {
+            if rx.changed().await.is_err() {
+                return false;
+            }
+            if rx.borrow_and_update().1 != me {
+                return true;
+            }
+        }
+    };
+    let changed = tokio::time::timeout(WAIT, others).await.unwrap_or(false);
     Ok(axum::Json(Waited { changed }))
 }

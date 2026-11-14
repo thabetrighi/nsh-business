@@ -159,6 +159,37 @@ async fn accounts_own_their_shops_and_nothing_else() -> Res<()> {
     assert_eq!(joined.prefix, "B");
     assert_eq!(joined.org_name, "Magasin En-Nour");
 
+    // B's app is removed and installed again: the new install takes B's
+    // place (its letter), and B's old token stops at once.
+    let listed: Vec<nb_server::DeviceInfo> = json_call(
+        &app,
+        "GET",
+        &format!("/v1/orgs/{}/devices", linked_nour.org_id),
+        &session.token,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(listed.len(), 2);
+    let again: Joined = json_call(
+        &app,
+        "POST",
+        &format!("/v1/orgs/{}/devices", linked_nour.org_id),
+        &session.token,
+        json!({"name": "Caisse 2 (réinstallée)", "replaces": joined.device_id}),
+    )
+    .await?;
+    assert_eq!(again.prefix, "B");
+    assert_eq!(again.device_id, joined.device_id);
+    let (status, _) = call(&app, "GET", "/v1/state", &joined.token, Vec::new()).await?;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the old install is cut off"
+    );
+    let (status, _) = call(&app, "GET", "/v1/state", &again.token, Vec::new()).await?;
+    assert_eq!(status, StatusCode::OK);
+    let joined = again;
+
     // Another account sees none of it, and cannot add itself a device.
     let other: Session = json_call(
         &app,

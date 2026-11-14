@@ -198,7 +198,9 @@ fn open(lang: DemoLang) -> Result<(Store, Option<Session>), Error> {
     };
     let on_disk = PATH.get().cloned().or_else(packaged_path);
     let demo_on_disk = std::env::var("NB_DEMO").is_ok_and(|v| v == "1");
-    let wizard = on_disk.is_some() && !demo_on_disk;
+    // The browser starts on the first screen (create a shop, join one, or
+    // the demo) unless it kept a copy (`web_store`, loaded next).
+    let wizard = (on_disk.is_some() && !demo_on_disk) || cfg!(target_arch = "wasm32");
     let mut store = match on_disk {
         Some(p) => {
             if let Some(dir) = p.parent() {
@@ -363,9 +365,47 @@ impl Db {
         .await
     }
 
+    /// The browser's saved copy of the shop, opened in place of the empty
+    /// start.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn adopt_saved(&self, bytes: Vec<u8>) -> Result<(), DbError> {
+        self.run(move |state| {
+            let store = state.store.as_mut().ok_or_else(stopped)?;
+            store.restore_bytes(&bytes).map_err(DbError::from)?;
+            state.session = read_session(store)
+                .map_err(DbError::from)?
+                .ok_or_else(needs_setup);
+            Ok(())
+        })
+        .await
+    }
+
+    /// The database as bytes when it changed since `since` (its change
+    /// count), for the browser to keep.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn copy_if_changed(&self, since: u64) -> Result<Option<(u64, Vec<u8>)>, DbError> {
+        self.run(move |state| {
+            let Some(store) = state.store.as_ref() else {
+                return Ok(None);
+            };
+            // Nothing to keep before a shop exists.
+            if state.session.is_err() {
+                return Ok(None);
+            }
+            let now = store.changes();
+            if now == since {
+                return Ok(None);
+            }
+            Ok(Some((
+                now,
+                store.snapshot_in_memory().map_err(DbError::from)?,
+            )))
+        })
+        .await
+    }
+
     /// This device joins an organization that already exists (M11/M2):
     /// its database becomes the server's copy, with its own identity.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn join(
         &self,
         snapshot: Vec<u8>,
@@ -383,17 +423,23 @@ impl Db {
                 .map_err(DbError::from)?
                 .ok_or_else(stopped)?;
             // Its own till: a drawer of its own, counted on its own (the
-            // register travels to the others like any operation).
-            let till = nb_store::usecases::org::create_register(
-                store,
-                session.meta("register.create"),
-                session.branch(),
-                &register_name,
-            )
-            .map_err(DbError::from)?;
-            store
-                .set_own_register(Some(&till.id))
-                .map_err(DbError::from)?;
+            // register travels to the others like any operation). A device
+            // that takes back its place (a reinstall) finds the one it had.
+            let mine = store.register_made_here().map_err(DbError::from)?;
+            let till = match mine {
+                Some(id) => id,
+                None => {
+                    nb_store::usecases::org::create_register(
+                        store,
+                        session.meta("register.create"),
+                        session.branch(),
+                        &register_name,
+                    )
+                    .map_err(DbError::from)?
+                    .id
+                }
+            };
+            store.set_own_register(Some(&till)).map_err(DbError::from)?;
             state.session = Ok(session);
             Ok(session)
         })

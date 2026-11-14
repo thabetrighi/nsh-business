@@ -119,14 +119,32 @@ fn hash_opt(s: Option<&str>) -> Result<Option<String>> {
     s.map(secret::hash).transpose()
 }
 
+/// A new user as it travels to other devices: its password and PIN only
+/// as their Argon2id hashes (computed once, on the device that made the
+/// user), never as typed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewUser {
+    pub name: String,
+    pub phone: Option<String>,
+    pub login: Option<String>,
+    pub password_hash: Option<String>,
+    pub pin_hash: Option<String>,
+    pub grants: Vec<GrantRow>,
+}
+
+/// A stored hash, never a password: what may travel in the log.
+fn check_hash(field: &'static str, h: Option<&str>) -> Result<()> {
+    match h {
+        Some(h) if !h.starts_with("$argon2") || h.len() > 512 => {
+            Err(RuleError::on(field, "invalid_value").into())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Makes a user. The password and PIN are checked and hashed here; what is
+/// logged (and runs on the other devices) is [`create_user_hashed`].
 pub fn create_user(store: &mut Store, meta: OpMeta, input: UserInput) -> Result<UserRow> {
-    #[allow(clippy::clone_on_copy)]
-    store.record(
-        meta,
-        &crate::ops::Call::Opaque {
-            name: "access::create_user".into(),
-        },
-    )?;
     let mut errors = Vec::new();
     if input.name.trim().is_empty() {
         errors.push(RuleError::on("name", "required"));
@@ -155,8 +173,45 @@ pub fn create_user(store: &mut Store, meta: OpMeta, input: UserInput) -> Result<
     if !errors.is_empty() {
         return Err(Error::Rules(errors));
     }
-    let password = hash_opt(input.password.as_deref())?;
-    let pin = hash_opt(input.pin.as_deref())?;
+    let password_hash = hash_opt(input.password.as_deref())?;
+    let pin_hash = hash_opt(input.pin.as_deref())?;
+    create_user_hashed(
+        store,
+        meta,
+        NewUser {
+            name: input.name,
+            phone: input.phone,
+            login,
+            password_hash,
+            pin_hash,
+            grants: input.grants,
+        },
+    )
+}
+
+/// [`create_user`] with the secrets already hashed: the operation as it is
+/// logged and run again elsewhere.
+pub fn create_user_hashed(store: &mut Store, meta: OpMeta, input: NewUser) -> Result<UserRow> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::AccessCreateUserHashed {
+            input: input.clone(),
+        },
+    )?;
+    if input.name.trim().is_empty() {
+        return Err(RuleError::on("name", "required").into());
+    }
+    if input.grants.is_empty() {
+        return Err(RuleError::on("roles", "access.no_role").into());
+    }
+    let login = normalize_login(input.login.as_deref())?;
+    if input.password_hash.is_some() && login.is_none() {
+        return Err(RuleError::on("login", "required").into());
+    }
+    check_hash("password", input.password_hash.as_deref())?;
+    check_hash("pin", input.pin_hash.as_deref())?;
+    let (password, pin) = (input.password_hash.clone(), input.pin_hash.clone());
     store.write(meta, |w| {
         let org = w.org()?;
         w.require(Permission::UsersManage, &Target::org())?;
@@ -193,8 +248,8 @@ pub fn update_user(store: &mut Store, meta: OpMeta, input: UserUpdate) -> Result
     #[allow(clippy::clone_on_copy)]
     store.record(
         meta,
-        &crate::ops::Call::Opaque {
-            name: "access::update_user".into(),
+        &crate::ops::Call::AccessUpdateUser {
+            input: input.clone(),
         },
     )?;
     let id: UserId = parse_id(&input.id)?;
@@ -253,7 +308,8 @@ pub fn update_user(store: &mut Store, meta: OpMeta, input: UserUpdate) -> Result
 }
 
 /// Sets or clears (`None`) a user's password or PIN. Users change their
-/// own; changing another's needs `users.manage`.
+/// own; changing another's needs `users.manage`. Checked and hashed here;
+/// logged as [`set_secret_hashed`].
 pub fn set_secret(
     store: &mut Store,
     meta: OpMeta,
@@ -261,13 +317,6 @@ pub fn set_secret(
     kind: Secret,
     value: Option<String>,
 ) -> Result<()> {
-    #[allow(clippy::clone_on_copy)]
-    store.record(
-        meta,
-        &crate::ops::Call::Opaque {
-            name: "access::set_secret".into(),
-        },
-    )?;
     if let Some(v) = value.as_deref() {
         match kind {
             Secret::Password => check_password(v)?,
@@ -275,6 +324,37 @@ pub fn set_secret(
         }
     }
     let hash = hash_opt(value.as_deref())?;
+    let which = match kind {
+        Secret::Password => "password",
+        Secret::Pin => "pin",
+    };
+    set_secret_hashed(store, meta, user, which.to_owned(), hash)
+}
+
+/// [`set_secret`] with the secret already hashed (`which`: `password` or
+/// `pin`): the operation as it is logged and run again elsewhere.
+pub fn set_secret_hashed(
+    store: &mut Store,
+    meta: OpMeta,
+    user: UserId,
+    which: String,
+    hash: Option<String>,
+) -> Result<()> {
+    #[allow(clippy::clone_on_copy)]
+    store.record(
+        meta,
+        &crate::ops::Call::AccessSetSecretHashed {
+            user: user.clone(),
+            which: which.clone(),
+            hash: hash.clone(),
+        },
+    )?;
+    let kind = match which.as_str() {
+        "password" => Secret::Password,
+        "pin" => Secret::Pin,
+        _ => return Err(RuleError::on("secret", "invalid_value").into()),
+    };
+    check_hash("secret", hash.as_deref())?;
     let what = match kind {
         Secret::Password => "password",
         Secret::Pin => "pin",

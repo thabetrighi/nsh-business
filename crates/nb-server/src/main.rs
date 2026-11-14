@@ -8,6 +8,10 @@
 //! - `NB_SERVER_OPEN_SIGNUP=1` anyone may make an account (a public
 //!   server); otherwise making one asks for `NB_SERVER_KEY`
 //!
+//! - `NB_SERVER_ALLOW_ORIGINS` the web app's origins (`https://…`,
+//!   comma-separated) allowed to call the server from a browser
+//! - `NB_SERVER_TRUST_PROXY=1` behind a reverse proxy: the caller's address
+//!   is the last `X-Forwarded-For` entry (for the limits on guessing)
 //! - `NB_SERVER_KEEP_DAYS` daily copies kept per shop (default 14), in
 //!   `NB_SERVER_DIR/backups`
 //!
@@ -26,8 +30,16 @@ async fn main() {
     };
     // A public server lets anyone make an account; a private one (a shop's
     // or a partner's) asks for the key.
-    let open_signup = std::env::var("NB_SERVER_OPEN_SIGNUP").is_ok_and(|v| v == "1");
-    let server = match nb_server::Server::open_with(&dir, &key, open_signup) {
+    let options = nb_server::Options {
+        open_signup: std::env::var("NB_SERVER_OPEN_SIGNUP").is_ok_and(|v| v == "1"),
+        allow_origins: std::env::var("NB_SERVER_ALLOW_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|o| o.trim().to_owned())
+            .filter(|o| !o.is_empty())
+            .collect(),
+    };
+    let server = match nb_server::Server::open_with(&dir, &key, options) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("cannot open {}: {e:?}", dir.display());
@@ -65,6 +77,9 @@ async fn main() {
         });
     }
     let app = nb_server::router(server);
+    // The caller's address, for the limits on guessing (behind a proxy see
+    // `NB_SERVER_TRUST_PROXY`).
+    let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

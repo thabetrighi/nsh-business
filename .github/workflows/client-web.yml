@@ -59,6 +59,11 @@ jobs:
               --screenshot=/tmp/shots/web-$1-$2-$3x$4.png http://localhost:8000/ || true
           done
           ls -la /tmp/shots
+      - name: The shop is kept in the browser (IndexedDB)
+        working-directory: apps/client
+        run: |
+          pip install -q playwright && python -m playwright install --with-deps chromium >/dev/null
+          python3 ci/web_persist.py http://localhost:8000/ /tmp/shots
       - name: Publish screenshots
         run: |
           cd /tmp/shots

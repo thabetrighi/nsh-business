@@ -156,8 +156,8 @@ async fn a_device_and_its_copy_on_the_server() -> R {
     let r: PushResult = serde_json::from_slice(&bytes)?;
     assert_eq!(r.fingerprint, dev.fingerprint()?);
 
-    // A user with a PIN: its secret does not travel as an operation; the
-    // device sends its database again and both agree.
+    // A user with a PIN travels like any operation (the PIN as its hash):
+    // the server's copy stays the device's.
     create_user(
         &mut dev,
         meta(&setup, "user"),
@@ -172,20 +172,11 @@ async fn a_device_and_its_copy_on_the_server() -> R {
     )?;
     save_customer(&mut dev, meta(&setup, "c"), customer("Encore"))?;
     let r = push(&app, &linked.token, &mut dev).await?;
-    let failed = r
-        .failed
-        .ok_or("expected the opaque operation to stop the push")?;
-    assert_eq!(failed.code, "opaque");
-    let (status, bytes) = call(&app, "POST", "/v1/reseed", &linked.token, dev.snapshot()?).await?;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&bytes)
-    );
-    dev.mark_all_pushed()?;
-    let state: StateInfo = serde_json::from_slice(&bytes)?;
-    assert_eq!(state.fingerprint, dev.fingerprint()?);
+    assert!(r.failed.is_none(), "{:?}", r.failed);
+    assert_eq!(r.fingerprint, dev.fingerprint()?);
+    // A device alone cannot replace the shop's database.
+    let (status, _) = call(&app, "POST", "/v1/reseed", &linked.token, dev.snapshot()?).await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // The state and the copy, for a new device or a restore.
     let (_, bytes) = call(&app, "GET", "/v1/state", &linked.token, Vec::new()).await?;

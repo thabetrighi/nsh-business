@@ -11,6 +11,7 @@ use nsh_core::prelude::*;
 
 mod command_palette;
 pub mod db;
+mod live;
 mod nav;
 pub mod printers;
 mod screens;
@@ -21,6 +22,8 @@ mod state;
 mod sync;
 mod topbar;
 mod ui;
+#[cfg(target_arch = "wasm32")]
+mod web_store;
 
 #[native_module("nb-client/native")]
 fn native(registry: &mut Registry) {
@@ -90,7 +93,11 @@ pub fn App() -> impl IntoElement {
         st.settings_tab.set(5);
     }
     st.persist();
+    #[cfg(not(target_arch = "wasm32"))]
     st.connect();
+    // The browser: its kept copy of the shop first, then the shop opens.
+    #[cfg(target_arch = "wasm32")]
+    web_open(st);
 
     // The look (accent, font, sizes, density, corners) is read by every
     // component as plain values: a change installs the new look and rebuilds
@@ -163,4 +170,71 @@ pub fn App() -> impl IntoElement {
                 .child(shell::shell(st))
                 .into_element()
         }))
+}
+
+/// The browser keeps the shop in IndexedDB: loaded before the shop opens,
+/// saved a few seconds after it changes. The shop opens anyway if the
+/// browser's storage does not answer within 3 seconds.
+#[cfg(target_arch = "wasm32")]
+fn web_open(st: state::AppState) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    st.root.run(|| {
+        // Asking to be kept is a hint: never waited for (it may never answer).
+        let ask = spawn(web_store::keep());
+        drop(ask); // runs to completion under the root
+        let opened = Rc::new(Cell::new(false));
+        let open_once = {
+            let opened = opened.clone();
+            move || {
+                if !opened.replace(true) {
+                    st.connect();
+                }
+            }
+        };
+        let late = {
+            let open_once = open_once.clone();
+            set_timeout(std::time::Duration::from_secs(3), move || open_once())
+        };
+        drop(late); // fires once, under the root
+        let was = opened.clone();
+        let task = spawn(async move {
+            match web_store::load().await {
+                Ok(Some(bytes)) if !was.get() => {
+                    if let Err(e) = st.db().adopt_saved(bytes).await {
+                        log::warn!(
+                            "the copy kept in this browser could not open: {}",
+                            e.message
+                        );
+                    }
+                }
+                Ok(Some(_)) => log::warn!(
+                    "browser storage answered late: the kept copy waits for the next visit"
+                ),
+                Ok(None) => {}
+                Err(e) => log::warn!("browser storage: {e}"),
+            }
+            open_once();
+        });
+        drop(task); // runs to completion under the root
+        let saved = Rc::new(Cell::new(0u64));
+        let every = set_interval(std::time::Duration::from_secs(3), move || {
+            // Not before the shop opened: an empty start must not replace a
+            // copy still being read.
+            if !opened.get() {
+                return;
+            }
+            let saved = saved.clone();
+            let task = spawn(async move {
+                if let Ok(Some((n, bytes))) = st.db().copy_if_changed(saved.get()).await {
+                    match web_store::save(&bytes).await {
+                        Ok(()) => saved.set(n),
+                        Err(e) => log::warn!("browser storage: {e}"),
+                    }
+                }
+            });
+            drop(task); // runs to completion under the root
+        });
+        drop(every); // runs while the root lives
+    });
 }

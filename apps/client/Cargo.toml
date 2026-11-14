@@ -21,9 +21,26 @@ env_logger = "0.11"
 log = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The live sync socket (the same WebSocket and TLS stack NSH itself uses).
+tokio = { version = "1", default-features = false, features = ["sync", "rt", "net", "time", "macros"] }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 calamine = { version = "0.38", default-features = false }
 rust_xlsxwriter = { version = "0.102", default-features = false }
 nb-docs.workspace = true
+
+# The browser: the shop's database kept in IndexedDB, the live socket.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window", "Navigator", "StorageManager",
+    "IdbFactory", "IdbOpenDbRequest", "IdbRequest", "IdbDatabase", "IdbTransaction",
+    "IdbTransactionMode", "IdbObjectStore", "IdbVersionChangeEvent", "Event", "DomException",
+    "DomStringList",
+    "WebSocket", "MessageEvent", "CloseEvent", "BinaryType",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nsh-platform-linux = { version = "=0.4.0", default-features = false }

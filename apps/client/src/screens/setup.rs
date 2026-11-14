@@ -391,15 +391,9 @@ pub fn setup_wizard(st: AppState) -> View {
         // what it started would end with it.
         let task = st.root.run(|| {
             spawn(async move {
-                #[cfg(not(target_arch = "wasm32"))]
                 match crate::sync::join(st, u, c).await {
                     Ok(j) => opened(j),
                     Err(f) => fail(f),
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let _ = (u, c, opened);
-                    fail(crate::sync::Failed::web());
                 }
             })
         });
@@ -439,6 +433,25 @@ pub fn setup_wizard(st: AppState) -> View {
         });
         drop(task); // runs to completion
     };
+    // The shop picked, and its devices: this one may take back the place
+    // of one of them (a reinstall) or be new.
+    let chosen = signal(None::<String>);
+    let olds = signal(Vec::<nb_store::sync::DeviceInfo>::new());
+    let go = move |org: String, replaces: Option<String>| {
+        if !start() {
+            return;
+        }
+        let (u, t) = (server.get_untracked(), session.get_untracked());
+        let task = st.root.run(|| {
+            spawn(async move {
+                match crate::sync::join_mine(st, u, t, org, replaces).await {
+                    Ok(j) => opened(j),
+                    Err(f) => fail(f),
+                }
+            })
+        });
+        drop(task); // runs to completion
+    };
     let pick = move |org: String| {
         if !start() {
             return;
@@ -446,15 +459,18 @@ pub fn setup_wizard(st: AppState) -> View {
         let (u, t) = (server.get_untracked(), session.get_untracked());
         let task = st.root.run(|| {
             spawn(async move {
-                #[cfg(not(target_arch = "wasm32"))]
-                match crate::sync::join_mine(st, u, t, org).await {
-                    Ok(j) => opened(j),
+                match crate::sync::shop_devices(&u, &t, &org).await {
+                    // A shop with no device yet: nothing to take back.
+                    Ok(list) if list.is_empty() => {
+                        busy.set(false);
+                        go(org, None);
+                    }
+                    Ok(list) => {
+                        busy.set(false);
+                        olds.set(list);
+                        chosen.set(Some(org));
+                    }
                     Err(f) => fail(f),
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let _ = (u, t, org, opened);
-                    fail(crate::sync::Failed::web());
                 }
             })
         });
@@ -467,7 +483,9 @@ pub fn setup_wizard(st: AppState) -> View {
             None,
             st.t("setup.back"),
             move || {
-                if shops.with_untracked(|v| v.is_empty()) {
+                if chosen.get_untracked().is_some() {
+                    chosen.set(None);
+                } else if shops.with_untracked(|v| v.is_empty()) {
                     step.set(Step::Welcome);
                 } else {
                     shops.set(Vec::new());
@@ -574,7 +592,11 @@ pub fn setup_wizard(st: AppState) -> View {
             ))
             // The account's shops: one tap makes this device one of its.
             .child(when(
-                move || by.get() == JoinBy::Account && shops.with(|v| !v.is_empty()),
+                move || {
+                    by.get() == JoinBy::Account
+                        && shops.with(|v| !v.is_empty())
+                        && chosen.get().is_none()
+                },
                 move || {
                     view()
                         .gap(px(10.0))
@@ -602,6 +624,72 @@ pub fn setup_wizard(st: AppState) -> View {
                                 );
                             }
                             list.into_element()
+                        }))
+                        .child(view().flex_row().child(back()))
+                        .into_element()
+                },
+            ))
+            // A reinstall takes back its place: its letter, its numbers,
+            // its till (the old one stops). Otherwise a new device.
+            .child(when(
+                move || by.get() == JoinBy::Account && chosen.get().is_some(),
+                move || {
+                    view()
+                        .gap(px(10.0))
+                        .child(label(
+                            st.t("setup.join.replace"),
+                            ty::MD,
+                            FontWeight::SEMIBOLD,
+                            Tone::Ink,
+                        ))
+                        .child(label(
+                            st.t("setup.join.replace_help"),
+                            ty::SM,
+                            FontWeight::NORMAL,
+                            Tone::Muted,
+                        ))
+                        .child(dynamic(move || {
+                            let Some(org) = chosen.get() else {
+                                return view().into_element();
+                            };
+                            let mut list = view().gap(px(8.0));
+                            for d in olds.get() {
+                                let (org, id) = (org.clone(), d.id.clone());
+                                let seen = d
+                                    .last_seen_at
+                                    .map(|t| crate::screens::common::date_time(st, t))
+                                    .unwrap_or_default();
+                                // Each part isolated: Arabic, Latin and digits
+                                // in one line keep their order.
+                                let caption = format!(
+                                    "\u{2068}{}\u{2069} · \u{2068}{}\u{2069} · \u{2068}{seen}\u{2069}",
+                                    d.prefix, d.name
+                                );
+                                list = list.child(
+                                    button(
+                                        Variant::Secondary,
+                                        Size::Lg,
+                                        Some(Icon::Refresh),
+                                        move || caption.clone(),
+                                        move || go(org.clone(), Some(id.clone())),
+                                    )
+                                    .w_full()
+                                    .test_id("join-replace"),
+                                );
+                            }
+                            let org2 = org.clone();
+                            list.child(
+                                button(
+                                    Variant::Primary,
+                                    Size::Lg,
+                                    Some(Icon::Plus),
+                                    st.t("setup.join.new_device"),
+                                    move || go(org2.clone(), None),
+                                )
+                                .w_full()
+                                .test_id("join-new"),
+                            )
+                            .into_element()
                         }))
                         .child(view().flex_row().child(back()))
                         .into_element()
