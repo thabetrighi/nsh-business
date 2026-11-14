@@ -299,7 +299,8 @@ impl Store {
     pub fn adopt_device(&mut self, id: nb_core::DeviceId, prefix: &str) -> Result<()> {
         nb_domain::numbering::validate_device_prefix(prefix)?;
         self.conn.execute(
-            "UPDATE device SET id = ?1, prefix = ?2",
+            // The register was the other device's.
+            "UPDATE device SET id = ?1, prefix = ?2, register_id = NULL",
             rusqlite::params![id.to_string(), prefix],
         )?;
         self.device = Device {
@@ -312,6 +313,19 @@ impl Store {
                 .map_err(|_| Error::Corrupt("device id".into()))?,
         );
         self.hlc = Hlc::new(node);
+        Ok(())
+    }
+
+    /// The register this device sells on, when it has its own.
+    pub fn own_register(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT register_id FROM device LIMIT 1", [], |r| r.get(0))?)
+    }
+
+    pub fn set_own_register(&mut self, register: Option<&str>) -> Result<()> {
+        self.conn
+            .execute("UPDATE device SET register_id = ?1", [register])?;
         Ok(())
     }
 
@@ -497,7 +511,10 @@ impl Store {
     pub fn fingerprints(&self) -> Result<Vec<(String, String)>> {
         use sha2::{Digest, Sha256};
         let mut out = Vec::new();
-        const LOCAL: [&str; 11] = [
+        const LOCAL: [&str; 12] = [
+            // What a receipt showed of the customer's balance when it was
+            // printed: what that device knew then.
+            "sale_balances",
             "reviews",
             "sync_link",
             "device",

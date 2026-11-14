@@ -31,6 +31,7 @@ pub fn cloud_card(st: AppState, compact: bool) -> View {
     let v = computed(move || st.sync.get());
     // Outside the part drawn again when the state changes.
     let invite = signal(None::<nb_store::sync::Invite>);
+    let devices = signal(None::<Vec<nb_store::sync::DeviceInfo>>);
     let state_badge = dynamic(move || {
         let s = v.get();
         let (status, which, key) = if !s.linked {
@@ -49,7 +50,7 @@ pub fn cloud_card(st: AppState, compact: bool) -> View {
     let body = dynamic(move || {
         let s = v.get();
         if s.linked {
-            linked_body(st, s, invite).into_element()
+            linked_body(st, s, invite, devices).into_element()
         } else {
             link_form(st).into_element()
         }
@@ -84,6 +85,7 @@ fn linked_body(
     st: AppState,
     s: crate::sync::SyncView,
     invite: Signal<Option<nb_store::sync::Invite>>,
+    devices: Signal<Option<Vec<nb_store::sync::DeviceInfo>>>,
 ) -> View {
     let last = s
         .last_ok_at
@@ -148,6 +150,10 @@ fn linked_body(
             Tone::Danger,
         )));
     }
+    v = v.child(dynamic(move || match devices.get() {
+        None => view().into_element(),
+        Some(list) => device_list(st, list, devices).into_element(),
+    }));
     v.child(
         view()
             .flex_row()
@@ -169,6 +175,22 @@ fn linked_body(
                     drop(task); // runs to completion
                 },
             ))
+            .child(
+                button(
+                    Variant::Ghost,
+                    Size::Md,
+                    Some(Icon::Monitor),
+                    st.t("sync.devices"),
+                    move || {
+                        if devices.get_untracked().is_some() {
+                            devices.set(None);
+                            return;
+                        }
+                        load_devices(st, devices);
+                    },
+                )
+                .test_id("sync-devices"),
+            )
             .child(
                 button(
                     Variant::Secondary,
@@ -307,4 +329,307 @@ fn link_form(st: AppState) -> View {
                 .test_id("sync-link"),
             ),
         )
+}
+
+/// What running other devices' operations here left to look at: the
+/// product or sale, how much, and a button to mark it seen (on every copy).
+/// Shown only when something waits.
+pub fn reviews_card(st: AppState) -> View {
+    let items = signal(Vec::<nb_store::usecases::reviews::ReviewItem>::new());
+    let load = move || {
+        let task = spawn(async move {
+            if let Ok(v) = st
+                .db()
+                .call(|s| nb_store::usecases::reviews::review_items(s))
+                .await
+            {
+                items.set(v);
+            }
+        });
+        drop(task); // runs to completion
+    };
+    // Again whenever data changed (a pull, a sale here).
+    effect(move || {
+        let _ = st.data_rev.get();
+        let _ = st.sync.get().reviews;
+        untracked(load);
+    });
+    view().child(dynamic(move || {
+        let list = items.get();
+        if list.is_empty() {
+            return view().into_element();
+        }
+        let mut rows = view();
+        for (i, item) in list.into_iter().enumerate() {
+            if i > 0 {
+                rows = rows.child(divider());
+            }
+            rows = rows.child(review_row(st, item));
+        }
+        card()
+            .test_id("reviews-card")
+            .child(card_header_icon(
+                Some(Icon::Alert),
+                st.t("review.title"),
+                Some(Box::new(st.t("review.help"))),
+                view(),
+            ))
+            .child(divider())
+            .child(rows)
+            .into_element()
+    }))
+}
+
+fn review_row(st: AppState, item: nb_store::usecases::reviews::ReviewItem) -> View {
+    let (kind_key, qty_key) = match item.kind.as_str() {
+        "stock_shortfall" => ("review.stock_shortfall", "review.stock_now"),
+        "return_excess" => ("review.return_excess", "review.returned_beyond"),
+        "drawer_short" => ("review.drawer_short", ""),
+        _ => ("review.other", "review.qty"),
+    };
+    let qty = st
+        .fmt()
+        .quantity(nb_core::Quantity::from_milli(item.qty_milli), 3);
+    let at = date_time(st, item.created_at);
+    let subject = item.subject.clone();
+    let key = nb_store::usecases::reviews::ReviewKey {
+        kind: item.kind.clone(),
+        entity_id: item.entity_id.clone(),
+    };
+    let busy = signal(false);
+    let seen = move || {
+        if busy.get_untracked() {
+            return;
+        }
+        let Some(session) = st.session.get_untracked() else {
+            return;
+        };
+        busy.set(true);
+        let meta = session.meta("review.resolve");
+        let key = key.clone();
+        let task = st.root.run(|| {
+            spawn(async move {
+                match st
+                    .db()
+                    .call(move |s| nb_store::usecases::reviews::resolve_review(s, meta, key))
+                    .await
+                {
+                    Ok(()) => {
+                        st.changed();
+                        crate::sync::refresh(st).await;
+                    }
+                    Err(e) => {
+                        busy.set(false);
+                        show_toast(st, e.message);
+                    }
+                }
+            })
+        });
+        drop(task); // runs to completion
+    };
+    view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap(px(12.0))
+        .px(px(20.0))
+        .py(px(12.0))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(180.0))
+                .gap(px(2.0))
+                .child(label(
+                    move || subject.clone(),
+                    ty::MD,
+                    FontWeight::SEMIBOLD,
+                    Tone::Ink,
+                ))
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(6.0))
+                        .child(badge(Status::Warning, None, st.t(kind_key)))
+                        .child(label(
+                            move || at.clone(),
+                            ty::XS,
+                            FontWeight::NORMAL,
+                            Tone::Muted,
+                        )),
+                ),
+        )
+        // The number and its word apart (bidi); a drawer has none.
+        .child(if qty_key.is_empty() {
+            view()
+        } else {
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(label(
+                    st.t(qty_key),
+                    ty::SM,
+                    FontWeight::NORMAL,
+                    Tone::Muted,
+                ))
+                .child(crate::ui::kit::figure(
+                    move || qty.clone(),
+                    ty::MD,
+                    FontWeight::SEMIBOLD,
+                    || Tone::Ink,
+                ))
+        })
+        // Shown once the person is known (read inside, not at build).
+        .child(when(
+            move || st.can("audit.view"),
+            move || {
+                let seen = seen.clone();
+                button(
+                    Variant::Secondary,
+                    Size::Sm,
+                    Some(Icon::Check),
+                    st.t("review.seen"),
+                    seen,
+                )
+                .test_id("review-seen")
+                .into_element()
+            },
+        ))
+}
+
+fn load_devices(st: AppState, devices: Signal<Option<Vec<nb_store::sync::DeviceInfo>>>) {
+    let task = st.root.run(|| {
+        spawn(async move {
+            match crate::sync::devices(st).await {
+                Ok(list) => devices.set(Some(list)),
+                Err(f) => show_failure(st, &f),
+            }
+        })
+    });
+    drop(task); // runs to completion
+}
+
+/// The organization's devices: letter, name, last seen; a lost one is
+/// stopped with two taps (the second confirms).
+fn device_list(
+    st: AppState,
+    list: Vec<nb_store::sync::DeviceInfo>,
+    devices: Signal<Option<Vec<nb_store::sync::DeviceInfo>>>,
+) -> View {
+    let mut rows = view()
+        .mx(px(20.0))
+        .mb(px(14.0))
+        .rounded(px(crate::ui::tokens::radius::md()))
+        .border_1()
+        .border_color(Tone::Border.color());
+    for (i, d) in list.into_iter().enumerate() {
+        if i > 0 {
+            rows = rows.child(divider());
+        }
+        let seen = d
+            .last_seen_at
+            .map(|t| date_time(st, t))
+            .unwrap_or_else(|| st.tn("sync.never"));
+        let name = d.name.clone();
+        let letter = d.prefix.clone();
+        let mut tags = view().flex_row().flex_wrap().gap(px(6.0));
+        if d.this {
+            tags = tags.child(badge(Status::Info, None, st.t("sync.device")));
+        }
+        if d.revoked_at.is_some() {
+            tags = tags.child(badge(Status::Danger, None, st.t("sync.revoked")));
+        }
+        let mut row = view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(12.0))
+            .px(px(14.0))
+            .py(px(10.0))
+            .child(
+                view()
+                    .w(px(32.0))
+                    .h(px(32.0))
+                    .rounded(px(crate::ui::tokens::radius::md()))
+                    .bg(Tone::PrimarySoft.color())
+                    .items_center()
+                    .justify_center()
+                    .child(label(
+                        move || letter.clone(),
+                        ty::MD,
+                        FontWeight::BOLD,
+                        Tone::Primary,
+                    )),
+            )
+            .child(
+                view()
+                    .flex_1()
+                    .min_w(px(160.0))
+                    .gap(px(2.0))
+                    .child(label(
+                        move || name.clone(),
+                        ty::MD,
+                        FontWeight::SEMIBOLD,
+                        Tone::Ink,
+                    ))
+                    .child(label(
+                        move || seen.clone(),
+                        ty::XS,
+                        FontWeight::NORMAL,
+                        Tone::Muted,
+                    )),
+            )
+            .child(tags);
+        if !d.this && d.revoked_at.is_none() {
+            let armed = signal(false);
+            let id = d.id.clone();
+            row = row.child(when(
+                move || st.can("settings.edit"),
+                move || {
+                    let id = id.clone();
+                    view()
+                        .child(dynamic(move || {
+                            let id = id.clone();
+                            let sure = armed.get();
+                            button(
+                                if sure {
+                                    Variant::Danger
+                                } else {
+                                    Variant::Ghost
+                                },
+                                Size::Sm,
+                                Some(Icon::Unlink),
+                                st.t(if sure {
+                                    "sync.revoke_sure"
+                                } else {
+                                    "sync.revoke"
+                                }),
+                                move || {
+                                    if !armed.get_untracked() {
+                                        armed.set(true);
+                                        return;
+                                    }
+                                    let id = id.clone();
+                                    let task = st.root.run(|| {
+                                        spawn(async move {
+                                            match crate::sync::revoke(st, id).await {
+                                                Ok(()) => load_devices(st, devices),
+                                                Err(f) => show_failure(st, &f),
+                                            }
+                                        })
+                                    });
+                                    drop(task); // runs to completion
+                                },
+                            )
+                            .test_id("sync-revoke")
+                            .into_element()
+                        }))
+                        .into_element()
+                },
+            ));
+        }
+        rows = rows.child(row);
+    }
+    rows
 }

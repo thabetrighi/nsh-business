@@ -512,7 +512,7 @@ pub fn record_purchase(
                 return Err(RuleError::on("register", "shift.none_open").into());
             };
             if input.cash_minor > shift_of(w.tx(), shift)?.expected_minor {
-                return Err(RuleError::on("payments", "shift.not_enough_cash").into());
+                w.cash_short("payments", shift)?;
             }
             w.require(Permission::SuppliersPay, &at)?;
         }
@@ -1098,7 +1098,7 @@ pub fn pay_supplier(
                 return Err(RuleError::on("register", "shift.none_open").into());
             };
             if input.amount_minor > shift_of(w.tx(), shift)?.expected_minor {
-                return Err(RuleError::on("amount", "shift.not_enough_cash").into());
+                w.cash_short("amount", shift)?;
             }
         }
         let open = open_purchases_of(w.tx(), &supplier.id)?;

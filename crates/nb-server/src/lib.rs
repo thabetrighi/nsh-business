@@ -20,6 +20,8 @@
 //! - `POST /v1/invite`   device token → a code for a new device (an hour, once)
 //! - `POST /v1/join`     `{code, name}` → the new device's identity and token
 //! - `GET  /v1/pull?after=` device token → the other devices' operations
+//! - `GET  /v1/devices`  device token → the organization's devices
+//! - `POST /v1/devices/{id}/revoke` device token → that device's token stops
 //!
 //! `/v1/snapshot` tells the position the copy is at in `x-nb-cursor` and
 //! `x-nb-epoch`.
@@ -36,8 +38,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use nb_store::ops::OpDevice;
 pub use nb_store::sync::{
-    CURSOR_HEADER, EPOCH_HEADER, Invite, Joined, Linked, Position, PullResult, PushFailure,
-    PushRequest, PushResult, StateInfo,
+    CURSOR_HEADER, DeviceInfo, EPOCH_HEADER, Invite, Joined, Linked, Position, PullResult,
+    PushFailure, PushRequest, PushResult, StateInfo,
 };
 use nb_store::{Store, StoreOptions};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -329,6 +331,8 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/v1/invite", post(invite))
         .route("/v1/join", post(join))
         .route("/v1/pull", get(pull))
+        .route("/v1/devices", get(devices))
+        .route("/v1/devices/{id}/revoke", post(revoke))
         .layer(DefaultBodyLimit::max(MAX_DB))
         .with_state(server)
 }
@@ -358,8 +362,9 @@ async fn link(
     let name = headers
         .get("x-device-name")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("device")
-        .to_owned();
+        .map(percent_decoded)
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "device".to_owned());
     blocking(move || {
         // An organization links once; its other devices join it (M2).
         let probe = {
@@ -732,4 +737,85 @@ async fn pull(
         })
     })
     .await
+}
+
+async fn devices(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+) -> ApiResult<axum::Json<Vec<DeviceInfo>>> {
+    let me = server.device(&headers)?;
+    let control = lock(&server.control)?;
+    let mut st = control.prepare(
+        "SELECT id, prefix, name, created_at, last_seen_at, revoked_at FROM devices
+         WHERE org_id = ?1 ORDER BY created_at, prefix",
+    )?;
+    let rows = st.query_map([&me.org], |r| {
+        let id: String = r.get(0)?;
+        Ok(DeviceInfo {
+            this: id == me.id,
+            id,
+            prefix: r.get(1)?,
+            name: r.get(2)?,
+            created_at: r.get(3)?,
+            last_seen_at: r.get(4)?,
+            revoked_at: r.get(5)?,
+        })
+    })?;
+    Ok(axum::Json(rows.collect::<Result<_, _>>()?))
+}
+
+/// A lost or replaced device stops: its token no longer opens anything.
+/// Its letter stays taken (its numbers stay its own).
+async fn revoke(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<StatusCode> {
+    let me = server.device(&headers)?;
+    let changed = lock(&server.control)?.execute(
+        "UPDATE devices SET revoked_at = ?3 WHERE id = ?1 AND org_id = ?2 AND revoked_at IS NULL",
+        params![id, me.org, now_ms()],
+    )?;
+    if changed == 0 {
+        return Err(ApiError::BadRequest("no such device".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `%D8%A3…` back to text (a device name sent in a header).
+fn percent_decoded(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| char::from(c).to_digit(16);
+        match (
+            b[i],
+            b.get(i + 1).copied().and_then(hex),
+            b.get(i + 2).copied().and_then(hex),
+        ) {
+            (b'%', Some(h), Some(l)) => {
+                out.push(u8::try_from(h * 16 + l).unwrap_or(b'?'));
+                i += 3;
+            }
+            (c, _, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).chars().take(80).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn names_come_back_from_headers() {
+        assert_eq!(
+            super::percent_decoded("Android%20%C2%B7%20%D9%83%D8%B1%D9%8A%D9%85"),
+            "Android · كريم"
+        );
+        assert_eq!(super::percent_decoded("plain"), "plain");
+        assert_eq!(super::percent_decoded("bad%zz"), "bad%zz");
+    }
 }

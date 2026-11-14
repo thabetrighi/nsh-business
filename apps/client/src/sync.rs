@@ -8,7 +8,7 @@
 //! keeps working without a server.
 
 use nb_store::sync::{
-    Invite, Joined, Linked, Position, PullResult, PushRequest, PushResult, StateInfo,
+    DeviceInfo, Invite, Joined, Linked, Position, PullResult, PushRequest, PushResult, StateInfo,
 };
 use nsh_core::platform::HttpRequest;
 use nsh_core::prelude::*;
@@ -61,6 +61,23 @@ async fn send_full(req: HttpRequest) -> Result<HttpResponse, Failed> {
     }
 }
 
+/// What the other devices see this one as: its kind of system, and who
+/// uses it when known ("Android · Karim").
+fn device_name(st: AppState) -> String {
+    let os = st.tn(match std::env::consts::OS {
+        "android" => "device.os.android",
+        "ios" => "device.os.ios",
+        "windows" => "device.os.windows",
+        "macos" => "device.os.macos",
+        "linux" => "device.os.linux",
+        _ => "device.os.web",
+    });
+    match st.user.get_untracked() {
+        Some(u) if !u.name.trim().is_empty() => format!("{os} · {}", u.name.trim()),
+        _ => os,
+    }
+}
+
 /// Reads the device's sync state into `st.sync`.
 pub async fn refresh(st: AppState) {
     let r = st
@@ -92,11 +109,17 @@ pub async fn link(st: AppState, url: String, key: String) -> Result<Linked, Fail
         .call(|s| s.snapshot_for_sync())
         .await
         .map_err(|e| failed("sync.err.local", e.message))?;
-    let name = st
-        .user
-        .get_untracked()
-        .map(|u| u.name)
-        .unwrap_or_else(|| "device".into());
+    // A header holds ASCII only: the name goes percent-encoded.
+    let name: String = device_name(st)
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
     let body = send(
         HttpRequest::new("POST", format!("{url}/v1/link"))
             .header("authorization", format!("Bearer {}", key.trim()))
@@ -155,7 +178,7 @@ async fn server_copy(server: &str, token: &str) -> Result<(Vec<u8>, Position), F
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn join(st: AppState, url: String, code: String) -> Result<Joined, Failed> {
     let url = clean_url(&url)?;
-    let body = serde_json::json!({ "code": code.trim(), "name": st.tn("sync.this_device") });
+    let body = serde_json::json!({ "code": code.trim(), "name": device_name(st) });
     let answer = send(
         HttpRequest::new("POST", format!("{url}/v1/join"))
             .header("content-type", "application/json")
@@ -168,8 +191,13 @@ pub async fn join(st: AppState, url: String, code: String) -> Result<Joined, Fai
     })?;
     let joined: Joined = decode(&answer)?;
     let (db, at) = server_copy(&url, &joined.token).await?;
+    let till = nb_i18n::tr_args(
+        st.lang(),
+        "sync.register_name",
+        &[("letter", &joined.prefix)],
+    );
     st.db()
-        .join(db, at, joined.clone(), url)
+        .join(db, at, joined.clone(), url, till)
         .await
         .map_err(local)?;
     refresh(st).await;
@@ -190,6 +218,41 @@ pub async fn invite(st: AppState) -> Result<Invite, Failed> {
     )
     .await?;
     decode(&body)
+}
+
+/// The organization's devices, as the server knows them.
+pub async fn devices(st: AppState) -> Result<Vec<DeviceInfo>, Failed> {
+    let link = st
+        .db()
+        .call(|s| s.sync_link())
+        .await
+        .map_err(local)?
+        .ok_or_else(|| failed("sync.err.not_linked", ""))?;
+    let body = send(
+        HttpRequest::new("GET", format!("{}/v1/devices", link.server_url))
+            .header("authorization", format!("Bearer {}", link.token)),
+    )
+    .await?;
+    decode(&body)
+}
+
+/// Stops a lost or replaced device: its token no longer opens anything.
+pub async fn revoke(st: AppState, id: String) -> Result<(), Failed> {
+    let link = st
+        .db()
+        .call(|s| s.sync_link())
+        .await
+        .map_err(local)?
+        .ok_or_else(|| failed("sync.err.not_linked", ""))?;
+    send(
+        HttpRequest::new(
+            "POST",
+            format!("{}/v1/devices/{id}/revoke", link.server_url),
+        )
+        .header("authorization", format!("Bearer {}", link.token)),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Sends what waits, then runs what the other devices did (one batch after

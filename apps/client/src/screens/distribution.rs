@@ -85,12 +85,7 @@ pub fn run<T: Send + 'static>(
 /// The register of `branch` whose till is open (cash collected on the road
 /// goes there).
 pub fn open_register(s: &nb_store::Store, branch: &str) -> nb_store::Result<Option<String>> {
-    let all = s.read(|r| {
-        let o = nb_store::repo::org::the_org(r.conn())?
-            .ok_or(nb_store::Error::NotFound("organization"))?;
-        nb_store::usecases::org::registers(r.conn(), o.org_id()?)
-    })?;
-    for reg in all.into_iter().filter(|r| r.branch_id == branch) {
+    for reg in nb_store::usecases::org::device_registers(s, branch)? {
         if nb_store::usecases::sales::current_shift(s, &reg.id)?.is_some() {
             return Ok(Some(reg.id));
         }

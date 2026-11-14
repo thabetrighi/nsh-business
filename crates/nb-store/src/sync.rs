@@ -90,6 +90,19 @@ pub struct Joined {
     pub cursor: i64,
 }
 
+/// A device of the organization, as `/v1/devices` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub prefix: String,
+    pub name: String,
+    pub created_at: i64,
+    pub last_seen_at: Option<i64>,
+    pub revoked_at: Option<i64>,
+    /// The device asking.
+    pub this: bool,
+}
+
 /// The server's copy, to compare with this one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateInfo {
@@ -250,6 +263,7 @@ impl Store {
             .sync_link()?
             .ok_or(crate::Error::NotFound("sync link"))?;
         let me = self.device().clone();
+        let till = self.own_register()?;
         let pending = self.unpushed(10_000)?;
         if pending.len() >= 10_000 {
             return Err(crate::Error::Corrupt("too many operations waiting".into()));
@@ -265,6 +279,7 @@ impl Store {
         }
         self.restore_snapshot(snapshot)?;
         self.adopt_device(me.id, &me.prefix)?;
+        self.set_own_register(till.as_deref())?;
         self.set_sync_link(&link.server_url, &link.token)?;
         self.set_pull_position(at)?;
         let pending: Vec<LoggedOp> = pending

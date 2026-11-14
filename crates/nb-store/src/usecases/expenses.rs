@@ -235,7 +235,7 @@ pub fn record_expense(store: &mut Store, meta: OpMeta, input: ExpenseInput) -> R
         if let (false, Some(s), "expense") = (from_bank, shift.as_deref(), kind.as_str())
             && input.total_minor > crate::usecases::sales::shift_of(w.tx(), s)?.expected_minor
         {
-            return Err(RuleError::on("amount", "shift.not_enough_cash").into());
+            w.cash_short("amount", s)?;
         }
 
         let map = ledger::account_map(w.tx(), org_id)?;

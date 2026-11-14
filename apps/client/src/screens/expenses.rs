@@ -493,12 +493,7 @@ fn open_till(st: AppState) -> Memo<Option<String>> {
             let db = st.db();
             async move {
                 db.call(move |s| {
-                    let all = s.read(|r| {
-                        let o = nb_store::repo::org::the_org(r.conn())?
-                            .ok_or(nb_store::Error::NotFound("organization"))?;
-                        nb_store::usecases::org::registers(r.conn(), o.org_id()?)
-                    })?;
-                    for r in all.into_iter().filter(|r| r.branch_id == branch) {
+                    for r in nb_store::usecases::org::device_registers(s, &branch)? {
                         if nb_store::usecases::sales::current_shift(s, &r.id)?.is_some() {
                             return Ok(Some(r.id));
                         }

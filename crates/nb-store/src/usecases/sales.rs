@@ -320,7 +320,7 @@ pub fn cash_movement(
             &Target::register(parse_id(&branch.id)?, register),
         )?;
         if !into_till && amount_minor > s.expected_minor {
-            return Err(RuleError::on("amount", "shift.not_enough_cash").into());
+            w.cash_short("amount", shift_id)?;
         }
         let (_, currency) = the_org(w.tx())?;
         let id = nb_core::id::idgen::uuid().to_string();

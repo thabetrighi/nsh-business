@@ -283,7 +283,23 @@ pub(crate) fn return_in(
                 )
                 .unwrap_or(i64::MAX)
             };
-            let back = refund(sold, before, base_milli)?;
+            let back = match refund(sold, before, base_milli) {
+                // Taken back on another device too, and paid: a fact.
+                Err(e) if w.replaying() && e.code == "return.too_much" => {
+                    w.note_review(
+                        "return_excess",
+                        "sale",
+                        &sale.id,
+                        serde_json::json!({
+                            "position": l.position,
+                            "qty_milli": base_milli,
+                            "left_milli": sold.qty_milli - before.qty_milli,
+                        }),
+                    )?;
+                    nb_domain::sale::refund_again(sold, base_milli)?
+                }
+                r => r?,
+            };
             net += back.net;
             tax += back.tax;
             let mut movement_id = None;
@@ -332,7 +348,7 @@ pub(crate) fn return_in(
             && let Some(shift) = shift.as_deref()
             && total > crate::usecases::sales::shift_of(w.tx(), shift)?.expected_minor
         {
-            return Err(RuleError::on("refund", "shift.not_enough_cash").into());
+            w.cash_short("refund", shift)?;
         }
         w.tx().execute(
             "INSERT INTO sale_returns (id, org_id, branch_id, sale_id, register_id, shift_id, number, refund_method, reason,
@@ -451,7 +467,7 @@ pub fn exchange(store: &mut Store, meta: OpMeta, input: ExchangeInput) -> Result
         )?;
         // The drawer pays what is given back.
         if crate::usecases::sales::shift_of(w.tx(), &shift)?.expected_minor < 0 {
-            return Err(RuleError::on("refund", "shift.not_enough_cash").into());
+            w.cash_short("refund", &shift)?;
         }
         let id = nb_core::id::idgen::uuid().to_string();
         w.tx().execute(
@@ -871,7 +887,7 @@ pub fn edit_sale(store: &mut Store, meta: OpMeta, input: EditInput) -> Result<Ed
                 |r| r.get(0),
             )?;
             if crate::usecases::sales::shift_of(w.tx(), &shift)?.expected_minor < 0 {
-                return Err(RuleError::on("refund", "shift.not_enough_cash").into());
+                w.cash_short("refund", &shift)?;
             }
             (back, sale)
         };

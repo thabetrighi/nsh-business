@@ -248,6 +248,27 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
         .map(|r| (r.status(), ()))?;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
+    // B gets a till of its own (as the app does when it joins): its code
+    // carries its letter, and it comes first on B only.
+    let till = nb_store::usecases::org::create_register(
+        &mut b,
+        OpMeta::new("register", Some(setup.org), Some(setup.owner)),
+        setup.branch,
+        "Caisse B",
+    )?;
+    assert_eq!(till.code, "B01");
+    b.set_own_register(Some(&till.id))?;
+    let branch = setup.branch.to_string();
+    assert_eq!(
+        nb_store::usecases::org::device_registers(&b, &branch)?[0].id,
+        till.id
+    );
+    push(&app, &joined.token, &mut b).await?;
+    pull(&app, &linked.token, &mut a).await?;
+    let on_a = nb_store::usecases::org::device_registers(&a, &branch)?;
+    assert_eq!(on_a.len(), 2);
+    assert_eq!(on_a[0].id, reg, "A keeps selling on its own");
+
     // Offline: both sell 4 of the 5 bags, and both add a customer.
     let on_a = sell(&mut a, &setup, &reg, &coffee, "4")?;
     let on_b = sell(&mut b, &setup, &reg, &coffee, "4")?;
@@ -298,6 +319,26 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
         );
     }
 
+    // Someone counts the shelf on A: the item is seen on every copy, though
+    // each noticed it at a different operation.
+    let item = a
+        .open_reviews()?
+        .into_iter()
+        .find(|r| r.kind == "stock_shortfall")
+        .ok_or("no shortfall on A")?;
+    nb_store::usecases::reviews::resolve_review(
+        &mut a,
+        OpMeta::new("review", Some(setup.org), Some(setup.owner)),
+        nb_store::usecases::reviews::ReviewKey {
+            kind: item.kind.clone(),
+            entity_id: item.entity_id.clone(),
+        },
+    )?;
+    assert!(nb_store::usecases::reviews::review_items(&a)?.is_empty());
+    push(&app, &linked.token, &mut a).await?;
+    pull(&app, &joined.token, &mut b).await?;
+    assert!(nb_store::usecases::reviews::review_items(&b)?.is_empty());
+
     // Nothing new: an empty pull; a new sale on B reaches A.
     let again = pull(&app, &linked.token, &mut a).await?;
     assert!(again.ops.is_empty());
@@ -329,7 +370,9 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
     )?;
     let (db, at) = copy(&app, &linked.token).await?;
     let me = a.device().clone();
+    a.set_own_register(Some(&reg))?;
     a.resync(&db, at)?;
+    assert_eq!(a.own_register()?.as_deref(), Some(reg.as_str()), "kept");
     assert_eq!(a.device().id, me.id);
     assert_eq!(a.unpushed_count()?, 1);
     push(&app, &linked.token, &mut a).await?;
@@ -422,6 +465,31 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
         })
     };
     assert_eq!(users(&a)?, 1);
+
+    // The devices, and a lost one stops.
+    let (_, bytes) = call(&app, "GET", "/v1/devices", &linked.token, Vec::new()).await?;
+    let list: Vec<nb_server::DeviceInfo> = serde_json::from_slice(&bytes)?;
+    assert_eq!(list.len(), 2);
+    assert!(list[0].this && list[0].prefix == "A");
+    assert_eq!(list[1].name, "Caisse 2");
+    call(
+        &app,
+        "POST",
+        &format!("/v1/devices/{}/revoke", list[1].id),
+        &linked.token,
+        Vec::new(),
+    )
+    .await?;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/state")
+                .header("authorization", format!("Bearer {}", joined.token))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())

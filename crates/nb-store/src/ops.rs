@@ -374,6 +374,9 @@ pub enum Call {
     ReturnsEditSale {
         input: crate::usecases::returns::EditInput,
     },
+    ReviewsResolveReview {
+        key: crate::usecases::reviews::ReviewKey,
+    },
     SalesOpenShift {
         register_id: String,
         opening_minor: i64,
@@ -834,6 +837,9 @@ pub fn replay(store: &mut Store, meta: OpMeta, call: Call) -> Result<serde_json:
         }
         Call::ReturnsEditSale { input } => {
             serde_json::to_value(crate::usecases::returns::edit_sale(store, meta, input)?)?
+        }
+        Call::ReviewsResolveReview { key } => {
+            serde_json::to_value(crate::usecases::reviews::resolve_review(store, meta, key)?)?
         }
         Call::SalesOpenShift {
             register_id,

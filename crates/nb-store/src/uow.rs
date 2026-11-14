@@ -7,7 +7,7 @@
 use nb_core::{HlcTimestamp, OperationId, OrganizationId};
 use nb_domain::access::{self, Decision, Permission, Target};
 use nb_domain::numbering::{self, DocKind};
-use nb_domain::{ApprovalId, UserId};
+use nb_domain::{ApprovalId, RuleError, UserId};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -94,6 +94,43 @@ impl<'a> Writer<'a> {
     /// Whether this runs an operation again (a replica, the server).
     pub fn replaying(&self) -> bool {
         self.replaying
+    }
+
+    /// Cash leaving a drawer that holds less: refused here; when running an
+    /// operation made elsewhere, the cash already left (two devices paid
+    /// from what each thought was there), so it is noted for a person.
+    pub fn cash_short(&mut self, field: &'static str, shift: &str) -> Result<()> {
+        if !self.replaying {
+            return Err(RuleError::on(field, "shift.not_enough_cash").into());
+        }
+        self.note_review("drawer_short", "shift", shift, serde_json::json!({}))
+    }
+
+    /// Leaves something for a person to look at: what running an operation
+    /// made elsewhere found (it is a fact, so it is not refused).
+    pub fn note_review(
+        &mut self,
+        kind: &str,
+        entity: &str,
+        entity_id: &str,
+        detail: serde_json::Value,
+    ) -> Result<()> {
+        let at = self.now();
+        let op = self.meta.id.to_string();
+        self.tx().execute(
+            "INSERT INTO reviews (id, kind, entity, entity_id, detail, operation_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                nb_core::id::idgen::uuid().to_string(),
+                kind,
+                entity,
+                entity_id,
+                detail.to_string(),
+                op,
+                at
+            ],
+        )?;
+        Ok(())
     }
 
     /// What a warehouse allows below zero. An operation run again already

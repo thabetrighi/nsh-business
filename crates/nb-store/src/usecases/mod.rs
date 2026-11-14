@@ -23,6 +23,7 @@ pub mod purchase_orders;
 pub mod purchasing;
 pub mod reports;
 pub mod returns;
+pub mod reviews;
 pub mod sales;
 pub mod setup;
 pub mod stock;

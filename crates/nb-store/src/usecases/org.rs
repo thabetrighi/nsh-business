@@ -340,11 +340,23 @@ fn insert_register(
     branch: &str,
     name: &str,
 ) -> Result<Register> {
-    let code = next_code(
-        w,
-        "SELECT COUNT(*) FROM cash_registers WHERE branch_id = ?1",
-        branch,
-    )?;
+    // The first device numbers 01, 02…; another one its own B01, B02…:
+    // two devices adding a register while apart never take the same code.
+    let prefix = w.device().prefix.clone();
+    let code = if prefix == "A" {
+        next_code(
+            w,
+            "SELECT COUNT(*) FROM cash_registers WHERE branch_id = ?1",
+            branch,
+        )?
+    } else {
+        let n: i64 = w.tx().query_row(
+            "SELECT COUNT(*) FROM cash_registers WHERE branch_id = ?1 AND device_id = ?2",
+            params![branch, w.device().id.to_string()],
+            |r| r.get(0),
+        )?;
+        format!("{prefix}{:02}", n + 1)
+    };
     let r = Register {
         id: RegisterId::new().to_string(),
         branch_id: branch.into(),
@@ -357,6 +369,20 @@ fn insert_register(
         params![r.id, org_id.to_string(), r.branch_id, r.code, r.name, w.now(), w.actor_text(), w.device().id.to_string()],
     )?;
     Ok(r)
+}
+
+/// The registers of `branch` in the order this device uses them: its own
+/// first (a device that joined a shop sells on its own till), then the
+/// others.
+pub fn device_registers(store: &Store, branch: &str) -> Result<Vec<Register>> {
+    let own = store.own_register()?;
+    let mut all: Vec<Register> = store.read(|r| {
+        let o = crate::repo::org::the_org(r.conn())?.ok_or(Error::NotFound("organization"))?;
+        registers(r.conn(), o.org_id()?)
+    })?;
+    all.retain(|r| r.branch_id == branch);
+    all.sort_by_key(|r| Some(&r.id) != own.as_ref());
+    Ok(all)
 }
 
 /// The first cash register of a new branch (setup, new branches).

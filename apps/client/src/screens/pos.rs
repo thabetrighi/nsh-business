@@ -16,7 +16,7 @@ use nb_store::usecases::customers::{
     CustomerInput, CustomerQuery, CustomerRow, list_customers, save_customer,
 };
 use nb_store::usecases::documents::get_document;
-use nb_store::usecases::org::{Register, registers};
+use nb_store::usecases::org::Register;
 use nb_store::usecases::products::list_products;
 use nb_store::usecases::returns::{
     EditInput, ExchangeInput, HeldCart, ReturnInput, ReturnLineInput, SaleDetail, edit_sale,
@@ -367,12 +367,11 @@ pub fn pos_page(st: AppState, compact: bool) -> View {
             let db = st.db();
             async move {
                 db.call(move |s| {
-                    let all = s.read(|r| {
-                        let o = nb_store::repo::org::the_org(r.conn())?
-                            .ok_or(nb_store::Error::NotFound("organization"))?;
-                        registers(r.conn(), o.org_id()?)
-                    })?;
-                    let Some(reg) = all.into_iter().find(|r| r.branch_id == branch) else {
+                    // This device's own till first (a device that joined).
+                    let Some(reg) = nb_store::usecases::org::device_registers(s, &branch)?
+                        .into_iter()
+                        .next()
+                    else {
                         return Ok(None);
                     };
                     let shift = current_shift(s, &reg.id)?;

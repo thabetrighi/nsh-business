@@ -357,33 +357,37 @@ pub fn setup_wizard(st: AppState) -> View {
         busy.set(true);
         error.set(String::new());
         let (u, c) = (server.get_untracked(), code.get_untracked());
-        let task = spawn(async move {
-            #[cfg(not(target_arch = "wasm32"))]
-            match crate::sync::join(st, u, c).await {
-                Ok(j) => {
-                    crate::ui::overlay::show_toast(
-                        st,
-                        nb_i18n::tr_args(st.lang(), "sync.joined", &[("org", &j.org_name)]),
-                    );
-                    st.needs_setup.set(false);
-                    st.connect();
-                }
-                Err(f) => {
-                    busy.set(false);
-                    let mut t = st.tn(f.key);
-                    if !f.detail.is_empty() {
-                        t.push_str(" — ");
-                        t.push_str(&f.detail);
+        // Under the root: this screen goes away once the shop opens, and
+        // what it started would end with it.
+        let task = st.root.run(|| {
+            spawn(async move {
+                #[cfg(not(target_arch = "wasm32"))]
+                match crate::sync::join(st, u, c).await {
+                    Ok(j) => {
+                        crate::ui::overlay::show_toast(
+                            st,
+                            nb_i18n::tr_args(st.lang(), "sync.joined", &[("org", &j.org_name)]),
+                        );
+                        st.needs_setup.set(false);
+                        st.connect();
                     }
-                    error.set(t);
+                    Err(f) => {
+                        busy.set(false);
+                        let mut t = st.tn(f.key);
+                        if !f.detail.is_empty() {
+                            t.push_str(" — ");
+                            t.push_str(&f.detail);
+                        }
+                        error.set(t);
+                    }
                 }
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                let _ = (u, c);
-                busy.set(false);
-                error.set(st.tn("sync.web_later"));
-            }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (u, c);
+                    busy.set(false);
+                    error.set(st.tn("sync.web_later"));
+                }
+            })
         });
         drop(task); // runs to completion: tasks end with their owner, not their handle
     };

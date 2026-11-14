@@ -372,6 +372,7 @@ impl Db {
         at: nb_store::sync::Position,
         joined: nb_store::sync::Joined,
         server_url: String,
+        register_name: String,
     ) -> Result<Session, DbError> {
         self.run(move |state| {
             let store = state.store.as_mut().ok_or_else(stopped)?;
@@ -381,6 +382,18 @@ impl Db {
             let session = read_session(store)
                 .map_err(DbError::from)?
                 .ok_or_else(stopped)?;
+            // Its own till: a drawer of its own, counted on its own (the
+            // register travels to the others like any operation).
+            let till = nb_store::usecases::org::create_register(
+                store,
+                session.meta("register.create"),
+                session.branch(),
+                &register_name,
+            )
+            .map_err(DbError::from)?;
+            store
+                .set_own_register(Some(&till.id))
+                .map_err(DbError::from)?;
             state.session = Ok(session);
             Ok(session)
         })

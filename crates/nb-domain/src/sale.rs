@@ -391,6 +391,26 @@ impl Refund {
     }
 }
 
+/// A return of `qty_milli` that the line no longer has: two devices took
+/// the same goods back while apart, and the money already went. Its share
+/// of the whole sale, as the device that gave it computed it alone.
+pub fn refund_again(sold: Sold, qty_milli: i64) -> Result<Refund, RuleError> {
+    if qty_milli <= 0 || sold.qty_milli <= 0 {
+        return Err(RuleError::on("qty", "sale.qty_positive"));
+    }
+    let share = |total: i64| -> i64 {
+        let part = i128::from(total) * i128::from(qty_milli.min(sold.qty_milli))
+            / i128::from(sold.qty_milli);
+        i64::try_from(part).unwrap_or(0)
+    };
+    Ok(Refund {
+        qty_milli,
+        net: share(sold.net),
+        tax: share(sold.tax),
+        cost: unit_cost(sold.unit_cost, qty_milli),
+    })
+}
+
 /// Returning `qty_milli` more of a line already returned by `before`: in
 /// proportion to what was sold, and the exact remainder when the last of
 /// it comes back — so the returns of a line never exceed its sale.

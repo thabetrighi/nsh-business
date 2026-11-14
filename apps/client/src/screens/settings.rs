@@ -1065,7 +1065,10 @@ fn devices(st: AppState, compact: bool) -> View {
 
 fn sync(st: AppState, compact: bool) -> View {
     let status = crate::screens::cloud::cloud_card(st, compact);
-    let mut v = view().gap(px(20.0)).child(status);
+    let mut v = view()
+        .gap(px(20.0))
+        .child(status)
+        .child(crate::screens::cloud::reviews_card(st));
     #[cfg(not(target_arch = "wasm32"))]
     {
         v = v.child(crate::screens::backup::backup_card(st, compact));
