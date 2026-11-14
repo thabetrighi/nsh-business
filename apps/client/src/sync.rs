@@ -649,7 +649,7 @@ pub async fn unlink(st: AppState) {
 }
 
 /// The background exchange, from the root: soon after the start, then
-/// every five seconds (what waits here goes out; the others' news comes
+/// every two seconds (what waits here goes out; the others' news comes
 /// through [`listen_after`]).
 pub fn start(st: AppState) {
     let tick = move || {
@@ -672,7 +672,7 @@ pub fn start(st: AppState) {
     drop(first); // runs while the root lives
     // What is made here goes out within seconds; news from the others
     // arrives through `listen` as soon as they send it.
-    let every = set_interval(std::time::Duration::from_secs(5), tick);
+    let every = set_interval(std::time::Duration::from_secs(2), tick);
     drop(every); // runs while the root lives
     listen_after(st, 6);
 }

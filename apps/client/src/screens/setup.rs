@@ -659,7 +659,12 @@ pub fn setup_wizard(st: AppState) -> View {
                                     .last_seen_at
                                     .map(|t| crate::screens::common::date_time(st, t))
                                     .unwrap_or_default();
-                                let caption = format!("{} · {} · {seen}", d.prefix, d.name);
+                                // Each part isolated: Arabic, Latin and digits
+                                // in one line keep their order.
+                                let caption = format!(
+                                    "\u{2068}{}\u{2069} · \u{2068}{}\u{2069} · \u{2068}{seen}\u{2069}",
+                                    d.prefix, d.name
+                                );
                                 list = list.child(
                                     button(
                                         Variant::Secondary,
