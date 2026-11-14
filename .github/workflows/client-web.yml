@@ -6,7 +6,7 @@ name: client-web
 
 on:
   push:
-    branches: [main]
+    branches: [main, web-sync-check]
     paths: ["apps/client/**", "crates/**", ".github/workflows/client-web.yml"]
   workflow_dispatch:
 
