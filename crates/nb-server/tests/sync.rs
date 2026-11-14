@@ -198,6 +198,37 @@ async fn a_device_and_its_copy_on_the_server() -> R {
     let restored = Store::open(&path, StoreOptions::default())?;
     assert_eq!(restored.fingerprint()?, dev.fingerprint()?);
 
+    // A copy a day, the oldest going.
+    let server = nb_server::Server::open(&dir, KEY).map_err(|e| format!("{e:?}"))?;
+    let day = 86_400_000;
+    let start = 1_794_304_800_000;
+    for k in 0..5 {
+        assert_eq!(
+            server
+                .backup_all(start + k * day, 3)
+                .map_err(|e| format!("{e:?}"))?,
+            1
+        );
+    }
+    assert_eq!(
+        server
+            .backup_all(start + 4 * day, 3)
+            .map_err(|e| format!("{e:?}"))?,
+        0,
+        "once a day"
+    );
+    let kept: Vec<_> = std::fs::read_dir(dir.join("backups").join(&linked.org_id))?
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(kept.len(), 3);
+    let newest = dir
+        .join("backups")
+        .join(&linked.org_id)
+        .join("2026-11-14.sqlite");
+    assert!(newest.exists());
+    let copy = Store::open(&newest, StoreOptions::default())?;
+    assert_eq!(copy.fingerprint()?, dev.fingerprint()?);
+
     // A token that is not a device's.
     let (status, _) = call(&app, "GET", "/v1/state", "nope", Vec::new()).await?;
     assert_eq!(status, StatusCode::UNAUTHORIZED);

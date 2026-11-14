@@ -56,6 +56,30 @@ pub mod idgen {
         })
     }
 
+    /// Identifiers on this thread derived from `seed` (and stamped `at_ms`)
+    /// until the guard is dropped: a test that makes the same calls gets
+    /// the same identifiers, so a failure found at random comes back with
+    /// its seed. Not for production code.
+    #[must_use = "the seed holds only while the guard lives"]
+    pub fn seed_thread(seed: u64, at_ms: i64) -> SeedGuard {
+        let before = GEN.with(|g| g.get());
+        GEN.with(|g| {
+            g.set(Some(Gen {
+                ms: u64::try_from(at_ms).unwrap_or(0),
+                seed: mix(seed),
+                n: 0,
+            }))
+        });
+        SeedGuard {
+            _restore: Restore(before),
+        }
+    }
+
+    /// See [`seed_thread`].
+    pub struct SeedGuard {
+        _restore: Restore,
+    }
+
     /// Restores the previous generator when dropped (also on panic).
     struct Restore(Option<Gen>);
 

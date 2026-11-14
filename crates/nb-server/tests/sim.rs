@@ -217,17 +217,29 @@ fn sound(s: &Store) -> Res<()> {
     Ok(())
 }
 
-async fn scenario(seed: u64, devices: usize, steps: usize) -> Res<()> {
+async fn scenario(seed: u64, devices: usize, steps: usize) -> Res<String> {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    let dir = std::env::temp_dir().join(format!("nb-sim-{}", nb_core::OperationId::new()));
+    let dir = std::env::temp_dir().join(format!(
+        "nb-sim-{}-{seed}-{}",
+        std::process::id(),
+        nb_core::OperationId::new()
+    ));
+    // The same seed makes the same identifiers: a failure comes back.
+    let _ids = nb_core::id::idgen::seed_thread(seed, 1_794_304_800_000);
     let app = router(nb_server::Server::open(&dir, KEY).map_err(|e| format!("{e:?}"))?);
-    let clock = Arc::new(FixedClock::new(1_794_304_800_000));
-    let options = || StoreOptions {
-        clock: clock.clone(),
+    // Each device's own clock, up to ten minutes off.
+    let clocks: Vec<Arc<FixedClock>> = (0..devices)
+        .map(|_| {
+            let skew = rng.next(1_200_001) as i64 - 600_000;
+            Arc::new(FixedClock::new(1_794_304_800_000 + skew))
+        })
+        .collect();
+    let options = |k: usize| StoreOptions {
+        clock: clocks[k].clone(),
         ..Default::default()
     };
 
-    let mut first = Store::open_in_memory(options())?;
+    let mut first = Store::open_in_memory(options(0))?;
     let setup: SetupResult = setup_organization(
         &mut first,
         SetupInput {
@@ -277,14 +289,15 @@ async fn scenario(seed: u64, devices: usize, steps: usize) -> Res<()> {
         let invite: Invite = serde_json::from_slice(
             &ok(request(&app, "POST", "/v1/invite", &all[0].token, Vec::new()).await?).await?,
         )?;
+        let mut store = Store::open_in_memory(options(k))?;
         let body = serde_json::to_vec(&JoinRequest {
             code: invite.code,
             name: format!("Caisse {k}"),
+            device_id: Some(store.device().id.to_string()),
         })?;
         let joined: Joined =
             serde_json::from_slice(&ok(request(&app, "POST", "/v1/join", "", body).await?).await?)?;
         let (db, at) = copy(&app, &joined.token).await?;
-        let mut store = Store::open_in_memory(options())?;
         store.join_with(&db, at, &joined, "http://server")?;
         all.push(Device {
             store,
@@ -459,7 +472,10 @@ async fn scenario(seed: u64, devices: usize, steps: usize) -> Res<()> {
             }
         };
         made += usize::from(done);
-        clock.advance(1 + rng.next(5_000) as i64);
+        let step_ms = 1 + rng.next(5_000) as i64;
+        for c in &clocks {
+            c.advance(step_ms);
+        }
     }
 
     // Everyone online: send everything, then take everything.
@@ -518,22 +534,43 @@ async fn scenario(seed: u64, devices: usize, steps: usize) -> Res<()> {
         );
     }
     assert!(n as usize >= made, "seed {seed}: {n} logged < {made} made");
+    if std::env::var("NB_SIM_TABLES").is_ok() {
+        for (t, h) in theirs.iter() {
+            eprintln!("table {t} {h}");
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
-    Ok(())
+    Ok(last)
 }
 
 #[tokio::test]
 async fn devices_at_random_meet_in_the_same_state() -> Res<()> {
-    let runs: u64 = std::env::var("NB_SIM_RUNS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(12);
-    for seed in 1..=runs {
+    let var = |name: &str, or: u64| -> u64 {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(or)
+    };
+    // `NB_SIM_SEED=n` runs one scenario again; `NB_SIM_FROM`/`NB_SIM_RUNS`
+    // a range (a long run: thousands).
+    let (from, runs) = match std::env::var("NB_SIM_SEED") {
+        Ok(_) => (var("NB_SIM_SEED", 1), 1),
+        Err(_) => (var("NB_SIM_FROM", 1), var("NB_SIM_RUNS", 12)),
+    };
+    for seed in from..from + runs {
         scenario(seed, 2 + (seed % 4) as usize, 160).await?;
     }
     eprintln!(
         "{runs} scenarios; copies taken again after a different result: {}",
         HEALED.load(std::sync::atomic::Ordering::Relaxed)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_seed_plays_the_same_twice() -> Res<()> {
+    let first = scenario(7, 3, 80).await?;
+    let again = scenario(7, 3, 80).await?;
+    assert_eq!(first, again, "a seed must reproduce its scenario");
     Ok(())
 }

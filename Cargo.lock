@@ -2261,6 +2261,7 @@ dependencies = [
 name = "nb-server"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "axum",
  "getrandom 0.3.4",
  "http-body-util",

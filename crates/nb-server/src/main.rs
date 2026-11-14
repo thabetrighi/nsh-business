@@ -5,6 +5,11 @@
 //! - `NB_SERVER_ADDR` address to listen on (default `0.0.0.0:8787`)
 //! - `NB_SERVER_KEY`  the enrollment key devices show to link (required,
 //!   at least 12 characters)
+//! - `NB_SERVER_OPEN_SIGNUP=1` anyone may make an account (a public
+//!   server); otherwise making one asks for `NB_SERVER_KEY`
+//!
+//! - `NB_SERVER_KEEP_DAYS` daily copies kept per shop (default 14), in
+//!   `NB_SERVER_DIR/backups`
 //!
 //! Put it behind TLS (a reverse proxy) when it faces the internet.
 
@@ -19,7 +24,10 @@ async fn main() {
         eprintln!("NB_SERVER_KEY is required (the enrollment key devices show to link).");
         std::process::exit(2);
     };
-    let server = match nb_server::Server::open(&dir, &key) {
+    // A public server lets anyone make an account; a private one (a shop's
+    // or a partner's) asks for the key.
+    let open_signup = std::env::var("NB_SERVER_OPEN_SIGNUP").is_ok_and(|v| v == "1");
+    let server = match nb_server::Server::open_with(&dir, &key, open_signup) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("cannot open {}: {e:?}", dir.display());
@@ -34,6 +42,28 @@ async fn main() {
         }
     };
     eprintln!("nb-server listening on {addr}, data in {}", dir.display());
+    // A copy of every shop each day, the last 14 kept (`NB_SERVER_KEEP_DAYS`).
+    let keep: u32 = std::env::var("NB_SERVER_KEEP_DAYS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(14);
+    {
+        let server = server.clone();
+        tokio::spawn(async move {
+            loop {
+                let s = server.clone();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+                match tokio::task::spawn_blocking(move || s.backup_all(now, keep)).await {
+                    Ok(Ok(n)) if n > 0 => eprintln!("backups: {n} shop(s) copied"),
+                    Ok(Err(e)) => eprintln!("backups failed: {e:?}"),
+                    _ => {}
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        });
+    }
     let app = nb_server::router(server);
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(async {

@@ -1,7 +1,8 @@
 //! What running another device's operations left to look at (M11/M2):
 //! goods sold on two devices that were not there (`stock_shortfall`), the
 //! same goods taken back twice (`return_excess`), cash paid from a drawer
-//! that held less once both devices' payments met (`drawer_short`).
+//! that held less once both devices' payments met (`drawer_short`), an
+//! operation of this device the server refused (`refused`: undone here).
 //! Nothing was refused (it
 //! happened at a till); someone checks the shelf or the drawer and marks
 //! it seen. Each copy finds its own; marking one seen marks it everywhere.
@@ -34,7 +35,9 @@ pub fn review_items(store: &Store) -> Result<Vec<ReviewItem>> {
     store.read(|r| {
         let mut st = r.conn().prepare(
             "SELECT v.kind, v.entity, v.entity_id, v.detail, COALESCE(v.operation_id, ''), v.created_at,
-                    COALESCE(p.name, s.number, cr.name, v.entity_id)
+                    COALESCE(p.name, s.number, cr.name,
+                             CASE WHEN v.entity = 'operation' THEN json_extract(v.detail, '$.kind') END,
+                             v.entity_id)
              FROM reviews v
              LEFT JOIN products p ON v.entity = 'product' AND p.id = v.entity_id
              LEFT JOIN sales s ON v.entity = 'sale' AND s.id = v.entity_id

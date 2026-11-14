@@ -103,6 +103,25 @@ pub struct DeviceInfo {
     pub this: bool,
 }
 
+/// An account session, and (at signup only) its recovery codes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub token: String,
+    pub name: String,
+    pub phone: String,
+    #[serde(default)]
+    pub recovery_codes: Vec<String>,
+}
+
+/// An organization the account belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgInfo {
+    pub org_id: String,
+    pub name: String,
+    pub role: String,
+    pub devices: i64,
+}
+
 /// The server's copy, to compare with this one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateInfo {
@@ -217,6 +236,46 @@ impl Store {
             self.connection()
                 .execute("UPDATE sync_link SET last_error = ?1 WHERE id = 1", [error])?;
         }
+        Ok(())
+    }
+
+    /// The server refused one of this device's operations (it no longer
+    /// made sense once the others' came first: a transfer received on two
+    /// devices…). It is set aside, never sent again, and noted for a person;
+    /// this device then takes the server's copy (see [`Store::resync`]) so
+    /// what the operation did here is undone, and runs again what else
+    /// waited.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_aside(
+        &mut self,
+        refused: nb_core::OperationId,
+        why: &str,
+        snapshot: &[u8],
+        at: Position,
+    ) -> Result<()> {
+        let kind: Option<String> = {
+            use rusqlite::OptionalExtension;
+            self.connection()
+                .query_row(
+                    "SELECT kind FROM operations WHERE id = ?1",
+                    [refused.to_string()],
+                    |r| r.get(0),
+                )
+                .optional()?
+        };
+        self.mark_pushed(&[refused])?;
+        self.resync(snapshot, at)?;
+        let now = self.now_ms();
+        self.connection().execute(
+            "INSERT INTO reviews (id, kind, entity, entity_id, detail, operation_id, created_at)
+             VALUES (?1, 'refused', 'operation', ?2, ?3, ?2, ?4)",
+            rusqlite::params![
+                nb_core::OperationId::new().to_string(),
+                refused.to_string(),
+                serde_json::json!({ "kind": kind.unwrap_or_default(), "why": why }).to_string(),
+                now
+            ],
+        )?;
         Ok(())
     }
 

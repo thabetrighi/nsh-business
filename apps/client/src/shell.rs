@@ -755,6 +755,12 @@ fn sync_state(st: AppState) -> (Status, Icon, &'static str) {
         (Status::Info, Icon::Refresh, "sync.busy")
     } else if !v.error.is_empty() {
         (Status::Danger, Icon::Alert, "sync.failing")
+    } else if v
+        .last_ok_at
+        .is_some_and(|t| crate::state::now_ms() - t > crate::sync::STALE_MS)
+    {
+        // A week without reaching the server (ADR-0007).
+        (Status::Danger, Icon::Alert, "sync.stale")
     } else if v.pending > 0 {
         (Status::Warning, Icon::CloudUpload, "sync.waiting")
     } else {

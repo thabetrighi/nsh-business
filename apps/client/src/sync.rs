@@ -8,12 +8,17 @@
 //! keeps working without a server.
 
 use nb_store::sync::{
-    DeviceInfo, Invite, Joined, Linked, Position, PullResult, PushRequest, PushResult, StateInfo,
+    DeviceInfo, Invite, Joined, Linked, OrgInfo, Position, PullResult, PushRequest, PushResult,
+    Session, StateInfo,
 };
 use nsh_core::platform::HttpRequest;
 use nsh_core::prelude::*;
 
 use crate::state::AppState;
+
+/// After this long without reaching the server, the top bar warns (the
+/// store locks settings at 14 days, ADR-0007).
+pub const STALE_MS: i64 = 7 * 86_400_000;
 
 /// What the screens show about sync.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -35,6 +40,14 @@ pub struct Failed {
     pub detail: String,
 }
 
+impl Failed {
+    /// Not on the web yet (its own copy of the shop comes later).
+    #[cfg(target_arch = "wasm32")]
+    pub fn web() -> Failed {
+        failed("sync.web_later", "")
+    }
+}
+
 fn failed(key: &'static str, detail: impl Into<String>) -> Failed {
     Failed {
         key,
@@ -53,7 +66,15 @@ async fn send_full(req: HttpRequest) -> Result<HttpResponse, Failed> {
     match res.status() {
         200..=299 => Ok(res),
         401 => Err(failed("sync.err.unauthorized", "")),
-        409 => Err(failed("sync.err.already_linked", "")),
+        // What the conflict is (`phone.taken`, `account.locked`, `behind`…)
+        // stays in the detail for whoever asked.
+        409 => Err(failed(
+            "sync.err.already_linked",
+            serde_json::from_slice::<serde_json::Value>(&res.body)
+                .ok()
+                .and_then(|v| v["detail"].as_str().map(str::to_owned))
+                .unwrap_or_default(),
+        )),
         s => Err(failed(
             "sync.err.server",
             format!("{s} {}", String::from_utf8_lossy(&res.body)),
@@ -85,17 +106,20 @@ pub async fn refresh(st: AppState) {
         .call(|s| Ok((s.sync_link()?, s.unpushed_count()?, s.open_reviews()?.len())))
         .await;
     if let Ok((link, pending, reviews)) = r {
-        st.sync.update(|v| {
-            v.linked = link.is_some();
-            v.server = link
-                .as_ref()
-                .map(|l| l.server_url.clone())
-                .unwrap_or_default();
-            v.last_ok_at = link.as_ref().and_then(|l| l.last_push_at);
-            v.error = link.map(|l| l.last_error).unwrap_or_default();
-            v.pending = pending;
-            v.reviews = i64::try_from(reviews).unwrap_or(i64::MAX);
-        });
+        let mut v = st.sync.get_untracked();
+        v.linked = link.is_some();
+        v.server = link
+            .as_ref()
+            .map(|l| l.server_url.clone())
+            .unwrap_or_default();
+        v.last_ok_at = link.as_ref().and_then(|l| l.last_push_at);
+        v.error = link.map(|l| l.last_error).unwrap_or_default();
+        v.pending = pending;
+        v.reviews = i64::try_from(reviews).unwrap_or(i64::MAX);
+        // Every few seconds: what shows it is drawn again only on a change.
+        if v != st.sync.get_untracked() {
+            st.sync.set(v);
+        }
     }
 }
 
@@ -135,6 +159,122 @@ pub async fn link(st: AppState, url: String, key: String) -> Result<Linked, Fail
         .map_err(|e| failed("sync.err.local", e.message))?;
     refresh(st).await;
     Ok(linked)
+}
+
+/// Signs in to an account on the server at `url` (ADR-0007): a session for
+/// linking this shop or adding this device to one of the account's shops.
+/// The session is not kept: the device gets its own token.
+pub async fn sign_in(url: &str, phone: &str, password: &str) -> Result<Session, Failed> {
+    let url = clean_url(url)?;
+    let body = serde_json::json!({ "phone": phone.trim(), "password": password });
+    let answer = send(
+        HttpRequest::new("POST", format!("{url}/v1/login"))
+            .header("content-type", "application/json")
+            .body(body.to_string().into_bytes()),
+    )
+    .await
+    .map_err(account_error)?;
+    decode(&answer)
+}
+
+/// Makes an account; its recovery codes come back once (to be kept).
+pub async fn sign_up(
+    url: &str,
+    name: &str,
+    phone: &str,
+    password: &str,
+    key: &str,
+) -> Result<Session, Failed> {
+    let url = clean_url(url)?;
+    let body = serde_json::json!({
+        "name": name.trim(),
+        "phone": phone.trim(),
+        "password": password,
+        "key": key.trim(),
+    });
+    let answer = send(
+        HttpRequest::new("POST", format!("{url}/v1/signup"))
+            .header("content-type", "application/json")
+            .body(body.to_string().into_bytes()),
+    )
+    .await
+    .map_err(account_error)?;
+    decode(&answer)
+}
+
+/// A forgotten password: a recovery code (each works once) and a new
+/// password; the account's other sessions end.
+pub async fn recover(
+    url: &str,
+    phone: &str,
+    code: &str,
+    password: &str,
+) -> Result<Session, Failed> {
+    let url = clean_url(url)?;
+    let body =
+        serde_json::json!({ "phone": phone.trim(), "code": code.trim(), "password": password });
+    let answer = send(
+        HttpRequest::new("POST", format!("{url}/v1/recover"))
+            .header("content-type", "application/json")
+            .body(body.to_string().into_bytes()),
+    )
+    .await
+    .map_err(|f| match f.key {
+        "sync.err.unauthorized" => failed("account.err.code", ""),
+        _ => account_error(f),
+    })?;
+    decode(&answer)
+}
+
+/// The account's shops.
+pub async fn my_orgs(url: &str, session: &str) -> Result<Vec<OrgInfo>, Failed> {
+    let url = clean_url(url)?;
+    let body = send(
+        HttpRequest::new("GET", format!("{url}/v1/orgs"))
+            .header("authorization", format!("Bearer {session}")),
+    )
+    .await?;
+    decode(&body)
+}
+
+/// This (new) device joins one of the account's shops: no code needed.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn join_mine(
+    st: AppState,
+    url: String,
+    session: String,
+    org: String,
+) -> Result<Joined, Failed> {
+    let url = clean_url(&url)?;
+    let mine = st
+        .db()
+        .call(|s| Ok(s.device().id.to_string()))
+        .await
+        .map_err(local)?;
+    let body = serde_json::json!({ "name": device_name(st), "device_id": mine });
+    let answer = send(
+        HttpRequest::new("POST", format!("{url}/v1/orgs/{org}/devices"))
+            .header("authorization", format!("Bearer {session}"))
+            .header("content-type", "application/json")
+            .body(body.to_string().into_bytes()),
+    )
+    .await?;
+    let joined: Joined = decode(&answer)?;
+    finish_join(st, url, joined).await
+}
+
+/// What the server says about an account, in the app's words.
+fn account_error(f: Failed) -> Failed {
+    let key = match (f.key, f.detail.as_str()) {
+        ("sync.err.unauthorized", _) => "account.err.wrong",
+        (_, d) if d.contains("phone.taken") => "account.err.taken",
+        (_, d) if d.contains("phone.invalid") => "account.err.phone",
+        (_, d) if d.contains("password.short") => "account.err.short",
+        (_, d) if d.contains("account.locked") => "account.err.locked",
+        (_, d) if d.contains("name.required") => "account.err.name",
+        _ => return f,
+    };
+    failed(key, "")
 }
 
 fn local(e: crate::db::DbError) -> Failed {
@@ -178,7 +318,16 @@ async fn server_copy(server: &str, token: &str) -> Result<(Vec<u8>, Position), F
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn join(st: AppState, url: String, code: String) -> Result<Joined, Failed> {
     let url = clean_url(&url)?;
-    let body = serde_json::json!({ "code": code.trim(), "name": device_name(st) });
+    let mine = st
+        .db()
+        .call(|s| Ok(s.device().id.to_string()))
+        .await
+        .map_err(local)?;
+    let body = serde_json::json!({
+        "code": code.trim(),
+        "name": device_name(st),
+        "device_id": mine,
+    });
     let answer = send(
         HttpRequest::new("POST", format!("{url}/v1/join"))
             .header("content-type", "application/json")
@@ -190,6 +339,13 @@ pub async fn join(st: AppState, url: String, code: String) -> Result<Joined, Fai
         _ => f,
     })?;
     let joined: Joined = decode(&answer)?;
+    finish_join(st, url, joined).await
+}
+
+/// Takes the shop's database from the server as this device's, with its
+/// own till.
+#[cfg(not(target_arch = "wasm32"))]
+async fn finish_join(st: AppState, url: String, joined: Joined) -> Result<Joined, Failed> {
     let (db, at) = server_copy(&url, &joined.token).await?;
     let till = nb_i18n::tr_args(
         st.lang(),
@@ -322,7 +478,11 @@ async fn push_all(st: AppState) -> Result<usize, Failed> {
                 pull_all(st).await?;
                 reseed(st, &link.server_url, &link.token).await?;
             }
-            Some(f) => return Err(failed("sync.err.rejected", f.detail)),
+            Some(f) => {
+                // Not sent again: undone here (the server's copy), kept for
+                // a person to look at; what else waited goes on.
+                set_aside(st, &link.server_url, &link.token, f.id, &f.detail).await?;
+            }
         }
     }
     Ok(sent)
@@ -421,6 +581,32 @@ async fn pull_all(st: AppState) -> Result<(), Failed> {
     Ok(())
 }
 
+/// Sets aside an operation the server refused (see `Store::set_aside`).
+async fn set_aside(
+    st: AppState,
+    server: &str,
+    token: &str,
+    refused: nb_core::OperationId,
+    why: &str,
+) -> Result<(), Failed> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (db, at) = server_copy(server, token).await?;
+        let why = why.to_owned();
+        st.db()
+            .call(move |s| s.set_aside(refused, &why, &db, at))
+            .await
+            .map_err(local)?;
+        st.changed();
+        Ok(())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (st, server, token, refused, why);
+        Err(failed("sync.err.local", "web"))
+    }
+}
+
 /// Takes the server's copy, keeping what waits to be sent.
 async fn catch_up(st: AppState, server: &str, token: &str) -> Result<(), Failed> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -467,7 +653,8 @@ pub async fn unlink(st: AppState) {
 }
 
 /// The background exchange, from the root: soon after the start, then
-/// every twenty seconds (what waits goes, what the others did comes).
+/// every five seconds (what waits here goes out; the others' news comes
+/// through [`listen_after`]).
 pub fn start(st: AppState) {
     let tick = move || {
         if st.session.get_untracked().is_none() {
@@ -476,7 +663,9 @@ pub fn start(st: AppState) {
         let task = spawn(async move {
             refresh(st).await;
             let v = st.sync.get_untracked();
-            if v.linked && !v.busy {
+            // Sends only when something waits (a local count, cheap); what
+            // the others do comes through `listen`.
+            if v.linked && !v.busy && v.pending > 0 {
                 let _ = push_now(st).await;
             }
         });
@@ -484,6 +673,66 @@ pub fn start(st: AppState) {
     };
     let first = set_timeout(std::time::Duration::from_secs(5), tick);
     drop(first); // runs while the root lives
-    let every = set_interval(std::time::Duration::from_secs(20), tick);
+    // What is made here goes out within seconds; news from the others
+    // arrives through `listen` as soon as they send it.
+    let every = set_interval(std::time::Duration::from_secs(5), tick);
     drop(every); // runs while the root lives
+    listen_after(st, 6);
+}
+
+/// Waits on the server for the other devices' operations (it answers the
+/// moment one sends something, or after 25 s), runs them, and waits again.
+fn listen_after(st: AppState, secs: u64) {
+    st.root.run(|| {
+        let next = set_timeout(std::time::Duration::from_secs(secs), move || {
+            let task = st.root.run(|| {
+                spawn(async move {
+                    let again = match listen_once(st).await {
+                        // Another exchange is running: it takes them.
+                        Ok(true) if st.sync.get_untracked().busy => 2,
+                        Ok(true) => {
+                            let _ = push_now(st).await;
+                            0
+                        }
+                        // In touch, nothing new: that counts as in touch.
+                        Ok(false) => {
+                            let _ = st.db().call(|s| s.note_sync("")).await;
+                            0
+                        }
+                        // Not linked, or no network: try again a bit later.
+                        Err(()) => 20,
+                    };
+                    listen_after(st, again);
+                })
+            });
+            drop(task); // runs to completion under the root
+        });
+        drop(next); // fires once, under the root
+    });
+}
+
+async fn listen_once(st: AppState) -> Result<bool, ()> {
+    if st.session.get_untracked().is_none() {
+        return Err(());
+    }
+    let (link, at) = st
+        .db()
+        .call(|s| Ok((s.sync_link()?, s.pull_position()?)))
+        .await
+        .map_err(|_| ())?;
+    let link = link.ok_or(())?;
+    let body = send(
+        HttpRequest::new(
+            "GET",
+            format!(
+                "{}/v1/wait?after={}&epoch={}",
+                link.server_url, at.cursor, at.epoch
+            ),
+        )
+        .header("authorization", format!("Bearer {}", link.token)),
+    )
+    .await
+    .map_err(|_| ())?;
+    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|_| ())?;
+    Ok(v["changed"].as_bool().unwrap_or(false))
 }

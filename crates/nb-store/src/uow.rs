@@ -71,6 +71,10 @@ pub fn hlc_text(t: HlcTimestamp) -> String {
     format!("{:013}-{:06}-{:016x}", t.wall_ms, t.counter, t.node)
 }
 
+/// After this long without reaching the server, a linked device stops
+/// changing settings, users and permissions (ADR-0007: 14 days).
+pub const OFFLINE_LOCK_MS: i64 = 14 * 86_400_000;
+
 impl<'a> Writer<'a> {
     pub fn tx(&self) -> &Transaction<'a> {
         &self.tx
@@ -234,6 +238,28 @@ impl<'a> Writer<'a> {
         // the limit, below zero): run again, the fact stands (ADR-0006).
         if self.replaying && matches!(p, Permission::CreditExceed | Permission::StockNegative) {
             return Ok(());
+        }
+        // A device linked to a server but out of touch for too long does
+        // not change who may do what, or the shop's settings: those clash
+        // worst with what the others did meanwhile (ADR-0007). Selling never
+        // stops.
+        if !self.replaying
+            && matches!(
+                p,
+                Permission::SettingsEdit | Permission::UsersManage | Permission::RolesManage
+            )
+        {
+            let last: Option<Option<i64>> = self
+                .tx()
+                .query_row("SELECT last_push_at FROM sync_link WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if let Some(last) = last
+                && self.now() - last.unwrap_or(0) > OFFLINE_LOCK_MS
+            {
+                return Err(RuleError::on("sync", "sync.offline_too_long").into());
+            }
         }
         match (self.decide(p, t)?, approval) {
             (Decision::Allow, _) => Ok(()),

@@ -8,20 +8,30 @@ use nsh_core::prelude::*;
 
 use crate::screens::common::date_time;
 use crate::state::AppState;
-use crate::ui::form::field;
+use crate::ui::form::{field, secret_field};
 use crate::ui::icon::Icon;
-use crate::ui::kit::{Size, Variant, badge, button, divider, label};
+use crate::ui::kit::{Size, Variant, badge, button, divider, label, segmented};
 use crate::ui::overlay::show_toast;
 use crate::ui::surface::{card, card_header_icon};
 use crate::ui::tokens::{Status, Tone, ty};
 
-fn show_failure(st: AppState, f: &crate::sync::Failed) {
+pub(crate) fn failure_text(st: AppState, f: &crate::sync::Failed) -> String {
     let mut t = st.tn(f.key);
-    if !f.detail.is_empty() {
+    // The server's own words only where ours say nothing more.
+    if !f.detail.is_empty()
+        && matches!(
+            f.key,
+            "sync.err.server" | "sync.err.network" | "sync.err.local"
+        )
+    {
         t.push_str(" — ");
         t.push_str(&f.detail);
     }
-    show_toast(st, t);
+    t
+}
+
+fn show_failure(st: AppState, f: &crate::sync::Failed) {
+    show_toast(st, failure_text(st, f));
 }
 
 pub fn cloud_card(st: AppState, compact: bool) -> View {
@@ -32,6 +42,10 @@ pub fn cloud_card(st: AppState, compact: bool) -> View {
     // Outside the part drawn again when the state changes.
     let invite = signal(None::<nb_store::sync::Invite>);
     let devices = signal(None::<Vec<nb_store::sync::DeviceInfo>>);
+    // Shown once after an account is made, until kept: above both states
+    // (linking follows at once).
+    let codes = signal(None::<Vec<String>>);
+    let linked = computed(move || st.sync.get().linked);
     let state_badge = dynamic(move || {
         let s = v.get();
         let (status, which, key) = if !s.linked {
@@ -47,14 +61,27 @@ pub fn cloud_card(st: AppState, compact: bool) -> View {
         };
         badge(status, Some(which), st.t(key)).into_element()
     });
-    let body = dynamic(move || {
-        let s = v.get();
-        if s.linked {
-            linked_body(st, s, invite, devices).into_element()
-        } else {
-            link_form(st).into_element()
-        }
-    });
+    // The form is built once while unlinked (what is typed stays when the
+    // state refreshes); the linked part follows the state.
+    let body = view()
+        .child(dynamic(move || match codes.get() {
+            Some(list) => recovery_panel(st, list, codes).into_element(),
+            None => view().into_element(),
+        }))
+        .child(when(
+            move || linked.get(),
+            move || {
+                view()
+                    .child(dynamic(move || {
+                        linked_body(st, v.get(), invite, devices).into_element()
+                    }))
+                    .into_element()
+            },
+        ))
+        .child(when(
+            move || !linked.get(),
+            move || link_form(st, codes).into_element(),
+        ));
     card()
         .test_id("cloud-card")
         .child(card_header_icon(
@@ -262,29 +289,71 @@ fn linked_body(
     )
 }
 
-fn link_form(st: AppState) -> View {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    SignIn,
+    SignUp,
+    /// A recovery code and a new password.
+    Recover,
+}
+
+/// Linking this shop to a server with an account (ADR-0007): signing in,
+/// or making the account here (its recovery codes are shown once).
+fn link_form(st: AppState, codes: Signal<Option<Vec<String>>>) -> View {
+    let mode = signal(Mode::SignIn);
     let url = signal(String::new());
+    let name = signal(st.user.get_untracked().map(|u| u.name).unwrap_or_default());
+    let phone = signal(String::new());
+    let password = signal(String::new());
     let key = signal(String::new());
+    let code = signal(String::new());
     let busy = signal(false);
     let go = move || {
         if busy.get_untracked() {
             return;
         }
         busy.set(true);
-        let (u, k) = (url.get_untracked(), key.get_untracked());
+        let (u, n, p, w, k) = (
+            url.get_untracked(),
+            name.get_untracked(),
+            phone.get_untracked(),
+            password.get_untracked(),
+            key.get_untracked(),
+        );
+        let which = mode.get_untracked();
+        let c = code.get_untracked();
         let task = st.root.run(|| {
             spawn(async move {
                 #[cfg(not(target_arch = "wasm32"))]
-                match crate::sync::link(st, u, k).await {
-                    Ok(l) => show_toast(
-                        st,
-                        nb_i18n::tr_args(st.lang(), "sync.linked", &[("org", &l.org_name)]),
-                    ),
-                    Err(f) => show_failure(st, &f),
+                {
+                    let session = match which {
+                        Mode::SignUp => crate::sync::sign_up(&u, &n, &p, &w, &k).await,
+                        Mode::SignIn => crate::sync::sign_in(&u, &p, &w).await,
+                        Mode::Recover => crate::sync::recover(&u, &p, &c, &w).await,
+                    };
+                    match session {
+                        Ok(session) => {
+                            if !session.recovery_codes.is_empty() {
+                                codes.set(Some(session.recovery_codes.clone()));
+                            }
+                            match crate::sync::link(st, u, session.token).await {
+                                Ok(l) => show_toast(
+                                    st,
+                                    nb_i18n::tr_args(
+                                        st.lang(),
+                                        "sync.linked",
+                                        &[("org", &l.org_name)],
+                                    ),
+                                ),
+                                Err(f) => show_failure(st, &f),
+                            }
+                        }
+                        Err(f) => show_failure(st, &f),
+                    }
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
-                    let _ = (u, k);
+                    let _ = (u, n, p, w, k, which, c);
                     show_toast(st, st.tn("sync.web_later"));
                 }
                 busy.set(false);
@@ -292,6 +361,7 @@ fn link_form(st: AppState) -> View {
         });
         drop(task); // runs to completion
     };
+    let signing_up = computed(move || mode.get() == Mode::SignUp);
     view()
         .p(px(20.0))
         .gap(px(14.0))
@@ -301,6 +371,14 @@ fn link_form(st: AppState) -> View {
             FontWeight::NORMAL,
             Tone::Body,
         ))
+        .child(segmented(
+            vec![
+                (Mode::SignIn, Box::new(st.t("account.sign_in"))),
+                (Mode::SignUp, Box::new(st.t("account.sign_up"))),
+                (Mode::Recover, Box::new(st.t("account.recover"))),
+            ],
+            mode,
+        ))
         .child(field(
             st.t("sync.server"),
             url,
@@ -309,13 +387,67 @@ fn link_form(st: AppState) -> View {
             KeyboardType::Url,
             "sync-url",
         ))
+        .child(when(
+            move || signing_up.get(),
+            move || {
+                field(
+                    st.t("account.name"),
+                    name,
+                    String::new,
+                    String::new,
+                    KeyboardType::Default,
+                    "account-name",
+                )
+                .into_element()
+            },
+        ))
         .child(field(
-            st.t("sync.key"),
-            key,
+            st.t("account.phone"),
+            phone,
+            || "\u{2066}0550 12 34 56\u{2069}".to_owned(),
             String::new,
+            KeyboardType::Phone,
+            "account-phone",
+        ))
+        .child(when(
+            move || mode.get() == Mode::Recover,
+            move || {
+                field(
+                    st.t("account.recovery_code"),
+                    code,
+                    || "ABCD-EFGH".to_owned(),
+                    String::new,
+                    KeyboardType::Default,
+                    "account-code",
+                )
+                .into_element()
+            },
+        ))
+        .child(secret_field(
+            move || {
+                st.tn(if mode.get() == Mode::Recover {
+                    "account.new_password"
+                } else {
+                    "account.password"
+                })
+            },
+            password,
             String::new,
-            KeyboardType::Default,
-            "sync-key",
+            "account-password",
+        ))
+        .child(when(
+            move || signing_up.get(),
+            move || {
+                field(
+                    st.t("account.server_key"),
+                    key,
+                    st.t("account.server_key_hint"),
+                    String::new,
+                    KeyboardType::Default,
+                    "account-key",
+                )
+                .into_element()
+            },
         ))
         .child(
             view().flex_row().justify_end().child(
@@ -323,11 +455,85 @@ fn link_form(st: AppState) -> View {
                     Variant::Primary,
                     Size::Md,
                     Some(Icon::Link),
-                    st.t("sync.link"),
+                    move || {
+                        st.tn(match mode.get() {
+                            Mode::SignUp => "account.sign_up_link",
+                            Mode::SignIn => "account.sign_in_link",
+                            Mode::Recover => "account.recover_link",
+                        })
+                    },
                     go,
                 )
                 .test_id("sync-link"),
             ),
+        )
+}
+
+/// The account's recovery codes, once: each opens the account if the
+/// password is lost. Kept on paper or a photo, not on this device alone.
+fn recovery_panel(st: AppState, list: Vec<String>, codes: Signal<Option<Vec<String>>>) -> View {
+    let text = list.join("\n");
+    let mut grid = view().flex_row().flex_wrap().gap(px(8.0));
+    for c in list {
+        grid = grid.child(
+            view()
+                .px(px(10.0))
+                .py(px(6.0))
+                .rounded(px(crate::ui::tokens::radius::md()))
+                .bg(Tone::Surface.color())
+                .border_1()
+                .border_color(Tone::Border.color())
+                .child(crate::ui::kit::figure(
+                    move || c.clone(),
+                    ty::MD,
+                    FontWeight::SEMIBOLD,
+                    || Tone::Ink,
+                )),
+        );
+    }
+    view()
+        .m(px(20.0))
+        .p(px(16.0))
+        .gap(px(10.0))
+        .rounded(px(crate::ui::tokens::radius::md()))
+        .bg(Tone::WarningSoft.color())
+        .test_id("recovery-codes")
+        .child(label(
+            st.t("account.codes_title"),
+            ty::MD,
+            FontWeight::SEMIBOLD,
+            Tone::Ink,
+        ))
+        .child(label(
+            st.t("account.codes_hint"),
+            ty::SM,
+            FontWeight::NORMAL,
+            Tone::Body,
+        ))
+        .child(grid)
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(8.0))
+                .justify_end()
+                .child(button(
+                    Variant::Ghost,
+                    Size::Md,
+                    Some(Icon::Copy),
+                    st.t("account.codes_copy"),
+                    move || set_clipboard(text.clone()),
+                ))
+                .child(
+                    button(
+                        Variant::Primary,
+                        Size::Md,
+                        Some(Icon::Check),
+                        st.t("account.codes_kept"),
+                        move || codes.set(None),
+                    )
+                    .test_id("recovery-kept"),
+                ),
         )
 }
 
@@ -385,6 +591,7 @@ fn review_row(st: AppState, item: nb_store::usecases::reviews::ReviewItem) -> Vi
         "stock_shortfall" => ("review.stock_shortfall", "review.stock_now"),
         "return_excess" => ("review.return_excess", "review.returned_beyond"),
         "drawer_short" => ("review.drawer_short", ""),
+        "refused" => ("review.refused", ""),
         _ => ("review.other", "review.qty"),
     };
     let qty = st

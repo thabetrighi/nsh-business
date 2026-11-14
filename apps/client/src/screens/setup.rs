@@ -13,9 +13,9 @@ use nsh_core::prelude::*;
 
 use crate::screens::forms::error_text;
 use crate::state::AppState;
-use crate::ui::form::{field, labelled};
+use crate::ui::form::{field, labelled, secret_field};
 use crate::ui::icon::{Icon, icon};
-use crate::ui::kit::{Size, Variant, button, label, label_line};
+use crate::ui::kit::{Size, Variant, button, label, label_line, segmented};
 use crate::ui::popup::dropdown;
 use crate::ui::surface::card;
 use crate::ui::tokens::{Tone, radius, ty};
@@ -26,6 +26,13 @@ enum Step {
     Shop,
     Legal,
     Join,
+}
+
+/// How a new device finds its shop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JoinBy {
+    Account,
+    Code,
 }
 
 pub fn setup_wizard(st: AppState) -> View {
@@ -350,12 +357,35 @@ pub fn setup_wizard(st: AppState) -> View {
             .into_element()
     };
     let (server, code) = (s(""), s(""));
-    let join = move || {
+    let (phone, password) = (s(""), s(""));
+    // By a code from a device of the shop, or by the owner's account.
+    let by = signal(JoinBy::Account);
+    let session = signal(String::new());
+    let shops = signal(Vec::<nb_store::sync::OrgInfo>::new());
+    let fail = move |f: crate::sync::Failed| {
+        busy.set(false);
+        error.set(crate::screens::cloud::failure_text(st, &f));
+    };
+    let opened = move |j: nb_store::sync::Joined| {
+        crate::ui::overlay::show_toast(
+            st,
+            nb_i18n::tr_args(st.lang(), "sync.joined", &[("org", &j.org_name)]),
+        );
+        st.needs_setup.set(false);
+        st.connect();
+    };
+    let start = move || {
         if busy.get_untracked() {
-            return;
+            return false;
         }
         busy.set(true);
         error.set(String::new());
+        true
+    };
+    let join = move || {
+        if !start() {
+            return;
+        }
         let (u, c) = (server.get_untracked(), code.get_untracked());
         // Under the root: this screen goes away once the shop opens, and
         // what it started would end with it.
@@ -363,33 +393,87 @@ pub fn setup_wizard(st: AppState) -> View {
             spawn(async move {
                 #[cfg(not(target_arch = "wasm32"))]
                 match crate::sync::join(st, u, c).await {
-                    Ok(j) => {
-                        crate::ui::overlay::show_toast(
-                            st,
-                            nb_i18n::tr_args(st.lang(), "sync.joined", &[("org", &j.org_name)]),
-                        );
-                        st.needs_setup.set(false);
-                        st.connect();
-                    }
-                    Err(f) => {
-                        busy.set(false);
-                        let mut t = st.tn(f.key);
-                        if !f.detail.is_empty() {
-                            t.push_str(" — ");
-                            t.push_str(&f.detail);
-                        }
-                        error.set(t);
-                    }
+                    Ok(j) => opened(j),
+                    Err(f) => fail(f),
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
-                    let _ = (u, c);
-                    busy.set(false);
-                    error.set(st.tn("sync.web_later"));
+                    let _ = (u, c, opened);
+                    fail(crate::sync::Failed::web());
                 }
             })
         });
         drop(task); // runs to completion: tasks end with their owner, not their handle
+    };
+    let sign_in = move || {
+        if !start() {
+            return;
+        }
+        let (u, p, w) = (
+            server.get_untracked(),
+            phone.get_untracked(),
+            password.get_untracked(),
+        );
+        let task = st.root.run(|| {
+            spawn(async move {
+                let found = async {
+                    let s = crate::sync::sign_in(&u, &p, &w).await?;
+                    let list = crate::sync::my_orgs(&u, &s.token).await?;
+                    Ok::<_, crate::sync::Failed>((s.token, list))
+                }
+                .await;
+                match found {
+                    Ok((token, list)) if list.is_empty() => {
+                        let _ = token;
+                        busy.set(false);
+                        error.set(st.tn("account.no_shops"));
+                    }
+                    Ok((token, list)) => {
+                        busy.set(false);
+                        session.set(token);
+                        shops.set(list);
+                    }
+                    Err(f) => fail(f),
+                }
+            })
+        });
+        drop(task); // runs to completion
+    };
+    let pick = move |org: String| {
+        if !start() {
+            return;
+        }
+        let (u, t) = (server.get_untracked(), session.get_untracked());
+        let task = st.root.run(|| {
+            spawn(async move {
+                #[cfg(not(target_arch = "wasm32"))]
+                match crate::sync::join_mine(st, u, t, org).await {
+                    Ok(j) => opened(j),
+                    Err(f) => fail(f),
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (u, t, org, opened);
+                    fail(crate::sync::Failed::web());
+                }
+            })
+        });
+        drop(task); // runs to completion
+    };
+    let back = move || {
+        button(
+            Variant::Secondary,
+            Size::Md,
+            None,
+            st.t("setup.back"),
+            move || {
+                if shops.with_untracked(|v| v.is_empty()) {
+                    step.set(Step::Welcome);
+                } else {
+                    shops.set(Vec::new());
+                }
+            },
+        )
     };
     let joining = move || {
         view()
@@ -400,6 +484,13 @@ pub fn setup_wizard(st: AppState) -> View {
                 FontWeight::NORMAL,
                 Tone::Muted,
             ))
+            .child(segmented(
+                vec![
+                    (JoinBy::Account, Box::new(st.t("setup.join.by_account"))),
+                    (JoinBy::Code, Box::new(st.t("setup.join.by_code"))),
+                ],
+                by,
+            ))
             .child(field(
                 st.t("sync.server"),
                 server,
@@ -408,37 +499,114 @@ pub fn setup_wizard(st: AppState) -> View {
                 KeyboardType::Url,
                 "join-url",
             ))
-            .child(field(
-                st.t("sync.code"),
-                code,
-                || "ABCD EFGH".to_owned(),
-                String::new,
-                KeyboardType::Default,
-                "join-code",
-            ))
-            .child(
-                view()
-                    .flex_row()
-                    .gap(px(10.0))
-                    .child(button(
-                        Variant::Secondary,
-                        Size::Md,
-                        None,
-                        st.t("setup.back"),
-                        move || step.set(Step::Welcome),
-                    ))
-                    .child(view().flex_1())
-                    .child(
-                        button(
-                            Variant::Primary,
-                            Size::Md,
-                            Some(Icon::Link),
-                            st.t("sync.join"),
-                            join,
+            // Each way in its own place (inputs are not shared by position).
+            .child(when(
+                move || by.get() == JoinBy::Code,
+                move || {
+                    view()
+                        .gap(px(14.0))
+                        .child(field(
+                            st.t("sync.code"),
+                            code,
+                            || "ABCD EFGH".to_owned(),
+                            String::new,
+                            KeyboardType::Default,
+                            "join-code",
+                        ))
+                        .child(
+                            view()
+                                .flex_row()
+                                .gap(px(10.0))
+                                .child(back())
+                                .child(view().flex_1())
+                                .child(
+                                    button(
+                                        Variant::Primary,
+                                        Size::Md,
+                                        Some(Icon::Link),
+                                        st.t("sync.join"),
+                                        join,
+                                    )
+                                    .test_id("join-go"),
+                                ),
                         )
-                        .test_id("join-go"),
-                    ),
-            )
+                        .into_element()
+                },
+            ))
+            .child(when(
+                move || by.get() == JoinBy::Account && shops.with(|v| v.is_empty()),
+                move || {
+                    view()
+                        .gap(px(14.0))
+                        .child(field(
+                            st.t("account.phone"),
+                            phone,
+                            || "\u{2066}0550 12 34 56\u{2069}".to_owned(),
+                            String::new,
+                            KeyboardType::Phone,
+                            "join-phone",
+                        ))
+                        .child(secret_field(
+                            st.t("account.password"),
+                            password,
+                            String::new,
+                            "join-password",
+                        ))
+                        .child(
+                            view()
+                                .flex_row()
+                                .gap(px(10.0))
+                                .child(back())
+                                .child(view().flex_1())
+                                .child(
+                                    button(
+                                        Variant::Primary,
+                                        Size::Md,
+                                        Some(Icon::User),
+                                        st.t("account.sign_in"),
+                                        sign_in,
+                                    )
+                                    .test_id("join-sign-in"),
+                                ),
+                        )
+                        .into_element()
+                },
+            ))
+            // The account's shops: one tap makes this device one of its.
+            .child(when(
+                move || by.get() == JoinBy::Account && shops.with(|v| !v.is_empty()),
+                move || {
+                    view()
+                        .gap(px(10.0))
+                        .child(label(
+                            st.t("setup.join.pick"),
+                            ty::MD,
+                            FontWeight::SEMIBOLD,
+                            Tone::Ink,
+                        ))
+                        .child(dynamic(move || {
+                            let mut list = view().gap(px(8.0));
+                            for o in shops.get() {
+                                let org = o.org_id.clone();
+                                let name = o.name.clone();
+                                list = list.child(
+                                    button(
+                                        Variant::Secondary,
+                                        Size::Lg,
+                                        Some(Icon::Store),
+                                        move || name.clone(),
+                                        move || pick(org.clone()),
+                                    )
+                                    .w_full()
+                                    .test_id("join-shop"),
+                                );
+                            }
+                            list.into_element()
+                        }))
+                        .child(view().flex_row().child(back()))
+                        .into_element()
+                },
+            ))
             .into_element()
     };
     // Each step in its own place: an input never carries over what was

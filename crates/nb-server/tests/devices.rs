@@ -217,6 +217,7 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
         serde_json::to_vec(&JoinRequest {
             code: invite.code.to_lowercase(),
             name: "Caisse 2".into(),
+            device_id: None,
         })?,
     )
     .await?;
@@ -242,6 +243,7 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
                 .body(Body::from(serde_json::to_vec(&JoinRequest {
                     code: invite.code.clone(),
                     name: String::new(),
+                    device_id: None,
                 })?))?,
         )
         .await
@@ -338,6 +340,42 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
     push(&app, &linked.token, &mut a).await?;
     pull(&app, &joined.token, &mut b).await?;
     assert!(nb_store::usecases::reviews::review_items(&b)?.is_empty());
+
+    // A waits (as the app does) and hears of B's sale at once, not after
+    // a timer.
+    let at = a.pull_position()?;
+    let waiting = {
+        let app = app.clone();
+        let token = linked.token.clone();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/wait?after={}&epoch={}", at.cursor, at.epoch))
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .map_err(|e| e.to_string())?,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            let bytes = res
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| e.to_string())?
+                .to_bytes();
+            let w: nb_server::Waited = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            Ok::<_, String>((w.changed, started.elapsed()))
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    sell(&mut b, &setup, &reg, &coffee, "1")?;
+    push(&app, &joined.token, &mut b).await?;
+    let (changed, took) = waiting.await??;
+    assert!(changed);
+    assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    pull(&app, &linked.token, &mut a).await?;
 
     // Nothing new: an empty pull; a new sale on B reaches A.
     let again = pull(&app, &linked.token, &mut a).await?;
