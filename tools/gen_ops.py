@@ -17,12 +17,15 @@ import re, glob, os, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "crates/nb-store/src")
 
-# Arguments that must never be written to the log (passwords, PINs): the
-# operation is logged as opaque and synced by its rows (see SYNC_PLAN §5).
-SENSITIVE = {"Secret", "UserInput", "UserUpdate"}
-# Device-local operations: never replayed elsewhere.
+# Arguments that must never be written to the log (passwords, PINs as
+# typed): such a use case hashes them and calls its `_hashed` twin, which is
+# what the log holds (ADR-0006, security review 2026-11). A use case that
+# takes them without a twin would be logged as opaque.
+SENSITIVE = {"Secret", "UserInput"}
+# Device-local operations: never replayed elsewhere. The front doors that
+# take a typed secret are not logged themselves: their `_hashed` twin is.
 LOCAL_TYPES = {"&Path"}
-LOCAL_FNS = {"backups::"}
+LOCAL_FNS = {"backups::", "access::create_user(", "access::set_secret("}
 
 SIG = re.compile(
     r"pub fn (\w+)\(\s*store: &mut Store,\s*meta: OpMeta,?(.*?)\)\s*->\s*([^{]+?)\s*\{",
@@ -123,7 +126,7 @@ def main(check=False):
                 params.append((n, qualify(t.strip(), module, defined, imported)))
             full = f"{module}::{name}"
             types = {t for _, t in params}
-            local = any(full.startswith(p) for p in LOCAL_FNS) or types & LOCAL_TYPES
+            local = any((full + "(").startswith(p) for p in LOCAL_FNS) or types & LOCAL_TYPES
             if local:
                 continue
             variant = camel(module) + camel(name)

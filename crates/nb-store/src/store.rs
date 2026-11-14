@@ -126,6 +126,14 @@ impl Store {
     }
 
     fn configure(conn: &mut Connection) -> Result<()> {
+        // A database file may come from elsewhere (a backup, the server's
+        // copy, a device's upload): its schema cannot run functions with
+        // side effects, nor be rewritten through pragmas (security review).
+        conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+        conn.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA,
+            false,
+        )?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(())
@@ -321,6 +329,20 @@ impl Store {
         Ok(self
             .conn
             .query_row("SELECT register_id FROM device LIMIT 1", [], |r| r.get(0))?)
+    }
+
+    /// The till this device made for itself before (it takes back its
+    /// place after a reinstall), if any.
+    pub fn register_made_here(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM cash_registers WHERE device_id = ?1 AND deleted_at IS NULL
+                 ORDER BY created_at, code LIMIT 1",
+                [self.device.id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     pub fn set_own_register(&mut self, register: Option<&str>) -> Result<()> {
@@ -543,7 +565,10 @@ impl Store {
         {
             let mut h = Sha256::new();
             let cols: Vec<String> = {
-                let mut st = self.conn.prepare(&format!("PRAGMA table_info(\"{t}\")"))?;
+                let mut st = self.conn.prepare(&format!(
+                    "PRAGMA table_info(\"{}\")",
+                    t.replace('"', "\"\"")
+                ))?;
                 st.query_map([], |r| r.get::<_, String>(1))?
                     .collect::<std::result::Result<Vec<_>, _>>()?
                     .into_iter()
@@ -555,10 +580,13 @@ impl Store {
             }
             let list = cols
                 .iter()
-                .map(|c| format!("\"{c}\""))
+                .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let mut st = self.conn.prepare(&format!("SELECT {list} FROM \"{t}\""))?;
+            let mut st = self.conn.prepare(&format!(
+                "SELECT {list} FROM \"{}\"",
+                t.replace('"', "\"\"")
+            ))?;
             let n = cols.len();
             let mut rows: Vec<String> = st
                 .query_map([], |r| {
@@ -638,6 +666,12 @@ impl Store {
         })
     }
 
+    /// Rows changed since the store opened: what tells the browser its
+    /// saved copy is behind.
+    pub fn changes(&self) -> u64 {
+        self.conn.total_changes()
+    }
+
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
@@ -676,8 +710,15 @@ pub struct Restored {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn checked_schema(file: &Path) -> Result<u32> {
     let bad = || Error::from(nb_domain::RuleError::on("backup", "backup.damaged"));
-    let src = Connection::open_with_flags(file, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let mut src = Connection::open_with_flags(file, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|_| bad())?;
+    Store::configure(&mut src).map_err(|_| bad())?;
+    checked_schema_of(&src)
+}
+
+/// [`checked_schema`] of a database already open (any target).
+fn checked_schema_of(src: &Connection) -> Result<u32> {
+    let bad = || Error::from(nb_domain::RuleError::on("backup", "backup.damaged"));
     let ok: String = src
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
         .map_err(|_| bad())?;
@@ -700,17 +741,94 @@ pub(crate) fn checked_schema(file: &Path) -> Result<u32> {
     if v > migrate::latest() {
         return Err(nb_domain::RuleError::on("backup", "backup.too_new").into());
     }
+    same_schema(src, v).map_err(|_| bad())?;
     Ok(v)
 }
 
+/// The file's tables, indexes, triggers and views are exactly this app's at
+/// schema `v`: nothing added (a trigger or view that would run when the app
+/// writes), nothing changed. A crafted file is refused before anything of
+/// it runs.
+fn same_schema(src: &Connection, v: u32) -> Result<()> {
+    fn objects(c: &Connection) -> Result<std::collections::BTreeSet<(String, String, String)>> {
+        let mut st = c.prepare(
+            "SELECT type, name, COALESCE(sql, '') FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%'",
+        )?;
+        let rows = st.query_map([], |r| {
+            let sql: String = r.get(2)?;
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                sql.split_whitespace().collect::<Vec<_>>().join(" "),
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+    let mut fresh = Connection::open_in_memory()?;
+    Store::configure(&mut fresh)?;
+    migrate::migrate_to(&mut fresh, v, None)?;
+    let (theirs, ours) = (objects(src)?, objects(&fresh)?);
+    if theirs != ours {
+        let extra: Vec<_> = theirs.difference(&ours).map(|o| o.1.clone()).collect();
+        return Err(Error::Corrupt(format!("schema differs: {extra:?}")));
+    }
+    Ok(())
+}
+
 /// Checks a snapshot's bytes as [`checked_schema`] does.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn check_snapshot(db: &[u8]) -> Result<u32> {
-    let tmp = scratch_file();
-    std::fs::write(&tmp, db).map_err(|e| Error::Backup(e.to_string()))?;
-    let r = checked_schema(&tmp);
-    let _ = std::fs::remove_file(&tmp);
-    r
+    checked_schema_of(&opened(db)?)
+}
+
+/// A database's bytes opened in memory (nothing written anywhere), with
+/// the same guards as the store's own connection.
+fn opened(db: &[u8]) -> Result<Connection> {
+    let bad = || Error::from(nb_domain::RuleError::on("backup", "backup.damaged"));
+    let mut c = Connection::open_in_memory()?;
+    Store::configure(&mut c)?;
+    c.deserialize_read_exact(rusqlite::MAIN_DB, db, db.len(), false)
+        .map_err(|_| bad())?;
+    Ok(c)
+}
+
+impl Store {
+    /// The database as bytes, taken in memory (no file): what the browser
+    /// keeps and sends, and what [`Store::restore_bytes`] takes back.
+    pub fn snapshot_in_memory(&self) -> Result<Vec<u8>> {
+        let mut copy = Connection::open_in_memory()?;
+        {
+            let backup = rusqlite::backup::Backup::new(&self.conn, &mut copy)?;
+            backup.run_to_completion(1024, std::time::Duration::ZERO, None)?;
+        }
+        Ok(copy.serialize(rusqlite::MAIN_DB)?.to_vec())
+    }
+
+    /// Replaces the whole database with `db` (a snapshot's bytes) without a
+    /// file: checked (a sound database of this app's exact schema), copied
+    /// in, then migrated, the device reread, the projections rebuilt.
+    pub fn restore_bytes(&mut self, db: &[u8]) -> Result<Restored> {
+        let src = opened(db)?;
+        let from_schema = checked_schema_of(&src)?;
+        {
+            let backup = rusqlite::backup::Backup::new(&src, &mut self.conn)?;
+            backup.run_to_completion(1024, std::time::Duration::ZERO, None)?;
+        }
+        self.after_restore(from_schema, None)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Store {
+    /// See the native `snapshot`: in the browser, taken in memory.
+    pub fn snapshot(&self) -> Result<Vec<u8>> {
+        self.snapshot_in_memory()
+    }
+
+    /// See the native `restore_snapshot`: in the browser, without a file.
+    pub fn restore_snapshot(&mut self, db: &[u8]) -> Result<Restored> {
+        self.restore_bytes(db)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -765,6 +883,14 @@ impl Store {
             file,
             None::<fn(rusqlite::backup::Progress)>,
         )?;
+        self.after_restore(from_schema, previous)
+    }
+}
+
+impl Store {
+    /// What follows a restore, whatever brought the data: migrated to this
+    /// version, the device reread, the projections rebuilt, checked.
+    fn after_restore(&mut self, from_schema: u32, previous: Option<PathBuf>) -> Result<Restored> {
         migrate::migrate_to(&mut self.conn, migrate::latest(), None)?;
         let (id, prefix): (String, String) =
             self.conn

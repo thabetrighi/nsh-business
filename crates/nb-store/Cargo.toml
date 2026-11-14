@@ -18,14 +18,14 @@ thiserror.workspace = true
 
 # Native: SQLite compiled in. Browser: rusqlite uses sqlite-wasm-rs by itself.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rusqlite = { workspace = true, features = ["bundled", "backup"] }
+rusqlite = { workspace = true, features = ["bundled", "backup", "serialize"] }
 # Backups (M14): compressed, then sealed with a key from the owner's passphrase.
 chacha20poly1305 = "0.10"
 flate2 = "1"
 getrandom = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["backup", "serialize"] }
 # The browser's SQLite (as in spike M0.4), with its JavaScript glue.
 sqlite-wasm-rs = { version = "0.6", features = ["wasm-bindgen"] }
 

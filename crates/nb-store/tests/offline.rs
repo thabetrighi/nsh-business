@@ -64,3 +64,59 @@ fn settings_wait_for_the_server_after_two_weeks_apart() -> Result<(), Box<dyn st
     set_feature(&mut s, meta("f"), "promotions", Some(true))?;
     Ok(())
 }
+
+/// The browser has no files: its copy of the shop goes in and out as bytes
+/// in memory, with the same checks as a file.
+#[test]
+fn a_shop_copied_in_memory_comes_back_the_same() -> Result<(), Box<dyn std::error::Error>> {
+    let clock = Arc::new(FixedClock::new(1_794_304_800_000));
+    let mut a = Store::open_in_memory(StoreOptions {
+        clock: clock.clone(),
+        ..Default::default()
+    })?;
+    let setup = setup_organization(
+        &mut a,
+        SetupInput {
+            org_name: "Superette".into(),
+            activity: "grocery".into(),
+            country: "DZ".into(),
+            currency: "DZD".into(),
+            currency_exp: 2,
+            branch_name: "Biskra".into(),
+            owner_name: "Ahmed".into(),
+            language: "ar".into(),
+            fiscal_year_start: 1,
+        },
+    )?;
+    save_customer(
+        &mut a,
+        OpMeta::new("c", Some(setup.org), Some(setup.owner)),
+        CustomerInput {
+            kind: "person".into(),
+            name: "Karim".into(),
+            status: "active".into(),
+            ..Default::default()
+        },
+    )?;
+    let bytes = a.snapshot_in_memory()?;
+    assert_eq!(
+        nb_store::store::check_snapshot(&bytes)?,
+        a.schema_version()?
+    );
+    let mut b = Store::open_in_memory(StoreOptions {
+        clock,
+        ..Default::default()
+    })?;
+    b.restore_bytes(&bytes)?;
+    assert_eq!(b.fingerprint()?, a.fingerprint()?);
+    // Linking sends it without its link.
+    a.set_sync_link("https://sync.example.dz", "secret-token")?;
+    let sent = a.snapshot_for_sync()?;
+    let mut c = Store::open_in_memory(StoreOptions::default())?;
+    c.restore_bytes(&sent)?;
+    assert!(c.sync_link()?.is_none(), "the token stays on the device");
+    // Rubbish is refused, the store untouched.
+    assert!(b.restore_bytes(b"not a database").is_err());
+    assert_eq!(b.fingerprint()?, a.fingerprint()?);
+    Ok(())
+}

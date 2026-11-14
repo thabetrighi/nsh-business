@@ -11,6 +11,7 @@ use nsh_core::prelude::*;
 
 mod command_palette;
 pub mod db;
+mod live;
 mod nav;
 pub mod printers;
 mod screens;
@@ -21,6 +22,8 @@ mod state;
 mod sync;
 mod topbar;
 mod ui;
+#[cfg(target_arch = "wasm32")]
+mod web_store;
 
 #[native_module("nb-client/native")]
 fn native(registry: &mut Registry) {
@@ -90,7 +93,11 @@ pub fn App() -> impl IntoElement {
         st.settings_tab.set(5);
     }
     st.persist();
+    #[cfg(not(target_arch = "wasm32"))]
     st.connect();
+    // The browser: its kept copy of the shop first, then the shop opens.
+    #[cfg(target_arch = "wasm32")]
+    web_open(st);
 
     // The look (accent, font, sizes, density, corners) is read by every
     // component as plain values: a change installs the new look and rebuilds
@@ -163,4 +170,43 @@ pub fn App() -> impl IntoElement {
                 .child(shell::shell(st))
                 .into_element()
         }))
+}
+
+/// The browser keeps the shop in IndexedDB: loaded before the shop opens,
+/// saved a few seconds after it changes.
+#[cfg(target_arch = "wasm32")]
+fn web_open(st: state::AppState) {
+    st.root.run(|| {
+        let task = spawn(async move {
+            web_store::keep().await;
+            match web_store::load().await {
+                Ok(Some(bytes)) => {
+                    if let Err(e) = st.db().adopt_saved(bytes).await {
+                        log::warn!(
+                            "the copy kept in this browser could not open: {}",
+                            e.message
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("browser storage: {e}"),
+            }
+            st.connect();
+        });
+        drop(task); // runs to completion under the root
+        let saved = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let every = set_interval(std::time::Duration::from_secs(3), move || {
+            let saved = saved.clone();
+            let task = spawn(async move {
+                if let Ok(Some((n, bytes))) = st.db().copy_if_changed(saved.get()).await {
+                    match web_store::save(&bytes).await {
+                        Ok(()) => saved.set(n),
+                        Err(e) => log::warn!("browser storage: {e}"),
+                    }
+                }
+            });
+            drop(task); // runs to completion under the root
+        });
+        drop(every); // runs while the root lives
+    });
 }

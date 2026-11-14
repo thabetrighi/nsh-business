@@ -324,7 +324,6 @@ fn link_form(st: AppState, codes: Signal<Option<Vec<String>>>) -> View {
         let c = code.get_untracked();
         let task = st.root.run(|| {
             spawn(async move {
-                #[cfg(not(target_arch = "wasm32"))]
                 {
                     let session = match which {
                         Mode::SignUp => crate::sync::sign_up(&u, &n, &p, &w, &k).await,
@@ -350,11 +349,6 @@ fn link_form(st: AppState, codes: Signal<Option<Vec<String>>>) -> View {
                         }
                         Err(f) => show_failure(st, &f),
                     }
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let _ = (u, n, p, w, k, which, c);
-                    show_toast(st, st.tn("sync.web_later"));
                 }
                 busy.set(false);
             })

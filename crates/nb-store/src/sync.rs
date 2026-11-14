@@ -245,7 +245,6 @@ impl Store {
     /// this device then takes the server's copy (see [`Store::resync`]) so
     /// what the operation did here is undone, and runs again what else
     /// waited.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_aside(
         &mut self,
         refused: nb_core::OperationId,
@@ -292,7 +291,6 @@ impl Store {
     /// Becomes a device of an organization that already exists: its
     /// database is the server's copy (`snapshot`), with this device's
     /// identity, linked, at the position the snapshot is at.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn join_with(
         &mut self,
         snapshot: &[u8],
@@ -316,7 +314,6 @@ impl Store {
     /// operations not sent yet are run again on top, and sent later. Not
     /// while one of them holds a secret (it cannot be run again): that
     /// device sends its database first.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn resync(&mut self, snapshot: &[u8], at: Position) -> Result<()> {
         let link = self
             .sync_link()?
@@ -367,18 +364,15 @@ impl Store {
 
     /// The database as the server gets it: without where and how this
     /// device syncs (its token stays here).
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn snapshot_for_sync(&self) -> Result<Vec<u8>> {
-        let db = self.snapshot()?;
-        let tmp = std::env::temp_dir().join(format!("nb-sync-{}.db", nb_core::OperationId::new()));
-        std::fs::write(&tmp, &db).map_err(|e| crate::Error::Backup(e.to_string()))?;
-        let out = (|| {
-            let c = rusqlite::Connection::open(&tmp)?;
-            c.execute("DELETE FROM sync_link", [])?;
-            drop(c);
-            std::fs::read(&tmp).map_err(|e| crate::Error::Backup(e.to_string()))
-        })();
-        let _ = std::fs::remove_file(&tmp);
-        out
+        // In memory (any target): the copy, its link row removed, as bytes.
+        let mut copy = rusqlite::Connection::open_in_memory()?;
+        {
+            let backup = rusqlite::backup::Backup::new(self.connection(), &mut copy)?;
+            backup.run_to_completion(1024, std::time::Duration::ZERO, None)?;
+        }
+        copy.execute("DELETE FROM sync_link", [])?;
+        copy.execute_batch("VACUUM")?;
+        Ok(copy.serialize(rusqlite::MAIN_DB)?.to_vec())
     }
 }

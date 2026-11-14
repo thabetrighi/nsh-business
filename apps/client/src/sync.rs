@@ -40,13 +40,7 @@ pub struct Failed {
     pub detail: String,
 }
 
-impl Failed {
-    /// Not on the web yet (its own copy of the shop comes later).
-    #[cfg(target_arch = "wasm32")]
-    pub fn web() -> Failed {
-        failed("sync.web_later", "")
-    }
-}
+impl Failed {}
 
 fn failed(key: &'static str, detail: impl Into<String>) -> Failed {
     Failed {
@@ -125,7 +119,6 @@ pub async fn refresh(st: AppState) {
 
 /// Links this device's database to the server at `url` with the server's
 /// enrollment `key`.
-#[cfg(not(target_arch = "wasm32"))]
 pub async fn link(st: AppState, url: String, key: String) -> Result<Linked, Failed> {
     let url = clean_url(&url)?;
     let db = st.db();
@@ -237,13 +230,25 @@ pub async fn my_orgs(url: &str, session: &str) -> Result<Vec<OrgInfo>, Failed> {
     decode(&body)
 }
 
+/// The devices of one of the account's shops (a reinstall picks the one it
+/// replaces).
+pub async fn shop_devices(url: &str, session: &str, org: &str) -> Result<Vec<DeviceInfo>, Failed> {
+    let url = clean_url(url)?;
+    let body = send(
+        HttpRequest::new("GET", format!("{url}/v1/orgs/{org}/devices"))
+            .header("authorization", format!("Bearer {session}")),
+    )
+    .await?;
+    decode(&body)
+}
+
 /// This (new) device joins one of the account's shops: no code needed.
-#[cfg(not(target_arch = "wasm32"))]
 pub async fn join_mine(
     st: AppState,
     url: String,
     session: String,
     org: String,
+    replaces: Option<String>,
 ) -> Result<Joined, Failed> {
     let url = clean_url(&url)?;
     let mine = st
@@ -251,7 +256,11 @@ pub async fn join_mine(
         .call(|s| Ok(s.device().id.to_string()))
         .await
         .map_err(local)?;
-    let body = serde_json::json!({ "name": device_name(st), "device_id": mine });
+    let body = serde_json::json!({
+        "name": device_name(st),
+        "device_id": mine,
+        "replaces": replaces,
+    });
     let answer = send(
         HttpRequest::new("POST", format!("{url}/v1/orgs/{org}/devices"))
             .header("authorization", format!("Bearer {session}"))
@@ -287,10 +296,58 @@ fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Failed> {
 
 fn clean_url(url: &str) -> Result<String, Failed> {
     let url = url.trim().trim_end_matches('/').to_owned();
-    if url.starts_with("http://") || url.starts_with("https://") {
+    if url.starts_with("https://") {
         Ok(url)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        // Passwords and tokens would cross the internet readable: plain
+        // HTTP only to a server on the shop's own network.
+        let host = rest.split(['/', '?']).next().unwrap_or("");
+        let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+        if is_local_host(host) {
+            Ok(url)
+        } else {
+            Err(failed("sync.err.insecure", ""))
+        }
     } else {
         Err(failed("sync.err.url", ""))
+    }
+}
+
+/// This computer, or an address of a local network (RFC 1918, `.local`).
+fn is_local_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".local") || host == "::1" {
+        return true;
+    }
+    match host.parse::<std::net::Ipv4Addr>() {
+        Ok(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_url;
+
+    #[test]
+    fn plain_http_only_inside_the_shop() {
+        assert!(clean_url("https://sync.example.dz/").is_ok());
+        for local in [
+            "http://127.0.0.1:8787",
+            "http://localhost:8787",
+            "http://192.168.1.20:8787",
+            "http://10.0.0.5",
+            "http://caisse.local:8787",
+        ] {
+            assert!(clean_url(local).is_ok(), "{local}");
+        }
+        for far in [
+            "http://sync.example.dz",
+            "http://41.200.1.1:8787",
+            "ftp://x",
+        ] {
+            assert!(clean_url(far).is_err(), "{far}");
+        }
     }
 }
 
@@ -315,7 +372,6 @@ async fn server_copy(server: &str, token: &str) -> Result<(Vec<u8>, Position), F
 
 /// Joins the organization of the device that made `code`, on the server at
 /// `url`: this device's (empty) database becomes the organization's.
-#[cfg(not(target_arch = "wasm32"))]
 pub async fn join(st: AppState, url: String, code: String) -> Result<Joined, Failed> {
     let url = clean_url(&url)?;
     let mine = st
@@ -344,7 +400,6 @@ pub async fn join(st: AppState, url: String, code: String) -> Result<Joined, Fai
 
 /// Takes the shop's database from the server as this device's, with its
 /// own till.
-#[cfg(not(target_arch = "wasm32"))]
 async fn finish_join(st: AppState, url: String, joined: Joined) -> Result<Joined, Failed> {
     let (db, at) = server_copy(&url, &joined.token).await?;
     let till = nb_i18n::tr_args(
@@ -473,11 +528,9 @@ async fn push_all(st: AppState) -> Result<usize, Failed> {
             .map_err(|e| failed("sync.err.local", e.message))?;
         match r.failed {
             None => {}
-            Some(f) if f.code == "opaque" => {
-                // Everything the others sent first, or their work is lost.
-                pull_all(st).await?;
-                reseed(st, &link.server_url, &link.token).await?;
-            }
+            // An operation from an older version that holds a secret: it
+            // cannot travel; the owner repairs the shop (`docs/SERVER.md`).
+            Some(f) if f.code == "opaque" => return Err(failed("sync.err.opaque", f.detail)),
             Some(f) => {
                 // Not sent again: undone here (the server's copy), kept for
                 // a person to look at; what else waited goes on.
@@ -486,47 +539,6 @@ async fn push_all(st: AppState) -> Result<usize, Failed> {
         }
     }
     Ok(sent)
-}
-
-/// Sends the whole database again (an operation holding a secret).
-async fn reseed(st: AppState, server: &str, token: &str) -> Result<(), Failed> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let db = st.db();
-        let (snapshot, at) = db
-            .call(|s| Ok((s.snapshot_for_sync()?, s.pull_position()?)))
-            .await
-            .map_err(local)?;
-        let answer = send(
-            HttpRequest::new(
-                "POST",
-                format!("{server}/v1/reseed?after={}&epoch={}", at.cursor, at.epoch),
-            )
-            .header("authorization", format!("Bearer {token}"))
-            .body(snapshot),
-        )
-        .await
-        .map_err(|f| match f.key {
-            "sync.err.already_linked" => failed("sync.err.behind", ""),
-            _ => f,
-        })?;
-        let state: StateInfo = decode(&answer)?;
-        db.call(move |s| {
-            s.mark_all_pushed()?;
-            s.set_pull_position(Position {
-                cursor: state.cursor,
-                epoch: state.epoch,
-            })
-        })
-        .await
-        .map_err(local)?;
-        Ok(())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = (st, server, token);
-        Err(failed("sync.err.local", "web"))
-    }
 }
 
 /// Runs the other devices' operations, from this device's position. When
@@ -589,41 +601,25 @@ async fn set_aside(
     refused: nb_core::OperationId,
     why: &str,
 ) -> Result<(), Failed> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let (db, at) = server_copy(server, token).await?;
-        let why = why.to_owned();
-        st.db()
-            .call(move |s| s.set_aside(refused, &why, &db, at))
-            .await
-            .map_err(local)?;
-        st.changed();
-        Ok(())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = (st, server, token, refused, why);
-        Err(failed("sync.err.local", "web"))
-    }
+    let (db, at) = server_copy(server, token).await?;
+    let why = why.to_owned();
+    st.db()
+        .call(move |s| s.set_aside(refused, &why, &db, at))
+        .await
+        .map_err(local)?;
+    st.changed();
+    Ok(())
 }
 
 /// Takes the server's copy, keeping what waits to be sent.
 async fn catch_up(st: AppState, server: &str, token: &str) -> Result<(), Failed> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let (db, at) = server_copy(server, token).await?;
-        st.db()
-            .call(move |s| s.resync(&db, at))
-            .await
-            .map_err(local)?;
-        st.changed();
-        Ok(())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = (st, server, token);
-        Err(failed("sync.err.local", "web"))
-    }
+    let (db, at) = server_copy(server, token).await?;
+    st.db()
+        .call(move |s| s.resync(&db, at))
+        .await
+        .map_err(local)?;
+    st.changed();
+    Ok(())
 }
 
 /// Whether the server's copy is this device's, row for row.
@@ -662,6 +658,7 @@ pub fn start(st: AppState) {
         }
         let task = spawn(async move {
             refresh(st).await;
+            keep_live(st).await;
             let v = st.sync.get_untracked();
             // Sends only when something waits (a local count, cheap); what
             // the others do comes through `listen`.
@@ -678,6 +675,78 @@ pub fn start(st: AppState) {
     let every = set_interval(std::time::Duration::from_secs(5), tick);
     drop(every); // runs while the root lives
     listen_after(st, 6);
+}
+
+thread_local! {
+    /// The live socket for this device's server and token, while linked.
+    static LIVE: std::cell::RefCell<Option<crate::live::Live>> = const { std::cell::RefCell::new(None) };
+    /// Whether it is up now (then no waiting requests).
+    static LIVE_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Which socket the notices being read belong to (a newer one wins).
+    static LIVE_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Keeps one live socket for the current link: started when linked,
+/// replaced when the server or token changes, stopped when unlinked.
+async fn keep_live(st: AppState) {
+    let link = st.db().call(|s| s.sync_link()).await.ok().flatten();
+    let current = LIVE.with(|l| {
+        l.borrow()
+            .as_ref()
+            .map(|x| (x.server.clone(), x.token.clone()))
+    });
+    let wanted = link.map(|l| (l.server_url, l.token));
+    if current == wanted {
+        return;
+    }
+    LIVE.with(|l| *l.borrow_mut() = None);
+    LIVE_UP.with(|u| u.set(false));
+    let Some((server, token)) = wanted else {
+        return;
+    };
+    let Some((live, mut rx)) = crate::live::start(&server, &token) else {
+        return;
+    };
+    let generation = LIVE_GEN.with(|g| {
+        g.set(g.get() + 1);
+        g.get()
+    });
+    LIVE.with(|l| *l.borrow_mut() = Some(live));
+    let task = st.root.run(|| {
+        spawn(async move {
+            while let Some(notice) = rx.recv().await {
+                if LIVE_GEN.with(std::cell::Cell::get) != generation {
+                    return; // an older socket's last words
+                }
+                match notice {
+                    crate::live::Notice::Up => {
+                        LIVE_UP.with(|u| u.set(true));
+                        // What came while it was down.
+                        news(st);
+                    }
+                    crate::live::Notice::Changed => news(st),
+                    crate::live::Notice::Down => LIVE_UP.with(|u| u.set(false)),
+                }
+            }
+        })
+    });
+    drop(task); // reads until the socket ends, under the root
+}
+
+/// Another device sent something: take it (now, or as soon as the running
+/// exchange ends).
+fn news(st: AppState) {
+    st.root.run(|| {
+        let task = spawn(async move {
+            if st.sync.get_untracked().busy {
+                let again = set_timeout(std::time::Duration::from_secs(2), move || news(st));
+                drop(again); // fires once, under the root
+                return;
+            }
+            let _ = push_now(st).await;
+        });
+        drop(task); // runs to completion under the root
+    });
 }
 
 /// Waits on the server for the other devices' operations (it answers the
@@ -699,7 +768,8 @@ fn listen_after(st: AppState, secs: u64) {
                             let _ = st.db().call(|s| s.note_sync("")).await;
                             0
                         }
-                        // Not linked, or no network: try again a bit later.
+                        // Not linked, no network, or the socket is up: look
+                        // again a bit later.
                         Err(()) => 20,
                     };
                     listen_after(st, again);
@@ -713,6 +783,10 @@ fn listen_after(st: AppState, secs: u64) {
 
 async fn listen_once(st: AppState) -> Result<bool, ()> {
     if st.session.get_untracked().is_none() {
+        return Err(());
+    }
+    // The socket brings the news while it is up: no waiting request.
+    if LIVE_UP.with(std::cell::Cell::get) {
         return Err(());
     }
     let (link, at) = st
