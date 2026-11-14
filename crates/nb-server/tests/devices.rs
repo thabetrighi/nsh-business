@@ -369,8 +369,8 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
                         .body(Body::empty())
                         .map_err(|e| e.to_string())?,
                 )
-                .await
-                .map_err(|e| e.to_string())?;
+                .await;
+            let Ok(res) = res;
             let bytes = res
                 .into_body()
                 .collect()
