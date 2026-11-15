@@ -1481,3 +1481,21 @@ test("the driver's day: the next stop in large, reached and delivered, then the 
   await app.press("id:myday-stop-0");
   await app.waitFor("id:myday-fail");
 });
+
+test("the app's version and updates, and the till's sound, vibration and stock alerts", async () => {
+  const app = await open(".", { locale: "fr-DZ", width: 1360, height: 860, platform: "linux" });
+  await app.waitFor("text:Ventes brutes");
+  await app.press("id:nav-settings");
+  await app.press("id:settings-about");
+  await app.waitFor("text:Mises à jour");
+  await app.waitFor("text:NSH 0.5.1");
+  // A copy that is not a package does not update itself, and says so.
+  await app.press("id:update-check");
+  await app.waitFor("text:Cette copie ne se met pas à jour seule (version de développement).");
+  await app.waitFor("text:Rechercher automatiquement");
+  // The till's feedback is this device's to choose.
+  await app.press("id:settings-devices");
+  await app.waitFor("text:Son à la lecture");
+  await app.waitFor("text:Vibration du téléphone");
+  await app.waitFor("text:Alertes de stock bas");
+});

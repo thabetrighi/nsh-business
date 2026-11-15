@@ -252,6 +252,16 @@ fn sales_profit_and_stock_add_up() -> R {
             .collect::<Vec<_>>(),
         ["Lait"]
     );
+    // The alert after a sale: of what it took, what is at its reorder level.
+    let low = running_low(
+        &s,
+        &[oil.clone(), milk.clone(), milk.clone(), String::new()],
+    )?;
+    assert_eq!(
+        low.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+        ["Lait"]
+    );
+    assert!(running_low(&s, &[])?.is_empty());
     // A week later, those sales are the period before.
     clock.set(T0 + 7 * DAY);
     let d = dashboard(&s, Period::Week)?;

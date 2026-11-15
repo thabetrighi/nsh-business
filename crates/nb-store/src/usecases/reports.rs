@@ -8,7 +8,7 @@
 use nb_domain::RuleError;
 use nb_domain::fiscal::Date;
 use nb_domain::installment::{add_days, days_between};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::time::civil_date;
@@ -886,6 +886,45 @@ fn running_out(store: &Store, limit: u32) -> Result<Vec<StockRow>> {
             })?
             .collect::<std::result::Result<_, _>>()?;
         Ok(rows)
+    })
+}
+
+/// Of `products` (those a sale just took), the stocked ones that ran out
+/// or are at their reorder level or under it: the alert after a sale.
+pub fn running_low(store: &Store, products: &[String]) -> Result<Vec<StockRow>> {
+    if products.is_empty() {
+        return Ok(Vec::new());
+    }
+    store.read(|r| {
+        let (org, _) = the_org(r.conn())?;
+        let mut s = r.conn().prepare(
+            "SELECT p.id, p.name, p.sku, COALESCE(b.oh, 0), p.min_stock_milli
+             FROM products p
+             LEFT JOIN (SELECT product_id, SUM(on_hand_milli) AS oh FROM stock_balances GROUP BY product_id) b
+                    ON b.product_id = p.id
+             WHERE p.org_id = ?1 AND p.id = ?2 AND p.deleted_at IS NULL AND p.kind <> 'service'
+               AND (COALESCE(b.oh, 0) <= 0 OR (p.min_stock_milli IS NOT NULL AND b.oh <= p.min_stock_milli))",
+        )?;
+        let mut out = Vec::new();
+        for id in products {
+            if let Some(row) = s
+                .query_row(params![org.to_string(), id], |r| {
+                    Ok(StockRow {
+                        product_id: r.get(0)?,
+                        name: r.get(1)?,
+                        sku: r.get(2)?,
+                        on_hand_milli: r.get(3)?,
+                        min_stock_milli: r.get(4)?,
+                        ..Default::default()
+                    })
+                })
+                .optional()?
+                && !out.iter().any(|o: &StockRow| o.product_id == row.product_id)
+            {
+                out.push(row);
+            }
+        }
+        Ok(out)
     })
 }
 

@@ -2408,6 +2408,7 @@ dependencies = [
  "nsh-platform-linux",
  "nsh-platform-macos",
  "nsh-platform-windows",
+ "nsh-updater",
  "rust_xlsxwriter",
  "serde",
  "serde_json",

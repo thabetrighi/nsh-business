@@ -35,6 +35,7 @@ use crate::screens::approval::{Ask, approval_dialog, needs_approval};
 use crate::screens::common::page_head;
 use crate::screens::forms::{error_text, parse_price};
 use crate::state::AppState;
+use crate::ui::feedback::{Cue, cue};
 use crate::ui::form::{field, focused_field, labelled, row_input};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{
@@ -891,17 +892,21 @@ fn selling_view(st: AppState, t: Till, compact: bool) -> View {
                 Ok(Scan::Item { product, .. }) => {
                     t.add(product, 1_000);
                     text.set(String::new());
+                    cue(st, Cue::Scanned);
                 }
                 Ok(Scan::Weighed { product, qty } | Scan::Priced { product, qty, .. }) => {
                     t.add(product, parse_qty(&qty).unwrap_or(0));
                     text.set(String::new());
+                    cue(st, Cue::Scanned);
                 }
                 _ => {
                     if let Some(p) = only {
                         t.add(p, 1_000);
                         text.set(String::new());
+                        cue(st, Cue::Scanned);
                     } else {
                         show_toast(st, st.tn("pos.not_found"));
+                        cue(st, Cue::Unknown);
                     }
                 }
             }
@@ -2414,6 +2419,13 @@ fn pay_dialog(
                 ..Default::default()
             };
             let correcting = t.correcting.get_untracked().map(|c| c.number);
+            // What the sale takes, for the low stock alert after it.
+            let sold: Vec<String> = input
+                .lines
+                .iter()
+                .filter(|l| !l.product_id.is_empty())
+                .map(|l| l.product_id.clone())
+                .collect();
             busy.set(true);
             let close = close.clone();
             let ask_at = (branch_id.clone(), register.clone());
@@ -2475,6 +2487,8 @@ fn pay_dialog(
                             tr_args(st.lang(), "pos.sold", &[("number", &r.number)])
                         };
                         show_toast(st, text);
+                        cue(st, Cue::Paid);
+                        crate::stock_alerts::after_sale(st, sold);
                         #[cfg(not(target_arch = "wasm32"))]
                         if t.print_after.get_untracked() {
                             // No receipt printer: the dialog (preview, PDF).
@@ -2499,6 +2513,7 @@ fn pay_dialog(
                     Err(e) => {
                         // Paid at once but it cannot go through as it is
                         // (an approval, a limit): the payment screen shows.
+                        cue(st, Cue::Error);
                         if direct {
                             show_toast(st, first_error(st, &e));
                             t.paying.set(true);

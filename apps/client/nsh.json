@@ -7,6 +7,10 @@
   "root": "App",
   "theme": "theme.json",
   "appearance": "system",
+  "singleInstance": true,
+  "updater": {
+    "github": "thabetrighi/nsh-business"
+  },
   "capabilities": {
     "network": {
       "hosts": [
@@ -23,6 +27,8 @@
         "sms",
         "mailto"
       ]
-    }
+    },
+    "audio": true,
+    "notifications": true
   }
 }

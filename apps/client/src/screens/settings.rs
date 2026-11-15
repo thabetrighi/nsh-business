@@ -1056,6 +1056,27 @@ fn devices(st: AppState, compact: bool) -> View {
                     switch(b.scanner, st.t("device.scanner")),
                     compact,
                 ),
+                row(
+                    st,
+                    "device.scan_sound",
+                    "device.scan_sound.help",
+                    switch(b.scan_sound, st.t("device.scan_sound")),
+                    compact,
+                ),
+                row(
+                    st,
+                    "device.haptics",
+                    "device.haptics.help",
+                    switch(b.haptics, st.t("device.haptics")),
+                    compact,
+                ),
+                row(
+                    st,
+                    "device.stock_alerts",
+                    "device.stock_alerts.help",
+                    switch(b.stock_alerts, st.t("device.stock_alerts")),
+                    compact,
+                ),
             ],
         ))
         .child(crate::screens::settings_catalog::scale_formats_card(
@@ -1081,7 +1102,7 @@ fn sync(st: AppState, compact: bool) -> View {
 }
 
 fn about(st: AppState, compact: bool) -> View {
-    let line = move |key: &'static str, value: &'static str| {
+    let line = move |key: &'static str, value: Box<dyn Fn() -> String>| {
         view()
             .flex_row()
             .items_center()
@@ -1094,14 +1115,8 @@ fn about(st: AppState, compact: bool) -> View {
                     .flex_1()
                     .child(label(st.t(key), ty::SM, FontWeight::MEDIUM, Tone::Muted)),
             )
-            .child(figure(
-                move || value.to_owned(),
-                ty::SM,
-                FontWeight::SEMIBOLD,
-                || Tone::Ink,
-            ))
+            .child(figure(value, ty::SM, FontWeight::SEMIBOLD, || Tone::Ink))
     };
-    let _ = compact;
     view()
         .gap(px(20.0))
         .child(
@@ -1112,9 +1127,13 @@ fn about(st: AppState, compact: bool) -> View {
                     None,
                     view(),
                 ))
-                .child(line("about.version", "0.1.0"))
-                .child(line("about.engine", "NSH 0.4.0")),
+                .child(line(
+                    "about.version",
+                    Box::new(move || st.app_version.get()),
+                ))
+                .child(line("about.engine", Box::new(|| "NSH 0.5.1".to_owned()))),
         )
+        .child(update_card(st, compact))
         .child(
             card()
                 .child(card_header_icon(
@@ -1131,6 +1150,131 @@ fn about(st: AppState, compact: bool) -> View {
                     Tone::Body,
                 ))),
         )
+}
+
+/// A newer version of the app (ADR-0011): where the updater is, what to do.
+fn update_card(st: AppState, compact: bool) -> View {
+    use crate::updater::{self, UpdateState};
+    let status = dynamic(move || {
+        let (tone, text) = match st.update.get() {
+            UpdateState::Idle => (Tone::Muted, st.tn("update.idle")),
+            UpdateState::Checking => (Tone::Muted, st.tn("update.checking")),
+            UpdateState::UpToDate => (Tone::Success, st.tn("update.up_to_date")),
+            UpdateState::Available { version, size, .. } => {
+                let t = match size {
+                    Some(bytes) => st
+                        .tn("update.available_size")
+                        .replace("{mb}", &bytes.div_ceil(1_000_000).to_string()),
+                    None => st.tn("update.available"),
+                };
+                (Tone::Ink, t.replace("{version}", &version))
+            }
+            UpdateState::Downloading => (Tone::Muted, st.tn("update.downloading")),
+            UpdateState::Ready { version } => (
+                Tone::Success,
+                st.tn("update.ready").replace("{version}", &version),
+            ),
+            UpdateState::Unsupported(key) => (Tone::Muted, st.tn(key)),
+            UpdateState::Failed(key, detail) => {
+                log::warn!("update: {detail}");
+                (Tone::Danger, st.tn(key))
+            }
+        };
+        view()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .child(when(
+                move || st.update.with(UpdateState::busy),
+                || crate::ui::kit::spinner(16.0).into_element(),
+            ))
+            .child(view().flex_1().min_w(px(0.0)).child(label(
+                move || text.clone(),
+                ty::SM,
+                FontWeight::MEDIUM,
+                tone,
+            )))
+            .test_id("update-status")
+            .into_element()
+    });
+    let notes = dynamic(move || match st.update.get() {
+        UpdateState::Available {
+            notes: Some(notes), ..
+        } if !notes.trim().is_empty() => view()
+            .pt(px(8.0))
+            .child(label(
+                move || notes.clone(),
+                ty::SM,
+                FontWeight::NORMAL,
+                Tone::Body,
+            ))
+            .into_element(),
+        _ => view().into_element(),
+    });
+    let actions = dynamic(move || {
+        let state = st.update.get();
+        let mut v = view().flex_row().flex_wrap().gap(px(8.0)).justify_end();
+        match state {
+            UpdateState::Available { .. } => {
+                v = v.child(
+                    button(
+                        Variant::Primary,
+                        Size::Md,
+                        Some(Icon::Download),
+                        st.t("update.install"),
+                        move || updater::install(st),
+                    )
+                    .test_id("update-install"),
+                );
+            }
+            UpdateState::Ready { .. } => {
+                v = v.child(
+                    button(
+                        Variant::Primary,
+                        Size::Md,
+                        Some(Icon::Refresh),
+                        st.t("update.restart"),
+                        updater::restart,
+                    )
+                    .test_id("update-restart"),
+                );
+            }
+            UpdateState::Checking | UpdateState::Downloading | UpdateState::Unsupported(_) => {}
+            _ => {
+                v = v.child(
+                    button(
+                        Variant::Secondary,
+                        Size::Md,
+                        Some(Icon::Refresh),
+                        st.t("update.check"),
+                        move || updater::check(st, false),
+                    )
+                    .test_id("update-check"),
+                );
+            }
+        }
+        v.into_element()
+    });
+    group_card(
+        st,
+        Some((Icon::Download, "update.title")),
+        vec![
+            view()
+                .px(px(20.0))
+                .py(px(14.0))
+                .gap(px(10.0))
+                .child(status)
+                .child(notes)
+                .child(actions),
+            row(
+                st,
+                "update.auto",
+                "update.auto.help",
+                switch(st.biz.auto_update, st.t("update.auto")),
+                compact,
+            ),
+        ],
+    )
 }
 
 fn panel(st: AppState, tab: usize, compact: bool) -> View {

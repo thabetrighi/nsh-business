@@ -216,6 +216,15 @@ pub struct BizPrefs {
     pub status_icon_only: Signal<bool>,
     /// The price display says whether a product is in stock.
     pub price_stock: Signal<bool>,
+    /// The app looks for a newer version by itself (desktop).
+    pub auto_update: Signal<bool>,
+    /// A beep at the till when a code is scanned (and a lower one when it
+    /// is not found).
+    pub scan_sound: Signal<bool>,
+    /// The phone vibrates at the till: a scan, a sale paid, an error.
+    pub haptics: Signal<bool>,
+    /// The system tells when a sale leaves a product at its reorder level.
+    pub stock_alerts: Signal<bool>,
 }
 
 /// The till's screen, as this device's cashier arranged it.
@@ -269,6 +278,10 @@ impl BizPrefs {
             home: persisted_text("nb.home.layout"),
             status_icon_only: persisted_flag("nb.app.status_icon_only", false),
             price_stock: persisted_flag("nb.price_check.stock", true),
+            auto_update: persisted_flag("nb.app.auto_update", true),
+            scan_sound: persisted_flag("nb.pos.scan_sound", true),
+            haptics: persisted_flag("nb.pos.haptics", true),
+            stock_alerts: persisted_flag("nb.stock.alerts", true),
             pos: PosPrefs {
                 tile: persisted_index("nb.pos.tile", 1),
                 cols: signal(0),
@@ -297,6 +310,9 @@ pub struct AppState {
     pub sync: Signal<crate::sync::SyncView>,
     /// The confirmation shown at the bottom of the screen (`ui::overlay::show_toast`).
     pub toast: Signal<Option<String>>,
+    /// Where the updater is (`updater`), and the running version.
+    pub update: Signal<crate::updater::UpdateState>,
+    pub app_version: Signal<String>,
     /// The command palette is open.
     pub palette: Signal<bool>,
     /// The keyboard shortcuts' sheet is open.
@@ -360,6 +376,8 @@ impl AppState {
             settings_tab: signal(0),
             sync: signal(crate::sync::SyncView::default()),
             toast: signal(None),
+            update: signal(crate::updater::UpdateState::Idle),
+            app_version: signal(env!("CARGO_PKG_VERSION").to_owned()),
             palette: signal(false),
             shortcuts: signal(false),
             focus: signal(false),

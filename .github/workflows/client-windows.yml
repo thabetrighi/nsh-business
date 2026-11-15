@@ -1,9 +1,13 @@
 name: client-windows
 
 # Builds the NSH Business client for Windows on every push to main that
-# touches the app, and publishes it as the "windows-latest" pre-release
-# (a zip: unpack it anywhere and run NSH Business.exe). Also downloadable as
-# the run's artifact.
+# touches the app (a zip: unpack it anywhere and run NSH Business.exe) and
+# publishes it twice:
+# - as the release v0.1.<run>, marked latest, with the update manifest
+#   (latest.json): installed copies find it and update themselves
+#   (ADR-0011; the version rises with every run);
+# - as the "windows-latest" pre-release, the stable download link.
+# Also downloadable as the run's artifact.
 
 on:
   push:
@@ -43,6 +47,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Every build is a newer version, so installed copies take it.
+      - name: Version
+        id: version
+        working-directory: apps/client
+        shell: bash
+        run: |
+          VERSION="0.1.${{ github.run_number }}"
+          python -c "import json,sys; p='nsh.json'; d=json.load(open(p,encoding='utf-8')); d['version']=sys.argv[1]; open(p,'w',encoding='utf-8').write(json.dumps(d,indent=2,ensure_ascii=False))" "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Package for Windows
         id: package
         continue-on-error: true
@@ -79,6 +93,26 @@ jobs:
           name: nsh-business-windows
           path: ${{ steps.zip.outputs.name }}
           retention-days: 14
+
+      # The update: the archive nsh package made for the updater, and the
+      # manifest that points at it. Only a real package updates (the
+      # fallback build has no updater configuration).
+      - name: Release with the update manifest
+        if: steps.package.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCHIVE=$(ls apps/client/.nsh/out/*-"$VERSION"-windows-*.zip | head -1)
+          if [ -z "$ARCHIVE" ]; then echo "no updater archive"; ls -la apps/client/.nsh/out; exit 1; fi
+          mkdir -p update
+          cp "$ARCHIVE" update/
+          nsh update-manifest update/*.zip --entry apps/client --notes apps/client/release-notes.md -o update
+          cat update/latest.json
+          gh release create "v$VERSION" update/* --latest --target "$GITHUB_SHA" \
+            --title "NSH Business $VERSION" \
+            --notes-file apps/client/release-notes.md
 
       - name: Publish pre-release
         shell: bash

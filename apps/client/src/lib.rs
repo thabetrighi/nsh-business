@@ -19,9 +19,11 @@ mod screens;
 mod sheets;
 mod shell;
 mod state;
+mod stock_alerts;
 mod sync;
 mod topbar;
 mod ui;
+mod updater;
 #[cfg(target_arch = "wasm32")]
 mod web_store;
 
@@ -154,6 +156,11 @@ pub fn App() -> impl IntoElement {
 
     // Sync with the server (M11/M1), from the root as well.
     sync::start(st);
+    // A newer version of the app (desktop), from the root too.
+    updater::watch(st);
+    // The till's sounds, decoded once; a stock notification pressed.
+    ui::feedback::preload(st);
+    stock_alerts::listen(st);
 
     let look = computed(move || st.prefs.look());
     view()

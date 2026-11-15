@@ -82,6 +82,8 @@
 ## مراجع NSH
 - فهرس الوثائق: https://nsh.dev/llms.txt (صفحات `.md` قابلة للقراءة بـ WebFetch).
 - مصدر الحزم المحلي: `~/.cargo/registry/src/*/nsh-core-0.5.1` (المرجع الأدق عند غموض الوثائق).
+- **التحديث الذاتي (ADR-0011):** `restart::remember_program()` **قبل** `Installation::install` وإلا تُغلق إعادة التشغيل التطبيق دون فتحه. `nsh update-manifest` يأخذ الإصدار من `nsh.json` (يجب أن يطابق اسم الملف)، فالـ CI يكتب `version` قبل الحزم والبيان. تجربة محلية: `updater.url` على `http://127.0.0.1:…` مع `publicKey` (`nsh keygen`)، ولا تنسَ إعادة `nsh.json`.
+- **`singleInstance` على لينكس يحتاج D-Bus:** تحت Xvfb استعمل `dbus-run-session`.
 - **نوافذ سطح المكتب في 0.5:** `current_window().set_mode(WindowMode::FullScreen)` (`nsh_core::desktop::WindowMode`) بدل `toggle_full_screen()` المحذوفة.
 
 ## اللغة
