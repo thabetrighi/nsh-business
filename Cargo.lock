@@ -2476,6 +2476,7 @@ dependencies = [
  "hmac",
  "http-body-util",
  "nb-core",
+ "nb-domain",
  "nb-i18n",
  "nb-store",
  "qrcode",

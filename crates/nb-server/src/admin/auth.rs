@@ -68,6 +68,9 @@ fn check_password(password: &str) -> ApiResult<()> {
     if password.chars().count() < MIN_PASSWORD || password.len() > 256 {
         return Err(ApiError::BadRequest("admin.password_short".into()));
     }
+    if nb_domain::access::is_common_password(password) {
+        return Err(ApiError::BadRequest("admin.password_common".into()));
+    }
     Ok(())
 }
 

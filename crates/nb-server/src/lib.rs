@@ -573,6 +573,7 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/v1/signup", post(accounts::signup))
         .route("/v1/login", post(accounts::login))
         .route("/v1/recover", post(accounts::recover))
+        .route("/v1/password", post(accounts::change_password))
         .route("/v1/join", post(join))
         .route_layer(axum::middleware::from_fn_with_state(
             server.clone(),
@@ -593,6 +594,7 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/v1/wait", get(wait))
         .route("/v1/ws", get(ws::upgrade))
         .route("/v1/orgs", get(accounts::orgs))
+        .route("/v1/logout", post(accounts::logout))
         .route(
             "/v1/orgs/{id}/devices",
             post(accounts::add_device).get(accounts::org_devices),
@@ -631,7 +633,10 @@ async fn doorman(
     next.run(req).await
 }
 
-/// Answers are private data: never cached, never sniffed, no referrer.
+/// Answers are private data: never cached, never sniffed, no referrer,
+/// never framed, no content of their own to run (ASVS 3.4); browsers keep
+/// to HTTPS once they saw it (HSTS, ignored over plain HTTP on the shop's
+/// network).
 async fn secure_headers(mut res: Response) -> Response {
     let h = res.headers_mut();
     for (k, v) in [
@@ -639,6 +644,11 @@ async fn secure_headers(mut res: Response) -> Response {
         ("x-content-type-options", "nosniff"),
         ("referrer-policy", "no-referrer"),
         ("x-frame-options", "DENY"),
+        (
+            "content-security-policy",
+            "default-src 'none'; frame-ancestors 'none'",
+        ),
+        ("strict-transport-security", "max-age=31536000"),
     ] {
         if let Ok(v) = axum::http::HeaderValue::from_str(v) {
             h.insert(k, v);

@@ -171,6 +171,12 @@ async fn floods_and_guessing_are_cut_short() -> Res<()> {
         headers.get("x-content-type-options").map(|v| v.as_bytes()),
         Some(&b"nosniff"[..])
     );
+    // Never framed, nothing of their own to run, HTTPS remembered.
+    assert_eq!(
+        headers.get("content-security-policy").map(|v| v.as_bytes()),
+        Some(&b"default-src 'none'; frame-ancestors 'none'"[..])
+    );
+    assert!(headers.contains_key("strict-transport-security"));
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }

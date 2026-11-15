@@ -282,6 +282,47 @@ pub async fn recover(
     decode(&answer)
 }
 
+/// Ends an account session (`POST /v1/logout`): the app needs it only
+/// while it sets up a device, which then has its own token. Best effort: a
+/// session not ended still ends by itself (30 days).
+pub async fn sign_out(url: &str, session: &str) {
+    let Ok(url) = clean_url(url) else {
+        return;
+    };
+    if let Err(f) = send(
+        HttpRequest::new("POST", format!("{url}/v1/logout"))
+            .header("authorization", format!("Bearer {session}")),
+    )
+    .await
+    {
+        log::warn!("sign out: {} {}", f.key, f.detail);
+    }
+}
+
+/// Changes the account's password, given the current one: signs in,
+/// changes it (every session of the account ends), signs out.
+pub async fn change_password(
+    url: &str,
+    phone: &str,
+    current: &str,
+    new: &str,
+) -> Result<(), Failed> {
+    let session = sign_in(url, phone, current).await?;
+    let url = clean_url(url)?;
+    let body = serde_json::json!({ "current": current, "new": new });
+    let answer = send(
+        HttpRequest::new("POST", format!("{url}/v1/password"))
+            .header("authorization", format!("Bearer {}", session.token))
+            .header("content-type", "application/json")
+            .body(body.to_string().into_bytes()),
+    )
+    .await
+    .map_err(account_error)?;
+    let fresh: Session = decode(&answer)?;
+    sign_out(&url, &fresh.token).await;
+    Ok(())
+}
+
 /// The account's shops.
 pub async fn my_orgs(url: &str, session: &str) -> Result<Vec<OrgInfo>, Failed> {
     let url = clean_url(url)?;
@@ -342,6 +383,8 @@ fn account_error(f: Failed) -> Failed {
         (_, d) if d.contains("phone.taken") => "account.err.taken",
         (_, d) if d.contains("phone.invalid") => "account.err.phone",
         (_, d) if d.contains("password.short") => "account.err.short",
+        (_, d) if d.contains("password.long") => "account.err.long",
+        (_, d) if d.contains("password.weak") => "account.err.weak",
         (_, d) if d.contains("account.locked") => "account.err.locked",
         (_, d) if d.contains("name.required") => "account.err.name",
         _ => return f,

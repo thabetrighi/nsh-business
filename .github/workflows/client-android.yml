@@ -3,6 +3,13 @@ name: client-android
 # Packages the NSH Business client as an Android APK (drivers, sales reps
 # and the owner use the same app on their phones) and publishes it as the
 # `android-latest` pre-release.
+#
+# Every build is a newer version (0.1.<run>, build <run>), so a phone takes
+# it over the one installed. Signing (M14.7): with the shop's release key
+# when the repository holds it (secrets ANDROID_KEYSTORE_BASE64,
+# ANDROID_KEY_ALIAS, ANDROID_KEYSTORE_PASSWORD; O-39), else with the
+# runner's debug key — then a phone must uninstall before it installs the
+# next build, as each runner has its own.
 
 on:
   push:
@@ -51,11 +58,30 @@ jobs:
         with:
           workspaces: apps/client
 
-      - name: Package APK
+      - name: Version
         working-directory: apps/client
         run: |
+          python3 -c "import json,sys; p='nsh.json'; d=json.load(open(p,encoding='utf-8')); d['version']='0.1.'+sys.argv[1]; d['build']=int(sys.argv[1]); open(p,'w',encoding='utf-8').write(json.dumps(d,indent=2,ensure_ascii=False))" "${{ github.run_number }}"
+          grep -E '"(version|build)"' nsh.json
+
+      - name: Package APK
+        working-directory: apps/client
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          NSH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
           set -o pipefail
-          nsh --verbose package --target android 2>&1 | tail -120
+          SIGN=()
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEY_ALIAS" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            SIGN=(--keystore "$RUNNER_TEMP/release.keystore" --key-alias "$KEY_ALIAS")
+            echo "signed with the release key"
+          else
+            echo "::warning::no release key: signed with the debug key (O-39)"
+          fi
+          nsh --verbose package --target android "${SIGN[@]}" 2>&1 | tail -120
+          rm -f "$RUNNER_TEMP/release.keystore"
           find . -name '*.apk' -not -path './target/*' | head
 
       - name: Publish pre-release

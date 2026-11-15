@@ -136,6 +136,15 @@ pub fn setup_wizard(st: AppState) -> View {
     // screen asks for).
     let enter = move |who: Option<String>| {
         busy.set(false);
+        // The device has its own token now: the account's session ends.
+        if let Some(a) = account.get_untracked() {
+            account.set(None);
+            let url = server.get_untracked();
+            let task = st
+                .root
+                .run(|| spawn(async move { crate::sync::sign_out(&url, &a.token).await }));
+            drop(task); // runs to completion under the root
+        }
         if let Some(who) = who {
             st.enter_as.replace(Some(who));
         }

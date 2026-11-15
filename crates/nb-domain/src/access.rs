@@ -500,21 +500,43 @@ pub fn reachable(grants: &[Grant]) -> PermissionSet {
 
 /// Shortest password accepted.
 pub const PASSWORD_MIN: usize = 8;
+/// Longest password accepted (ASVS 6.2.9 asks for at least 64).
+pub const PASSWORD_MAX: usize = 128;
+
+/// Passwords people choose most (8 characters or more: the shorter ones are
+/// refused anyway), lower case, one per line: the 10 000 most common of
+/// SecLists, and a few of this market's (`algerie123`, `azerty123`…).
+/// ASVS 6.2.4 asks for at least the 3000 most common.
+static COMMON_PASSWORDS: &str = include_str!("common_passwords.txt");
+
+/// Whether `pw` is one of the passwords people choose most, whatever its
+/// case.
+pub fn is_common_password(pw: &str) -> bool {
+    let lower = pw.trim().to_lowercase();
+    COMMON_PASSWORDS.lines().any(|l| l == lower)
+}
 /// Failed attempts before a lock.
 pub const MAX_FAILURES: u32 = 5;
 /// First lock duration; it doubles with each further failure, up to a day.
 pub const LOCK_BASE_MS: i64 = 60_000;
 const LOCK_MAX_MS: i64 = 24 * 60 * 60_000;
 
-/// Checks a new password: long enough, not only digits or one character.
+/// Checks a new password: long enough, not too long, not only digits or
+/// one character, and not one of the passwords people choose most.
 pub fn check_password(pw: &str) -> Result<(), RuleError> {
     let n = pw.chars().count();
     if n < PASSWORD_MIN {
         return Err(RuleError::on("password", "access.password_short"));
     }
+    if n > PASSWORD_MAX {
+        return Err(RuleError::on("password", "access.password_long"));
+    }
     let first = pw.chars().next();
     if pw.chars().all(|c| Some(c) == first) || pw.chars().all(|c| c.is_ascii_digit()) {
         return Err(RuleError::on("password", "access.password_weak"));
+    }
+    if is_common_password(pw) {
+        return Err(RuleError::on("password", "access.password_common"));
     }
     Ok(())
 }
@@ -760,6 +782,28 @@ mod tests {
             Err(RuleError::on("password", "access.password_short"))
         );
         assert!(check_password("كلمة سر قوية").is_ok());
+        // The passwords people choose most, whatever their case.
+        for common in [
+            "password",
+            "Password1",
+            "azerty123",
+            "ALGERIE123",
+            "iloveyou",
+        ] {
+            assert_eq!(
+                check_password(common),
+                Err(RuleError::on("password", "access.password_common")),
+                "{common}"
+            );
+        }
+        assert!(is_common_password("qwertyuiop"));
+        assert!(!is_common_password("kesra-2026"));
+        // Long passphrases are welcome, up to 128 characters.
+        assert!(check_password(&"ab-".repeat(42)).is_ok());
+        assert_eq!(
+            check_password(&"ab-".repeat(43)),
+            Err(RuleError::on("password", "access.password_long"))
+        );
         for ok in ["2580", "1357", "804163", "1122"] {
             assert!(check_pin(ok).is_ok(), "{ok}");
         }

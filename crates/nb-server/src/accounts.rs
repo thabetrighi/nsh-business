@@ -108,11 +108,19 @@ pub(crate) fn password_is(stored: &str, password: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A new account password, by the app's own rules (`nb_domain::access`):
+/// 8 to 128 characters, not trivial, not one of the most common.
 pub(crate) fn check_password(password: &str) -> ApiResult<()> {
-    if password.chars().count() < 8 {
-        return Err(ApiError::BadRequest("password.short".into()));
-    }
-    Ok(())
+    nb_domain::access::check_password(password).map_err(|e| {
+        ApiError::BadRequest(
+            match e.code {
+                "access.password_short" => "password.short",
+                "access.password_long" => "password.long",
+                _ => "password.weak",
+            }
+            .into(),
+        )
+    })
 }
 
 /// Ten codes like `K7PM-2QXA`: each opens the account once.
@@ -193,6 +201,13 @@ pub struct SignupRequest {
 pub struct LoginRequest {
     pub phone: String,
     pub password: String,
+}
+
+/// A new password for the account the session is, given its current one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PasswordChange {
+    pub current: String,
+    pub new: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,6 +432,74 @@ pub(crate) async fn recover(
             phone,
             recovery_codes: Vec::new(),
         }))
+    })
+    .await
+}
+
+/// `POST /v1/password` (account session): a new password, given the
+/// current one. Every session of the account ends, this one too; the
+/// answer is a fresh one.
+pub(crate) async fn change_password(
+    State(server): State<Arc<Server>>,
+    axum::Extension(ClientIp(ip)): axum::Extension<ClientIp>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<PasswordChange>,
+) -> ApiResult<axum::Json<Session>> {
+    let account = server.account(&headers)?;
+    check_password(&req.new)?;
+    blocking(move || {
+        let control = lock(&server.control)?;
+        let (name, phone, stored, failed): (String, String, String, i64) = control.query_row(
+            "SELECT name, phone, password_hash, failed FROM accounts WHERE id = ?1",
+            [&account.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        if !password_is(&stored, &req.current) {
+            // A stolen session does not guess the password for ever.
+            let failed = failed + 1;
+            let lock_until = (failed >= TRIES).then(|| now_ms() + LOCK_MS);
+            control.execute(
+                "UPDATE accounts SET failed = ?2, locked_until = ?3 WHERE id = ?1",
+                params![
+                    account.id,
+                    if lock_until.is_some() { 0 } else { failed },
+                    lock_until
+                ],
+            )?;
+            if lock_until.is_some() {
+                control.execute("DELETE FROM sessions WHERE account_id = ?1", [&account.id])?;
+            }
+            crate::admin::event_on(&control, "account.password_failed", &ip, &phone, "");
+            return Err(ApiError::Unauthorized);
+        }
+        control.execute(
+            "UPDATE accounts SET password_hash = ?2, failed = 0, locked_until = NULL WHERE id = ?1",
+            params![account.id, hash_password(&req.new)?],
+        )?;
+        control.execute("DELETE FROM sessions WHERE account_id = ?1", [&account.id])?;
+        crate::admin::event_on(&control, "account.password_changed", &ip, &phone, "");
+        let token = server.session_for(&control, &account.id)?;
+        Ok(axum::Json(Session {
+            token,
+            name,
+            phone,
+            recovery_codes: Vec::new(),
+        }))
+    })
+    .await
+}
+
+/// `POST /v1/logout` (account session): the session ends. The app signs
+/// out as soon as its device has its own token.
+pub(crate) async fn logout(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+) -> ApiResult<axum::http::StatusCode> {
+    let token = bearer(&headers).ok_or(ApiError::Unauthorized)?;
+    blocking(move || {
+        lock(&server.control)?
+            .execute("DELETE FROM sessions WHERE token_hash = ?1", [hash(&token)])?;
+        Ok(axum::http::StatusCode::NO_CONTENT)
     })
     .await
 }

@@ -3,6 +3,7 @@
   "id": "dz.nshbusiness.app",
   "version": "0.1.0",
   "build": 1,
+  "icon": "packaging/icon.png",
   "rust": ".",
   "root": "App",
   "theme": "theme.json",

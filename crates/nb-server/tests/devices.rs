@@ -446,7 +446,12 @@ async fn two_devices_sell_offline_and_meet() -> Res<()> {
     let r = push(&app, &joined.token, &mut b).await?;
     assert!(r.failed.is_none(), "{:?}", r.failed);
     let logged = serde_json::to_string(&b.operation_log()?)?;
-    assert!(!logged.contains("4826"), "a PIN is never logged as typed");
+    // As a value of its own (four digits may well show up by chance inside
+    // a random id or hash).
+    assert!(
+        !logged.contains("\"4826\""),
+        "a PIN is never logged as typed"
+    );
     pull(&app, &linked.token, &mut a).await?;
     assert_eq!(a.fingerprint()?, b.fingerprint()?);
     let yacine = nb_store::usecases::access::list_users(&a)?

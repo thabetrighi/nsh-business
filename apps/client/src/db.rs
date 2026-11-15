@@ -19,16 +19,25 @@ use nb_store::{Error, OpMeta, Store, StoreOptions};
 /// Where the database lives (set once, before the first call).
 static PATH: OnceLock<PathBuf> = OnceLock::new();
 
-/// The database of an app packaged by NSH for Windows, macOS or Android, whose
-/// launcher is NSH's and not `main.rs`: in the user's data folder (or
-/// `NB_DATA_DIR`). Linux runs `main.rs`, which configures it, and the
-/// headless tests keep their database in memory.
+/// The database of an app packaged by NSH, whose launcher is NSH's and not
+/// `main.rs`: in the user's data folder (or `NB_DATA_DIR`). Windows, macOS
+/// and Android are always packaged; on Linux the package is told by the
+/// `nsh/app.json` beside the program (`nsh package`'s layout), so `cargo
+/// run` (which configures its own) and the headless tests (in memory) are
+/// not.
 fn packaged_path() -> Option<PathBuf> {
-    if !cfg!(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "android"
-    )) {
+    let linux_package = cfg!(target_os = "linux")
+        && std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.join("nsh").join("app.json")))
+            .is_some_and(|f| f.is_file());
+    if !linux_package
+        && !cfg!(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "android"
+        ))
+    {
         return None;
     }
     let base = std::env::var_os("NB_DATA_DIR")
@@ -41,6 +50,13 @@ fn packaged_path() -> Option<PathBuf> {
                 Some(dir)
             } else if cfg!(target_os = "windows") {
                 std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("dz.nshbusiness.app"))
+            } else if cfg!(target_os = "linux") {
+                std::env::var_os("XDG_DATA_HOME")
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
+                    })
+                    .map(|d| d.join("dz.nshbusiness.app"))
             } else {
                 std::env::var_os("HOME").map(|h| {
                     PathBuf::from(h).join("Library/Application Support/dz.nshbusiness.app")

@@ -78,6 +78,121 @@ fn shop(name: &str) -> Res<(Store, SetupResult)> {
 }
 
 #[tokio::test]
+async fn weak_passwords_are_refused() -> Res<()> {
+    let dir = std::env::temp_dir().join(format!("nb-accounts-{}", nb_core::OperationId::new()));
+    let app = router(nb_server::Server::open(&dir, KEY).map_err(|e| format!("{e:?}"))?);
+    // Nor one of the passwords people choose most, nor digits only.
+    for weak in ["azerty123", "Password1", "0550123456"] {
+        let (status, body) = call(
+            &app,
+            "POST",
+            "/v1/signup",
+            "",
+            json!({"phone": "0550123456", "password": weak, "name": "A", "key": KEY})
+                .to_string()
+                .into_bytes(),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{weak}");
+        assert!(
+            String::from_utf8_lossy(&body).contains("password.weak"),
+            "{weak}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_password_changes_with_the_current_one_and_sessions_end() -> Res<()> {
+    let dir = std::env::temp_dir().join(format!("nb-accounts-{}", nb_core::OperationId::new()));
+    let app = router(nb_server::Server::open(&dir, KEY).map_err(|e| format!("{e:?}"))?);
+    let me = json!({"phone": "0550123456", "password": "kesra-2026", "name": "Ahmed", "key": KEY});
+    let first: Session = json_call(&app, "POST", "/v1/signup", "", me).await?;
+    let login = json!({"phone": "0550123456", "password": "kesra-2026"});
+    let other: Session = json_call(&app, "POST", "/v1/login", "", login.clone()).await?;
+
+    // Not without the current password, nor to a weak one.
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/password",
+        &other.token,
+        json!({"current": "wrong-one", "new": "nouveau-2026"})
+            .to_string()
+            .into_bytes(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/password",
+        &other.token,
+        json!({"current": "kesra-2026", "new": "azerty123"})
+            .to_string()
+            .into_bytes(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Nor without a session.
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/password",
+        "",
+        json!({"current": "kesra-2026", "new": "nouveau-2026"})
+            .to_string()
+            .into_bytes(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Changed: every session ends, a fresh one comes back.
+    let fresh: Session = json_call(
+        &app,
+        "POST",
+        "/v1/password",
+        &other.token,
+        json!({"current": "kesra-2026", "new": "nouveau-2026"}),
+    )
+    .await?;
+    for gone in [&first.token, &other.token] {
+        let (status, _) = call(&app, "GET", "/v1/orgs", gone, Vec::new()).await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, _) = call(&app, "GET", "/v1/orgs", &fresh.token, Vec::new()).await?;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/login",
+        "",
+        login.to_string().into_bytes(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the old password is gone");
+
+    // Signing out ends that session only.
+    let again: Session = json_call(
+        &app,
+        "POST",
+        "/v1/login",
+        "",
+        json!({"phone": "0550123456", "password": "nouveau-2026"}),
+    )
+    .await?;
+    let (status, _) = call(&app, "POST", "/v1/logout", &fresh.token, Vec::new()).await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&app, "GET", "/v1/orgs", &fresh.token, Vec::new()).await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = call(&app, "GET", "/v1/orgs", &again.token, Vec::new()).await?;
+    assert_eq!(status, StatusCode::OK);
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[tokio::test]
 async fn accounts_own_their_shops_and_nothing_else() -> Res<()> {
     let dir = std::env::temp_dir().join(format!("nb-accounts-{}", nb_core::OperationId::new()));
     let app = router(nb_server::Server::open(&dir, KEY).map_err(|e| format!("{e:?}"))?);

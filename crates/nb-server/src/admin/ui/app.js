@@ -822,7 +822,7 @@
   async function viewSecurity(el) {
     const st = S.arg || { kind: '', ip: '' };
     const r = await api('GET', '/security?' + new URLSearchParams(st).toString());
-    const kinds = ['', 'account.login_failed', 'account.locked', 'account.recover_failed', 'admin.login_failed', 'admin.locked',
+    const kinds = ['', 'account.login_failed', 'account.locked', 'account.recover_failed', 'account.password_failed', 'account.password_changed', 'admin.login_failed', 'admin.locked',
       'admin.code_refused', 'admin.session_moved', 'admin.forged_request', 'admin.address_refused', 'rate_limited', 'db.refused'];
     const kind = select(kinds.map(function (k) { return [k, k ? kindLabel(k) : t('admin.f.all')]; }), st.kind);
     const ip = input({ dir: 'ltr', value: st.ip, placeholder: 'IP' });

@@ -45,6 +45,8 @@ pub fn cloud_card(st: AppState, compact: bool) -> View {
     // Shown once after an account is made, until kept: above both states
     // (linking follows at once).
     let codes = signal(None::<Vec<String>>);
+    // The account's password form, kept while the state refreshes.
+    let pw_open = signal(false);
     let linked = computed(move || st.sync.get().linked);
     let state_badge = dynamic(move || {
         let s = v.get();
@@ -73,8 +75,12 @@ pub fn cloud_card(st: AppState, compact: bool) -> View {
             move || {
                 view()
                     .child(dynamic(move || {
-                        linked_body(st, v.get(), invite, devices).into_element()
+                        linked_body(st, v.get(), invite, devices, pw_open).into_element()
                     }))
+                    .child(when(
+                        move || pw_open.get(),
+                        move || account_password(st, pw_open).into_element(),
+                    ))
                     .into_element()
             },
         ))
@@ -139,6 +145,7 @@ fn linked_body(
     s: crate::sync::SyncView,
     invite: Signal<Option<nb_store::sync::Invite>>,
     devices: Signal<Option<Vec<nb_store::sync::DeviceInfo>>>,
+    pw_open: Signal<bool>,
 ) -> View {
     let last = s
         .last_ok_at
@@ -237,6 +244,16 @@ fn linked_body(
                 },
             ))
             .child(forget_browser_button(st))
+            .child(
+                button(
+                    Variant::Ghost,
+                    Size::Md,
+                    Some(Icon::Lock),
+                    st.t("account.change_password"),
+                    move || pw_open.set(!pw_open.get_untracked()),
+                )
+                .test_id("account-password"),
+            )
             .child(when(
                 move || st.can("devices.manage"),
                 move || {
@@ -332,6 +349,116 @@ fn linked_body(
     )
 }
 
+/// The account's password changed, given the current one (ASVS 6.2.3):
+/// every session of the account ends; this device keeps its own token.
+fn account_password(st: AppState, open: Signal<bool>) -> View {
+    let phone = signal(String::new());
+    let current = signal(String::new());
+    let new = signal(String::new());
+    let busy = signal(false);
+    let error = signal(String::new());
+    let save = move || {
+        if busy.get_untracked() {
+            return;
+        }
+        if let Err(e) = nb_domain::access::check_password(&new.get_untracked()) {
+            error.set(st.tn(&format!("error.{}", e.code)));
+            return;
+        }
+        busy.set(true);
+        error.set(String::new());
+        let url = st.sync.get_untracked().server;
+        let (p, c, n) = (
+            phone.get_untracked(),
+            current.get_untracked(),
+            new.get_untracked(),
+        );
+        let task = st.root.run(|| {
+            spawn(async move {
+                match crate::sync::change_password(&url, &p, &c, &n).await {
+                    Ok(()) => {
+                        current.set(String::new());
+                        new.set(String::new());
+                        open.set(false);
+                        show_toast(st, st.tn("account.password_changed"));
+                    }
+                    Err(f) => error.set(failure_text(st, &f)),
+                }
+                busy.set(false);
+            })
+        });
+        drop(task); // runs to completion under the root
+    };
+    view()
+        .px(px(20.0))
+        .py(px(16.0))
+        .gap(px(12.0))
+        .border_t_1()
+        .border_color(Tone::Border.color())
+        .child(label(
+            st.t("account.change_password.help"),
+            ty::SM,
+            FontWeight::NORMAL,
+            Tone::Muted,
+        ))
+        .child(crate::ui::form::phone_field(
+            st.t("account.phone"),
+            phone,
+            "account-pw-phone",
+        ))
+        .child(crate::ui::form::password_field(
+            st.t("account.current_password"),
+            current,
+            String::new,
+            KeyboardType::Default,
+            "account-pw-current",
+            st.t("onboard.show_password"),
+        ))
+        .child(crate::ui::form::password_field(
+            st.t("account.new_password"),
+            new,
+            String::new,
+            KeyboardType::Default,
+            "account-pw-new",
+            st.t("onboard.show_password"),
+        ))
+        .child(when(
+            move || !error.get().is_empty(),
+            move || {
+                label(
+                    move || error.get(),
+                    ty::SM,
+                    FontWeight::MEDIUM,
+                    Tone::Danger,
+                )
+                .into_element()
+            },
+        ))
+        .child(
+            view()
+                .flex_row()
+                .gap(px(8.0))
+                .justify_end()
+                .child(button(
+                    Variant::Ghost,
+                    Size::Md,
+                    None,
+                    st.t("form.cancel"),
+                    move || open.set(false),
+                ))
+                .child(
+                    button(
+                        Variant::Primary,
+                        Size::Md,
+                        Some(Icon::Check),
+                        st.t("form.save"),
+                        save,
+                    )
+                    .test_id("account-pw-save"),
+                ),
+        )
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     SignIn,
@@ -378,7 +505,11 @@ fn link_form(st: AppState, codes: Signal<Option<Vec<String>>>) -> View {
                             if !session.recovery_codes.is_empty() {
                                 codes.set(Some(session.recovery_codes.clone()));
                             }
-                            match crate::sync::link(st, u, session.token).await {
+                            let linked =
+                                crate::sync::link(st, u.clone(), session.token.clone()).await;
+                            // The device has its own token: the session ends.
+                            crate::sync::sign_out(&u, &session.token).await;
+                            match linked {
                                 Ok(l) => show_toast(
                                     st,
                                     nb_i18n::tr_args(

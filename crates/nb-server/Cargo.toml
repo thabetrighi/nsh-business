@@ -9,6 +9,7 @@ license.workspace = true
 
 [dependencies]
 nb-core.workspace = true
+nb-domain.workspace = true
 nb-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,8 +1,10 @@
 name: client-windows
 
 # Builds the NSH Business client for Windows on every push to main that
-# touches the app (a zip: unpack it anywhere and run NSH Business.exe) and
-# publishes it twice:
+# touches the app: an installer (NSH-Business-Setup-<version>.exe, per user,
+# no administrator rights: Start menu, Installed apps, upgrades in place;
+# nsh package writes it with Inno Setup) and a zip (unpack it anywhere and
+# run NSH Business.exe). Both are published twice:
 # - as the release v0.1.<run>, marked latest, with the update manifest
 #   (latest.json): installed copies find it and update themselves
 #   (ADR-0011; the version rises with every run);
@@ -44,6 +46,14 @@ jobs:
           if (-not $exe) { throw "nsh.exe not found in the archive" }
           Write-Host "nsh: $($exe.FullName)"
           $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # nsh package builds the installer when Inno Setup 6 is there.
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Inno Setup 6", "$env:ProgramFiles\Inno Setup 6" -Filter ISCC.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($iscc) { $iscc.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append; Write-Host "ISCC: $($iscc.FullName)" }
 
       - uses: Swatinem/rust-cache@v2
 
@@ -88,10 +98,26 @@ jobs:
           "name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           Get-Item $name | Format-List Name, Length
 
+      - name: Installer
+        id: setup
+        shell: bash
+        run: |
+          SETUP=$(ls apps/client/.nsh/out/*-setup.exe 2>/dev/null | head -1)
+          if [ -n "$SETUP" ]; then
+            NAME="NSH-Business-Setup-${{ steps.version.outputs.version }}.exe"
+            cp "$SETUP" "$NAME"
+            echo "name=$NAME" >> "$GITHUB_OUTPUT"
+            ls -la "$NAME"
+          else
+            echo "no installer was built"; ls -la apps/client/.nsh/out
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: nsh-business-windows
-          path: ${{ steps.zip.outputs.name }}
+          path: |
+            ${{ steps.zip.outputs.name }}
+            ${{ steps.setup.outputs.name }}
           retention-days: 14
 
       # The update: the archive nsh package made for the updater, and the
@@ -110,7 +136,8 @@ jobs:
           cp "$ARCHIVE" update/
           nsh update-manifest update/*.zip --entry apps/client --notes apps/client/release-notes.md -o update
           cat update/latest.json
-          gh release create "v$VERSION" update/* --latest --target "$GITHUB_SHA" \
+          SETUP="${{ steps.setup.outputs.name }}"
+          gh release create "v$VERSION" update/* $SETUP --latest --target "$GITHUB_SHA" \
             --title "NSH Business $VERSION" \
             --notes-file apps/client/release-notes.md
 
@@ -120,7 +147,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ZIP="${{ steps.zip.outputs.name }}"
+          SETUP="${{ steps.setup.outputs.name }}"
           gh release delete windows-latest -y --cleanup-tag 2>/dev/null || true
-          gh release create windows-latest "$ZIP" --prerelease --target "$GITHUB_SHA" \
+          gh release create windows-latest "$ZIP" $SETUP --prerelease --target "$GITHUB_SHA" \
             --title "NSH Business — Windows (آخر نسخة)" \
-            --notes "نسخة اختبار لويندوز 10/11 من آخر تعديل (${GITHUB_SHA::7}). فك الضغط في أي مجلد ثم شغّل NSH Business.exe. البيانات تُحفظ في مجلد بيانات المستخدم. غير موقّعة: إن ظهر تحذير SmartScreen اختر «مزيد من المعلومات» ثم «تشغيل على أي حال»."
+            --notes "نسخة اختبار لويندوز 10/11 من آخر تعديل (${GITHUB_SHA::7}). الأسهل: شغّل NSH-Business-Setup ثم افتح التطبيق من قائمة ابدأ. أو فك ضغط الملف المضغوط في أي مجلد ثم شغّل NSH Business.exe. البيانات تُحفظ في مجلد بيانات المستخدم. غير موقّعة: إن ظهر تحذير SmartScreen اختر «مزيد من المعلومات» ثم «تشغيل على أي حال»."
