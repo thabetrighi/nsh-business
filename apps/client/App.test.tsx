@@ -1051,7 +1051,9 @@ test("bon par bon: the old debt is paid with a sale, and a receipt is corrected 
   await app.type("id:pay-given", "100");
   await app.press("id:pay-confirm");
   await seen(/^Vente FV-01-\d\d-A\d+ enregistrée/);
-  // The next one: the customer pays it and all they owe.
+  // The next one: the customer pays it and all they owe (the grid reloads
+  // after a sale).
+  await app.waitFor("id:pos-item-0");
   await app.press("id:pos-item-0");
   await app.press("id:pos-customer");
   await app.type("id:cust-search", "Boulangerie");

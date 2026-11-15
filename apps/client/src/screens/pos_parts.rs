@@ -6,7 +6,8 @@
 //! by side; a receipt printed before paying; full screen; the shortcuts
 //! behind a help icon.
 
-use nsh_core::element::desktop::toggle_full_screen;
+use nsh_core::desktop::WindowMode;
+use nsh_core::element::desktop::current_window;
 
 use crate::ui::menu::{Act, with_menu};
 
@@ -35,8 +36,13 @@ impl Till {
 
     /// Full screen on or off (the sidebar goes with it).
     pub(super) fn toggle_full(self) {
-        toggle_full_screen();
-        self.full.update(|v| *v = !*v);
+        let full = !self.full.get_untracked();
+        current_window().set_mode(if full {
+            WindowMode::FullScreen
+        } else {
+            WindowMode::Normal
+        });
+        self.full.set(full);
     }
 
     /// Pays at once: cash, the exact amount, no payment screen (a sale

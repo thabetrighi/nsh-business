@@ -71,9 +71,9 @@
 - **خادم المزامنة:** `cargo test -p nb-server`؛ تجربة يدوية: `NB_SERVER_KEY=… NB_SERVER_DIR=… target/debug/nb-server` ثم التطبيق مع `NB_OPEN=sync`.
 
 ## الأدوات والأوامر
-- NSH: الإصدار المثبت `0.4.0` (لا ترقية دون ADR).
-- تثبيت NSH في بيئة Claude: nsh.dev محجوب من الشل؛ نزّل `https://github.com/longbridge/nsh/releases/download/v0.4.0/nsh-linux-x86_64.tar.gz` وفكّه في `~/.nsh` ثم اربط `~/.nsh/nsh/bin/nsh`.
-- متطلبات Linux: `apt-get install libgtk-4-dev clang xvfb imagemagick` (GTK ≥ 4.14).
+- NSH: الإصدار المثبت `0.5.1` (ADR-0010؛ لا ترقية دون ADR).
+- تثبيت NSH في بيئة Claude: nsh.dev محجوب من الشل؛ نزّل `https://github.com/longbridge/nsh/releases/download/v0.5.1/nsh-linux-x86_64.tar.gz` وفكّه في `~/.nsh` ثم اربط `~/.nsh/nsh/bin/nsh`.
+- متطلبات Linux: `apt-get install libgtk-4-dev clang xvfb imagemagick libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev` (GTK ≥ 4.14؛ GStreamer إلزامي منذ NSH 0.5).
 - متغيرات تطوير للتطبيق: `NB_LANG=ar|fr|en`، `NB_APPEARANCE=light|dark|system`، `NB_WINDOW=1360x860`، `NB_ROUTE=products|settings|design|customers`، `NB_OPEN=add_product|palette|till|printing`، `NB_ACCENT=blurple|ocean|emerald|teal|amber|rose|slate`، `NB_FONT=cairo|tajawal|almarai|readex|plex`، `NB_TEXT=s|m|l|xl`، `NB_DENSITY=compact|comfortable|spacious`، `NB_ACTIVITY=wholesale` (نشاط متجر العرض، لإظهار التوزيع). الإعدادات تُحفظ في `~/.local/share/default/storage.json` (احذفه بين اللقطات).
 - تشغيل واجهة دون شاشة: `Xvfb :99 &` ثم `DISPLAY=:99 GDK_BACKEND=x11 <binary>` ولقطة بـ `import -window root`.
 - اختبارات الواجهة: `nsh test <app-dir>`.
@@ -81,7 +81,8 @@
 
 ## مراجع NSH
 - فهرس الوثائق: https://nsh.dev/llms.txt (صفحات `.md` قابلة للقراءة بـ WebFetch).
-- مصدر الحزم المحلي: `~/.cargo/registry/src/*/nsh-core-0.4.0` (المرجع الأدق عند غموض الوثائق).
+- مصدر الحزم المحلي: `~/.cargo/registry/src/*/nsh-core-0.5.1` (المرجع الأدق عند غموض الوثائق).
+- **نوافذ سطح المكتب في 0.5:** `current_window().set_mode(WindowMode::FullScreen)` (`nsh_core::desktop::WindowMode`) بدل `toggle_full_screen()` المحذوفة.
 
 ## اللغة
 - **كل الردود والرسائل للمالك بالعربية دائماً** (طلب صريح من المالك)، وكذلك الوثائق والتقارير. الشيفرة والتعليقات والمعرّفات بالإنجليزية.

@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NSH_VERSION: v0.4.0
+  NSH_VERSION: v0.5.1
 
 jobs:
   windows:

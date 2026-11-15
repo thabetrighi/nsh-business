@@ -186,11 +186,14 @@ pub fn toast_layer(st: AppState, compact: bool) -> impl IntoElement {
     when(
         move || st.toast.with(Option::is_some),
         move || {
+            // A notice, not a control: presses go through it to what is
+            // under it (the pay button sits right there on the till).
             view()
                 .absolute()
                 .left_0()
                 .right_0()
                 .bottom(px(if compact { 88.0 } else { 28.0 }))
+                .pointer_events(nsh_core::PointerEvents::None)
                 .items_center()
                 .child(
                     view()

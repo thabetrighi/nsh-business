@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 env:
-  NSH_VERSION: v0.4.0
+  NSH_VERSION: v0.5.1
 
 jobs:
   android:
@@ -29,7 +29,7 @@ jobs:
 
       - name: Rust Android targets and host libraries
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-4-dev clang
+          sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-4-dev clang libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
           rustup toolchain install stable --profile minimal
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
